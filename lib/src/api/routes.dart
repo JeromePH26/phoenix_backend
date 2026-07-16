@@ -1,0 +1,156 @@
+import 'package:shelf/shelf.dart';
+import 'package:shelf_router/shelf_router.dart';
+
+import '../config/app_config.dart';
+import '../database/database.dart';
+import '../http/json_response.dart';
+import '../services/football_service.dart';
+import '../services/tennis_service.dart';
+
+class ApiRoutes {
+  ApiRoutes({
+    required this.config,
+    required this.database,
+    required this.football,
+    required this.tennis,
+  });
+
+  final AppConfig config;
+  final PhoenixDatabase database;
+  final FootballService football;
+  final TennisService tennis;
+
+  Router get router {
+    final router = Router();
+
+    router.get('/health', (Request request) async {
+      var databaseOk = false;
+      String? databaseError;
+      if (database.isConfigured) {
+        try {
+          databaseOk = await database.ping();
+        } catch (error) {
+          databaseError = error.toString();
+        }
+      }
+      return jsonResponse({
+        'status': 'ok',
+        'service': 'phoenix-backend',
+        'time': DateTime.now().toUtc().toIso8601String(),
+        'environment': config.environment,
+        'database': {
+          'configured': database.isConfigured,
+          'connected': databaseOk,
+          if (databaseError != null) 'error': databaseError,
+        },
+        'providers': {
+          'football': football.isConfigured,
+          'tennis': tennis.isConfigured,
+        },
+      });
+    });
+
+    router.get('/api/football/matches/today', (Request request) async {
+      try {
+        final matches = await football.matchesForDate(DateTime.now());
+        return jsonResponse({
+          'sport': 'football',
+          'date': _day(DateTime.now()),
+          'count': matches.length,
+          'matches': matches,
+        });
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 502);
+      }
+    });
+
+    router.get('/api/football/matches/<date>',
+        (Request request, String date) async {
+      final parsed = DateTime.tryParse(date);
+      if (parsed == null) {
+        return jsonResponse({'error': 'Datum muss YYYY-MM-DD sein.'},
+            statusCode: 400);
+      }
+      try {
+        final matches = await football.matchesForDate(parsed);
+        return jsonResponse({
+          'sport': 'football',
+          'date': _day(parsed),
+          'count': matches.length,
+          'matches': matches,
+        });
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 502);
+      }
+    });
+
+    router.get('/api/tennis/matches/today', (Request request) async {
+      try {
+        final matches = await tennis.matchesForDate(DateTime.now());
+        return jsonResponse({
+          'sport': 'tennis',
+          'date': _day(DateTime.now()),
+          'count': matches.length,
+          'matches': matches,
+        });
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 502);
+      }
+    });
+
+    router.get('/api/tennis/matches/<date>',
+        (Request request, String date) async {
+      final parsed = DateTime.tryParse(date);
+      if (parsed == null) {
+        return jsonResponse({'error': 'Datum muss YYYY-MM-DD sein.'},
+            statusCode: 400);
+      }
+      try {
+        final matches = await tennis.matchesForDate(parsed);
+        return jsonResponse({
+          'sport': 'tennis',
+          'date': _day(parsed),
+          'count': matches.length,
+          'matches': matches,
+        });
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 502);
+      }
+    });
+
+    router.get('/api/tips/today', (Request request) => jsonResponse({
+          'date': _day(DateTime.now()),
+          'football': null,
+          'tennis': null,
+          'status': 'Noch keine serverseitige Vollanalyse ausgeführt.',
+        }));
+
+    router.post('/api/admin/migrate', (Request request) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+      try {
+        await database.migrate();
+        return jsonResponse({'status': 'migration_complete'});
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
+    router.all('/<ignored|.*>', (Request request) =>
+        jsonResponse({'error': 'Route nicht gefunden.'}, statusCode: 404));
+
+    return router;
+  }
+
+  bool _isAdmin(Request request) {
+    if (config.adminToken.isEmpty) return false;
+    final header = request.headers['authorization'] ?? '';
+    return header == 'Bearer ${config.adminToken}';
+  }
+
+  String _day(DateTime value) =>
+      '${value.year.toString().padLeft(4, '0')}-'
+      '${value.month.toString().padLeft(2, '0')}-'
+      '${value.day.toString().padLeft(2, '0')}';
+}

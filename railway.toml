@@ -1,19 +1,9 @@
-import 'dart:convert';
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
 
-import 'package:shelf/shelf.dart';
-
-Response jsonResponse(
-  Object? body, {
-  int statusCode = 200,
-  Map<String, String>? headers,
-}) {
-  return Response(
-    statusCode,
-    body: jsonEncode(body),
-    headers: <String, String>{
-      'content-type': 'application/json; charset=utf-8',
-      'cache-control': 'no-store',
-      ...?headers,
-    },
-  );
-}
+[deploy]
+healthcheckPath = "/health"
+healthcheckTimeout = 120
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10

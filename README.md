@@ -1,115 +1,88 @@
-import 'dart:convert';
+# PHÖNIX Backend – Railway Stage 1
 
-import 'package:http/http.dart' as http;
+Dieses Paket ist der erste echte Serverstand der kompletten PHÖNIX-App.
 
-class TennisService {
-  TennisService({
-    required this.apiKey,
-    required this.accessLevel,
-    required this.language,
-    http.Client? client,
-  }) : _client = client ?? http.Client();
+## Bereits funktionsfähig
 
-  static const _baseUrl = 'https://api.sportradar.com/tennis';
-  final String apiKey;
-  final String accessLevel;
-  final String language;
-  final http.Client _client;
+- `GET /health`
+- PostgreSQL-Verbindung und automatische Tabellenmigration
+- `GET /api/football/matches/today`
+- `GET /api/football/matches/YYYY-MM-DD`
+- `GET /api/tennis/matches/today`
+- `GET /api/tennis/matches/YYYY-MM-DD`
+- `GET /api/tips/today` als vorbereitete Route
+- API-Schlüssel liegen ausschließlich als Railway-Variablen auf dem Server
+- Dockerfile und Railway-Healthcheck
 
-  bool get isConfigured => apiKey.trim().isNotEmpty;
+Die Fußball- und Tennis-Vollanalyse wird in Stage 2 in diesen Serverstand übertragen. Dieser erste Stand prüft zuerst sicher: Deployment, Datenbank, Schlüssel und App-zu-Server-Verbindung.
 
-  Future<List<Map<String, Object?>>> matchesForDate(DateTime date) async {
-    if (!isConfigured) {
-      throw StateError('SPORTRADAR_TENNIS_API_KEY fehlt.');
-    }
-    final day = _day(date);
-    final uri = Uri.parse(
-      '$_baseUrl/$accessLevel/v3/$language/schedules/$day/summaries.json',
-    ).replace(queryParameters: {'api_key': apiKey});
-    final response = await _client.get(uri, headers: {
-      'accept': 'application/json',
-    });
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw StateError('Sportradar Tennis HTTP ${response.statusCode}');
-    }
-    final decoded = jsonDecode(response.body);
-    if (decoded is! Map) throw StateError('Ungültige Tennis-Antwort.');
-    final summaries = decoded['summaries'];
-    if (summaries is! List) return const [];
+## Railway installieren
 
-    final values = <Map<String, Object?>>[];
-    for (final raw in summaries.whereType<Map>()) {
-      final row = Map<String, dynamic>.from(raw);
-      final sportEvent = _map(row['sport_event']);
-      final context = _map(sportEvent['sport_event_context']);
-      final competition = _map(context['competition']);
-      final season = _map(context['season']);
-      final round = _map(context['round']);
-      final status = _map(row['sport_event_status']);
-      final competitors = _maps(sportEvent['competitors']);
-      if (competitors.length < 2) continue;
-      final one = competitors[0];
-      final two = competitors[1];
-      final type = competition['type']?.toString().toLowerCase() ?? '';
-      if (type.contains('double') || type.contains('mixed')) continue;
+1. Neues GitHub-Repository erstellen, z. B. `phoenix-backend`.
+2. Den Inhalt dieses Ordners in das Repository hochladen.
+3. Railway-Projekt öffnen und `New Service -> GitHub Repo` wählen.
+4. Das Repository verbinden.
+5. PostgreSQL im selben Railway-Projekt hinzufügen.
+6. Im Backend-Service unter `Variables` anlegen:
 
-      values.add(<String, Object?>{
-        'id': sportEvent['id']?.toString() ?? '',
-        'startTime': sportEvent['start_time']?.toString() ?? '',
-        'status': status['status']?.toString() ?? 'scheduled',
-        'tournament': competition['name']?.toString() ??
-            season['name']?.toString() ??
-            '',
-        'tour': _tour(competition),
-        'surface': season['surface']?.toString() ?? 'unknown',
-        'round': round['name']?.toString() ?? round['number']?.toString() ?? '',
-        'bestOf': _intValue(sportEvent['best_of']) ?? 3,
-        'playerOneId': one['id']?.toString() ?? '',
-        'playerOne': one['name']?.toString() ?? '',
-        'playerOneCountry': one['country_code']?.toString() ?? '',
-        'playerTwoId': two['id']?.toString() ?? '',
-        'playerTwo': two['name']?.toString() ?? '',
-        'playerTwoCountry': two['country_code']?.toString() ?? '',
-        'score': _score(status),
-      });
-    }
-    values.removeWhere((row) => (row['id'] as String).isEmpty);
-    values.sort((a, b) =>
-        (a['startTime'] as String).compareTo(b['startTime'] as String));
-    return values;
-  }
+```text
+API_FOOTBALL_KEY=dein_key
+SPORTRADAR_TENNIS_API_KEY=dein_key
+SPORTRADAR_TENNIS_ACCESS_LEVEL=trial
+SPORTRADAR_TENNIS_LANGUAGE=de
+PHOENIX_ADMIN_TOKEN=eine_lange_zufaellige_zeichenfolge
+```
 
-  String _tour(Map<String, dynamic> competition) {
-    final text = '${competition['name'] ?? ''} ${competition['category'] ?? ''}'
-        .toLowerCase();
-    if (text.contains('wta')) return 'wta';
-    if (text.contains('challenger')) return 'challenger';
-    if (text.contains('itf')) return 'itf';
-    if (text.contains('atp')) return 'atp';
-    return 'other';
-  }
+`DATABASE_URL` wird über Railway automatisch vom PostgreSQL-Service referenziert. Falls nicht automatisch vorhanden: Im Backend-Service eine Variable Reference auf `Postgres.DATABASE_URL` anlegen.
 
-  String? _score(Map<String, dynamic> status) {
-    final home = status['home_score'];
-    final away = status['away_score'];
-    if (home == null || away == null) return null;
-    return '$home:$away';
-  }
+7. Unter `Settings -> Networking` eine öffentliche Domain erzeugen.
+8. Öffnen:
 
-  int? _intValue(Object? value) =>
-      value is num ? value.toInt() : int.tryParse(value?.toString() ?? '');
+```text
+https://DEINE-RAILWAY-DOMAIN/health
+```
 
-  Map<String, dynamic> _map(Object? value) =>
-      value is Map ? Map<String, dynamic>.from(value) : <String, dynamic>{};
+Erwartete Antwort:
 
-  List<Map<String, dynamic>> _maps(Object? value) => value is List
-      ? value.whereType<Map>().map(Map<String, dynamic>.from).toList()
-      : const [];
-
-  String _day(DateTime value) =>
-      '${value.year.toString().padLeft(4, '0')}-'
-      '${value.month.toString().padLeft(2, '0')}-'
-      '${value.day.toString().padLeft(2, '0')}';
-
-  void close() => _client.close();
+```json
+{
+  "status": "ok",
+  "service": "phoenix-backend",
+  "database": {"configured": true, "connected": true},
+  "providers": {"football": true, "tennis": true}
 }
+```
+
+## API testen
+
+```text
+https://DEINE-DOMAIN/api/football/matches/today
+https://DEINE-DOMAIN/api/tennis/matches/today
+```
+
+## Sicherheit
+
+- `.env` niemals auf GitHub hochladen.
+- API-Schlüssel niemals in Flutter eintragen.
+- `PHOENIX_ADMIN_TOKEN` lang und zufällig wählen.
+- PostgreSQL nicht öffentlich freigeben.
+
+## Flutter-Verbindung
+
+Unter `flutter_client/lib/services/phoenix_server_api.dart` liegt der erste Client-Service. In Flutter wird später nur die Railway-Adresse eingetragen:
+
+```dart
+final api = PhoenixServerApi(
+  baseUrl: 'https://deine-domain.up.railway.app',
+);
+```
+
+## Stage 2
+
+- Fußball-Engine und Monte Carlo auf den Server
+- Tennis-Phasen 1–5 und 100.000 Monte Carlo auf den Server
+- Analysen in PostgreSQL speichern und nach Matchbeginn sperren
+- automatische Tagesscans
+- Ergebnisabgleich
+- Tipp des Tages
+- Flutter-Repositories vollständig auf PHÖNIX API umstellen
