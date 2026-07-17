@@ -102,6 +102,22 @@ class ApiRoutes {
       },
     );
 
+
+    router.get(
+      '/api/football/live/<fixtureId|[0-9]+>',
+      (Request request, String fixtureId) async {
+        try {
+          final snapshot = await football.liveSnapshot(fixtureId);
+          return jsonResponse(snapshot);
+        } catch (error) {
+          return jsonResponse(
+            {'error': error.toString()},
+            statusCode: 502,
+          );
+        }
+      },
+    );
+
     router.post('/api/admin/football/scan/phase1', (Request request) async {
       if (!_isAdmin(request)) {
         return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
