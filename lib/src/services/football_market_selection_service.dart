@@ -5,12 +5,12 @@ class FootballMarketSelectionService {
 
   final PhoenixDatabase database;
 
-  static const modelVersion = 'market_selection_v1';
+  static const modelVersion = 'market_selection_trust_v1';
 
   Future<Map<String, Object?>> select({
     required int phaseTwoScanRunId,
     int limit = 1,
-    double minimumProbability = 55.0,
+    double minimumProbability = 0,
   }) async {
     final rows = await database.simulationRowsForSelection(
       phaseTwoScanRunId: phaseTwoScanRunId,
@@ -24,6 +24,7 @@ class FootballMarketSelectionService {
       final simulation = _map(row['result']);
       final probabilities = _map(simulation['probabilities']);
       final fairOdds = _map(simulation['fairOdds']);
+      final goalExpectations = _map(simulation['goalExpectations']);
 
       final candidates = <Map<String, Object?>>[
         _candidate(
@@ -77,8 +78,22 @@ class FootballMarketSelectionService {
       });
 
       final best = candidates.first;
+      final second = candidates.length > 1 ? candidates[1] : candidates.first;
+
       final bestProbability = _number(best['probability']) ?? 0;
-      final qualifies = bestProbability >= minimumProbability;
+      final secondProbability = _number(second['probability']) ?? 0;
+      final probabilityGap = (bestProbability - secondProbability).clamp(0, 100);
+
+      final dataQuality = _int(simulation['dataQuality'], fallback: 95);
+      final realXgAvailable = goalExpectations['realXgAvailable'] == true;
+
+      final trustScore = _trustScore(
+        bestProbability: bestProbability,
+        probabilityGap: probabilityGap.toDouble(),
+        dataQuality: dataQuality,
+        simulations: _int(simulation['simulations'], fallback: 10000),
+        realXgAvailable: realXgAvailable,
+      );
 
       final selection = <String, Object?>{
         'fixtureId': fixtureId,
@@ -87,24 +102,50 @@ class FootballMarketSelectionService {
         'league': simulation['league'],
         'kickoff': simulation['kickoff'],
         'modelVersion': modelVersion,
-        'minimumProbability': minimumProbability,
-        'bestMarket': best,
-        'qualifiesForTip': qualifies,
-        'tipStatus': qualifies ? 'candidate' : 'no_tip',
-        'reason': qualifies
-            ? 'höchste_modellwahrscheinlichkeit'
-            : 'keine_wahrscheinlichkeit_über_mindestgrenze',
+        'phoenixTip': {
+          'marketKey': best['key'],
+          'market': best['label'],
+          'probability': bestProbability,
+          'fairOdds': best['fairOdds'],
+        },
+        'trust': {
+          'score': trustScore,
+          'label': _trustLabel(trustScore),
+          'components': {
+            'modelProbability': bestProbability,
+            'probabilityGapToSecondMarket': _round(probabilityGap.toDouble()),
+            'dataQuality': dataQuality,
+            'simulationCount': _int(
+              simulation['simulations'],
+              fallback: 10000,
+            ),
+            'realXgAvailable': realXgAvailable,
+            'lineupConfirmed': false,
+            'aiContextVerified': false,
+          },
+        },
         'topMarkets': candidates.take(3).toList(),
         'value': {
-          'available': false,
-          'reason': 'Marktquote muss zuerst mit der Buchmacherquote verglichen werden.',
+          'status': 'not_checked',
           'marketOdds': null,
+          'minimumMarketOdds': 1.40,
+          'minimumValuePercent': 5.0,
           'valuePercent': null,
+          'isValueTip': false,
+          'reason':
+              'Die echte Buchmacherquote wurde noch nicht mit der fairen Quote verglichen.',
+        },
+        'display': {
+          'primaryLabel': 'PHÖNIX-TIPP',
+          'valueLabel': 'VALUE-TIPP',
+          'showPhoenixTip': true,
+          'showValueTip': false,
         },
         'warnings': [
-          'Die Auswahl basiert noch auf Simulation V1.',
-          'Ohne echte Marktquote ist dies noch kein Value-Tipp.',
-          'OpenAI-Kontext und bestätigte Aufstellungen sind noch nicht eingerechnet.',
+          if (!realXgAvailable)
+            'Noch keine echten xG/xGA-Daten vorhanden.',
+          'Bestätigte Aufstellung ist noch nicht eingerechnet.',
+          'OpenAI-Kontextprüfung ist noch nicht eingerechnet.',
         ],
       };
 
@@ -127,6 +168,49 @@ class FootballMarketSelectionService {
     };
   }
 
+  int _trustScore({
+    required double bestProbability,
+    required double probabilityGap,
+    required int dataQuality,
+    required int simulations,
+    required bool realXgAvailable,
+  }) {
+    // Vertrauen ist nicht identisch mit der Tipp-Wahrscheinlichkeit.
+    // 35 % Modellwahrscheinlichkeit
+    // 20 % Abstand zum zweitbesten Markt
+    // 30 % Datenqualität
+    // 10 % Simulationsstabilität
+    // 5 % echte xG/xGA-Verfügbarkeit
+    final probabilityComponent =
+        (bestProbability.clamp(0, 100) / 100) * 35;
+
+    final gapComponent =
+        (probabilityGap.clamp(0, 25) / 25) * 20;
+
+    final dataQualityComponent =
+        (dataQuality.clamp(0, 100) / 100) * 30;
+
+    final simulationComponent =
+        (simulations.clamp(1000, 10000) / 10000) * 10;
+
+    final xgComponent = realXgAvailable ? 5.0 : 0.0;
+
+    final score = probabilityComponent +
+        gapComponent +
+        dataQualityComponent +
+        simulationComponent +
+        xgComponent;
+
+    return score.round().clamp(0, 100);
+  }
+
+  String _trustLabel(int score) {
+    if (score >= 80) return 'Hohes Vertrauen';
+    if (score >= 65) return 'Gutes Vertrauen';
+    if (score >= 50) return 'Mittleres Vertrauen';
+    return 'Niedriges Vertrauen';
+  }
+
   Map<String, Object?> _candidate({
     required String key,
     required String label,
@@ -145,6 +229,14 @@ class FootballMarketSelectionService {
     if (value is num) return value.toDouble();
     return double.tryParse(value?.toString().replaceAll(',', '.') ?? '');
   }
+
+  int _int(Object? value, {int fallback = 0}) {
+    if (value is int) return value;
+    return int.tryParse(value?.toString() ?? '') ?? fallback;
+  }
+
+  double _round(double value) =>
+      double.parse(value.toStringAsFixed(2));
 
   Map<String, Object?> _map(Object? value) =>
       value is Map ? Map<String, Object?>.from(value) : <String, Object?>{};
