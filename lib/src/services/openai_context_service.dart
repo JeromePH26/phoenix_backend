@@ -15,6 +15,35 @@ class OpenAiContextService {
   String get apiKey => Platform.environment['OPENAI_API_KEY']?.trim() ?? '';
   String get model => Platform.environment['OPENAI_MODEL']?.trim() ?? '';
 
+
+  Future<void> runBackground({
+    required int jobId,
+    required int phaseTwoScanRunId,
+    int limit = 1,
+  }) async {
+    try {
+      final result = await verify(
+        phaseTwoScanRunId: phaseTwoScanRunId,
+        limit: limit,
+      );
+
+      final value = result['processed'];
+      final processed = value is int
+          ? value
+          : int.tryParse(value?.toString() ?? '') ?? 0;
+
+      await database.completeFootballAiContextJob(
+        jobId: jobId,
+        processed: processed,
+      );
+    } catch (error) {
+      await database.failFootballAiContextJob(
+        jobId: jobId,
+        error: error,
+      );
+    }
+  }
+
   Future<Map<String, Object?>> verify({required int phaseTwoScanRunId, int limit = 1}) async {
     if (apiKey.isEmpty || model.isEmpty) {
       throw StateError('OPENAI_API_KEY oder OPENAI_MODEL fehlt.');
