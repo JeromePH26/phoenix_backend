@@ -63,6 +63,39 @@ class ApiRoutes {
       });
     });
 
+
+    router.get('/api/football/provider', (Request request) async {
+      final path = request.url.queryParameters['path'];
+      if (path == null || path.trim().isEmpty) {
+        return jsonResponse(
+          {'error': 'Query-Parameter path fehlt.'},
+          statusCode: 400,
+        );
+      }
+
+      final query = Map<String, String>.from(
+        request.url.queryParameters,
+      )..remove('path');
+
+      try {
+        final payload = await football.providerRequest(
+          path: path,
+          query: query,
+        );
+        return jsonResponse(payload);
+      } on ArgumentError catch (error) {
+        return jsonResponse(
+          {'error': error.message?.toString() ?? error.toString()},
+          statusCode: 400,
+        );
+      } catch (error) {
+        return jsonResponse(
+          {'error': error.toString()},
+          statusCode: 502,
+        );
+      }
+    });
+
     router.get('/api/football/matches/today', (Request request) async {
       try {
         final matches = await football.matchesForDate(DateTime.now());
