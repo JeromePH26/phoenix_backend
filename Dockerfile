@@ -1,15 +1,14 @@
-FROM dart:stable AS build
+FROM dart:stable
+
 WORKDIR /app
+
 COPY pubspec.* ./
 RUN dart pub get
-COPY . .
-RUN dart compile exe bin/server.dart -o bin/server
 
-FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-WORKDIR /app
-COPY --from=build /runtime/ /
-COPY --from=build /app/bin/server /app/bin/server
+COPY . .
+
+RUN dart compile exe bin/server.dart -o /app/server
+
 EXPOSE 8080
-CMD ["/app/bin/server"]
+
+CMD ["/app/server"]
