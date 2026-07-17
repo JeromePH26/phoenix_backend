@@ -70,7 +70,7 @@ class FootballService {
   }) async {
     final result = <String, Object?>{};
 
-    Future<void> check(
+    Future<void> checkList(
       String key,
       String path,
       Map<String, String> query,
@@ -87,36 +87,108 @@ class FootballService {
       await Future<void>.delayed(pauseBetweenCalls);
     }
 
-    await check(
+    Future<void> checkTeamStatistics(
+      String prefix,
+      String teamId,
+    ) async {
+      try {
+        final statistics = await _getResponseObject(
+          '/teams/statistics',
+          {
+            'league': leagueId,
+            'season': season.toString(),
+            'team': teamId,
+          },
+        );
+
+        final hasStatistics = statistics.isNotEmpty;
+        result['${prefix}TeamStatistics'] = hasStatistics;
+
+        if (hasStatistics) {
+          final goals = _map(statistics['goals']);
+          final goalsFor = _map(goals['for']);
+          final goalsAgainst = _map(goals['against']);
+          final goalsForAverage = _map(goalsFor['average']);
+          final goalsAgainstAverage = _map(goalsAgainst['average']);
+          final fixtures = _map(statistics['fixtures']);
+
+          result['${prefix}Played'] = fixtures['played'];
+          result['${prefix}GoalsForAverageTotal'] =
+              goalsForAverage['total'];
+          result['${prefix}GoalsForAverageHome'] =
+              goalsForAverage['home'];
+          result['${prefix}GoalsForAverageAway'] =
+              goalsForAverage['away'];
+          result['${prefix}GoalsAgainstAverageTotal'] =
+              goalsAgainstAverage['total'];
+          result['${prefix}GoalsAgainstAverageHome'] =
+              goalsAgainstAverage['home'];
+          result['${prefix}GoalsAgainstAverageAway'] =
+              goalsAgainstAverage['away'];
+          result['${prefix}Form'] = statistics['form'];
+        }
+      } catch (error) {
+        result['${prefix}TeamStatistics'] = false;
+        result['${prefix}TeamStatisticsError'] = error.toString();
+      }
+
+      await Future<void>.delayed(pauseBetweenCalls);
+    }
+
+    await checkList(
       'standings',
       '/standings',
       {'league': leagueId, 'season': season.toString()},
     );
-    await check(
+
+    await checkList(
       'homeRecent',
       '/fixtures',
-      {'team': homeTeamId, 'season': season.toString(), 'last': '5'},
+      {
+        'team': homeTeamId,
+        'season': season.toString(),
+        'last': '5',
+      },
     );
-    await check(
+
+    await checkList(
       'awayRecent',
       '/fixtures',
-      {'team': awayTeamId, 'season': season.toString(), 'last': '5'},
+      {
+        'team': awayTeamId,
+        'season': season.toString(),
+        'last': '5',
+      },
     );
-    await check(
+
+    await checkList(
       'odds',
       '/odds',
       {'fixture': fixtureId},
     );
-    await check(
+
+    await checkList(
       'injuries',
       '/injuries',
       {'fixture': fixtureId},
     );
-    await check(
+
+    await checkList(
       'h2h',
       '/fixtures/headtohead',
-      {'h2h': '$homeTeamId-$awayTeamId', 'last': '5'},
+      {
+        'h2h': '$homeTeamId-$awayTeamId',
+        'last': '5',
+      },
     );
+
+    await checkTeamStatistics('home', homeTeamId);
+    await checkTeamStatistics('away', awayTeamId);
+
+    // API-Football liefert in diesem Ablauf keine echten xG/xGA-Werte.
+    // Deshalb bleibt das Feld ausdrücklich false, statt Tore als xG auszugeben.
+    result['realXgAvailable'] = false;
+    result['xgSource'] = 'not_available_from_api_football';
 
     return result;
   }
@@ -164,6 +236,48 @@ class FootballService {
         .whereType<Map>()
         .map((raw) => Map<String, Object?>.from(raw))
         .toList();
+  }
+
+  Future<Map<String, Object?>> _getResponseObject(
+    String path,
+    Map<String, String> queryParameters,
+  ) async {
+    if (!isConfigured) {
+      throw StateError('API_FOOTBALL_KEY fehlt.');
+    }
+
+    final uri = Uri.parse('$_baseUrl$path').replace(
+      queryParameters: queryParameters,
+    );
+
+    final response = await _client.get(
+      uri,
+      headers: {
+        'x-apisports-key': apiKey,
+        'accept': 'application/json',
+      },
+    );
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw StateError(
+        'Football API HTTP ${response.statusCode} bei $path.',
+      );
+    }
+
+    final decoded = jsonDecode(response.body);
+    if (decoded is! Map) {
+      throw StateError('Ungültige Football-Antwort bei $path.');
+    }
+
+    final apiErrors = decoded['errors'];
+    if (apiErrors is Map && apiErrors.isNotEmpty) {
+      throw StateError('Football API Fehler bei $path: $apiErrors');
+    }
+
+    final object = decoded['response'];
+    if (object is! Map) return <String, Object?>{};
+
+    return Map<String, Object?>.from(object);
   }
 
   Map<String, dynamic> _map(Object? value) =>
