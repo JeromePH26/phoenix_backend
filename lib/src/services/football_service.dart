@@ -61,20 +61,12 @@ class FootballService {
 
 
   Future<Map<String, Object?>> coverageForFixture({
-    required String fixtureId,
-    required String leagueId,
-    required int season,
-    required String homeTeamId,
-    required String awayTeamId,
-    Duration pauseBetweenCalls = const Duration(seconds: 7),
+    required String fixtureId, required String leagueId, required int season,
+    required String homeTeamId, required String awayTeamId,
+    Duration pauseBetweenCalls = const Duration(seconds: 4),
   }) async {
     final result = <String, Object?>{};
-
-    Future<void> check(
-      String key,
-      String path,
-      Map<String, String> query,
-    ) async {
+    Future<void> check(String key, String path, Map<String, String> query) async {
       try {
         final rows = await _getResponseList(path, query);
         result[key] = rows.isNotEmpty;
@@ -85,29 +77,10 @@ class FootballService {
       }
       await Future<void>.delayed(pauseBetweenCalls);
     }
-
-    await check('standings', '/standings', {
-      'league': leagueId,
-      'season': season.toString(),
-    });
-    await check('homeRecent', '/fixtures', {
-      'team': homeTeamId,
-      'season': season.toString(),
-      'last': '5',
-    });
-    await check('awayRecent', '/fixtures', {
-      'team': awayTeamId,
-      'season': season.toString(),
-      'last': '5',
-    });
-    await check('injuries', '/injuries', {'fixture': fixtureId});
+    await check('standings', '/standings', {'league': leagueId, 'season': season.toString()});
+    await check('homeRecent', '/fixtures', {'team': homeTeamId, 'season': season.toString(), 'last': '5'});
+    await check('awayRecent', '/fixtures', {'team': awayTeamId, 'season': season.toString(), 'last': '5'});
     await check('odds', '/odds', {'fixture': fixtureId});
-    await check('h2h', '/fixtures/headtohead', {
-      'h2h': '$homeTeamId-$awayTeamId',
-      'last': '5',
-    });
-    await check('lineups', '/fixtures/lineups', {'fixture': fixtureId});
-
     return result;
   }
 
