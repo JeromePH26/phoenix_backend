@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:shelf/shelf.dart';
 import 'package:shelf_router/shelf_router.dart';
 
@@ -128,51 +130,37 @@ class ApiRoutes {
 
 
     router.post('/api/admin/football/scan/phase2', (Request request) async {
-      if (!_isAdmin(request)) {
-        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
-      }
-
-      final phaseOneScanRunId = int.tryParse(
-        request.url.queryParameters['scanRunId'] ?? '',
-      );
-      final limit = int.tryParse(
-            request.url.queryParameters['limit'] ?? '',
-          ) ??
-          1;
-      final minimumDataQuality = int.tryParse(
-            request.url.queryParameters['minimumDataQuality'] ?? '',
-          ) ??
-          50;
-
-      if (limit < 1 || limit > 20) {
-        return jsonResponse(
-          {'error': 'limit muss zwischen 1 und 20 liegen.'},
-          statusCode: 400,
-        );
-      }
-
-      if (minimumDataQuality < 0 || minimumDataQuality > 100) {
-        return jsonResponse(
-          {'error': 'minimumDataQuality muss zwischen 0 und 100 liegen.'},
-          statusCode: 400,
-        );
-      }
-
+      if (!_isAdmin(request)) return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      final phaseOneScanRunId = int.tryParse(request.url.queryParameters['scanRunId'] ?? '');
+      final limit = int.tryParse(request.url.queryParameters['limit'] ?? '') ?? 1;
+      final minimumDataQuality = int.tryParse(request.url.queryParameters['minimumDataQuality'] ?? '') ?? 50;
+      if (limit < 1 || limit > 20) return jsonResponse({'error': 'limit muss zwischen 1 und 20 liegen.'}, statusCode: 400);
       try {
-        final scanner = FootballPhaseTwoScanService(
-          database: database,
-          football: football,
-        );
-        final result = await scanner.run(
-          phaseOneScanRunId: phaseOneScanRunId,
-          limit: limit,
-          minimumDataQuality: minimumDataQuality,
-        );
-        return jsonResponse(result);
+        final scanner = FootballPhaseTwoScanService(database: database, football: football);
+        final prepared = await scanner.prepare(
+          phaseOneScanRunId: phaseOneScanRunId, limit: limit, minimumDataQuality: minimumDataQuality);
+        if (prepared['started'] != true) return jsonResponse(prepared);
+        unawaited(scanner.processPrepared(prepared));
+        return jsonResponse({
+          'status': 'started', 'phase': 2, 'scanRunId': prepared['scanRunId'],
+          'limit': prepared['limit'], 'minimumDataQuality': prepared['minimumDataQuality'],
+          'statusUrl': '/api/admin/football/scan/phase2/${prepared['scanRunId']}',
+        }, statusCode: 202);
       } catch (error) {
         return jsonResponse({'error': error.toString()}, statusCode: 502);
       }
     });
+
+    router.get('/api/admin/football/scan/phase2/<scanRunId|[0-9]+>',
+      (Request request, String scanRunId) async {
+        if (!_isAdmin(request)) return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+        final id = int.tryParse(scanRunId);
+        if (id == null) return jsonResponse({'error': 'Ungültige Scan-ID.'}, statusCode: 400);
+        final status = await database.footballScanRunStatus(id);
+        if (status == null) return jsonResponse({'error': 'Scan nicht gefunden.'}, statusCode: 404);
+        return jsonResponse(status);
+      },
+    );
 
     router.post('/api/admin/football/leagues/seed-start', (Request request) async {
       if (!_isAdmin(request)) {
