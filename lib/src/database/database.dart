@@ -856,6 +856,67 @@ class PhoenixDatabase {
     };
   }
 
+
+  Future<List<Map<String, Object?>>> footballPhaseTwoResults(
+    int scanRunId,
+  ) async {
+    final db = await connection();
+
+    final result = await db.execute(
+      Sql.named('''
+        SELECT
+          fixture_id,
+          league_id,
+          season,
+          data_quality,
+          analysis_allowed,
+          availability::text AS availability_text,
+          payload::text AS payload_text,
+          created_at,
+          updated_at
+        FROM football_phase_two_results
+        WHERE scan_run_id = @scan_run_id
+        ORDER BY data_quality DESC, fixture_id
+      '''),
+      parameters: {'scan_run_id': scanRunId},
+    );
+
+    return result.map((row) {
+      final map = Map<String, Object?>.from(row.toColumnMap());
+
+      final availabilityText =
+          map.remove('availability_text')?.toString() ?? '{}';
+      final payloadText = map.remove('payload_text')?.toString() ?? '{}';
+
+      final availabilityDecoded = jsonDecode(availabilityText);
+      final payloadDecoded = jsonDecode(payloadText);
+
+      final payload = payloadDecoded is Map
+          ? Map<String, Object?>.from(payloadDecoded)
+          : <String, Object?>{};
+
+      for (final key in ['created_at', 'updated_at']) {
+        final value = map[key];
+        if (value is DateTime) {
+          map[key] = value.toUtc().toIso8601String();
+        }
+      }
+
+      return {
+        ...map,
+        'match': {
+          'homeTeam': payload['homeTeam']?.toString() ?? '',
+          'awayTeam': payload['awayTeam']?.toString() ?? '',
+          'league': payload['league']?.toString() ?? '',
+          'kickoff': payload['kickoff']?.toString() ?? '',
+        },
+        'availability': availabilityDecoded is Map
+            ? Map<String, Object?>.from(availabilityDecoded)
+            : <String, Object?>{},
+      };
+    }).toList();
+  }
+
   Future<void> close() async {
     await _connection?.close();
     _connection = null;
