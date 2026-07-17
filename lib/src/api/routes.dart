@@ -124,6 +124,41 @@ class ApiRoutes {
       }
     });
 
+
+    router.post('/api/admin/football/leagues/seed-start', (Request request) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+
+      final season = int.tryParse(
+            request.url.queryParameters['season'] ?? '',
+          ) ??
+          2026;
+
+      try {
+        await database.seedFootballStartLeagues(season: season);
+        return jsonResponse({
+          'status': 'start_leagues_whitelisted',
+          'season': season,
+          'count': 10,
+          'leagueIds': [
+            '39',
+            '61',
+            '78',
+            '79',
+            '80',
+            '88',
+            '94',
+            '135',
+            '140',
+            '144',
+          ],
+        });
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
     router.get('/api/admin/football/leagues', (Request request) async {
       if (!_isAdmin(request)) {
         return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
