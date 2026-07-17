@@ -9,6 +9,7 @@ import '../http/json_response.dart';
 import '../services/football_phase_one_scan_service.dart';
 import '../services/football_phase_two_scan_service.dart';
 import '../services/football_engine_input_service.dart';
+import '../services/football_simulation_service.dart';
 import '../services/football_service.dart';
 import '../services/tennis_service.dart';
 
@@ -258,6 +259,79 @@ router.get(
     });
   },
 );
+
+
+    router.post('/api/admin/football/engine/simulate', (Request request) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+
+      final phaseTwoScanRunId = int.tryParse(
+        request.url.queryParameters['phase2ScanRunId'] ?? '',
+      );
+      final limit = int.tryParse(
+            request.url.queryParameters['limit'] ?? '',
+          ) ??
+          1;
+      final simulations = int.tryParse(
+            request.url.queryParameters['simulations'] ?? '',
+          ) ??
+          10000;
+
+      if (phaseTwoScanRunId == null) {
+        return jsonResponse(
+          {'error': 'phase2ScanRunId fehlt.'},
+          statusCode: 400,
+        );
+      }
+
+      if (limit < 1 || limit > 20) {
+        return jsonResponse(
+          {'error': 'limit muss zwischen 1 und 20 liegen.'},
+          statusCode: 400,
+        );
+      }
+
+      if (simulations < 1000 || simulations > 100000) {
+        return jsonResponse(
+          {'error': 'simulations muss zwischen 1000 und 100000 liegen.'},
+          statusCode: 400,
+        );
+      }
+
+      try {
+        final service = FootballSimulationService(database: database);
+        final result = await service.run(
+          phaseTwoScanRunId: phaseTwoScanRunId,
+          limit: limit,
+          simulations: simulations,
+        );
+        return jsonResponse(result);
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
+    router.get(
+      '/api/admin/football/engine/simulations/<scanRunId|[0-9]+>',
+      (Request request, String scanRunId) async {
+        if (!_isAdmin(request)) {
+          return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+        }
+
+        final id = int.tryParse(scanRunId);
+        if (id == null) {
+          return jsonResponse({'error': 'Ungültige Scan-ID.'}, statusCode: 400);
+        }
+
+        final results = await database.footballSimulationResults(id);
+        return jsonResponse({
+          'phaseTwoScanRunId': id,
+          'count': results.length,
+          'results': results,
+        });
+      },
+    );
 
     router.post('/api/admin/football/leagues/seed-start', (Request request) async {
       if (!_isAdmin(request)) {
