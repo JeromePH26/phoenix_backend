@@ -10,6 +10,7 @@ import '../services/football_phase_one_scan_service.dart';
 import '../services/football_phase_two_scan_service.dart';
 import '../services/football_engine_input_service.dart';
 import '../services/football_simulation_service.dart';
+import '../services/football_market_selection_service.dart';
 import '../services/football_service.dart';
 import '../services/tennis_service.dart';
 
@@ -329,6 +330,82 @@ router.get(
           'phaseTwoScanRunId': id,
           'count': results.length,
           'results': results,
+        });
+      },
+    );
+
+
+    router.post(
+      '/api/admin/football/engine/select-market',
+      (Request request) async {
+        if (!_isAdmin(request)) {
+          return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+        }
+
+        final phaseTwoScanRunId = int.tryParse(
+          request.url.queryParameters['phase2ScanRunId'] ?? '',
+        );
+        final limit = int.tryParse(
+              request.url.queryParameters['limit'] ?? '',
+            ) ??
+            1;
+        final minimumProbability = double.tryParse(
+              request.url.queryParameters['minimumProbability'] ?? '',
+            ) ??
+            55.0;
+
+        if (phaseTwoScanRunId == null) {
+          return jsonResponse(
+            {'error': 'phase2ScanRunId fehlt.'},
+            statusCode: 400,
+          );
+        }
+
+        if (limit < 1 || limit > 20) {
+          return jsonResponse(
+            {'error': 'limit muss zwischen 1 und 20 liegen.'},
+            statusCode: 400,
+          );
+        }
+
+        if (minimumProbability < 0 || minimumProbability > 100) {
+          return jsonResponse(
+            {'error': 'minimumProbability muss zwischen 0 und 100 liegen.'},
+            statusCode: 400,
+          );
+        }
+
+        try {
+          final service = FootballMarketSelectionService(database: database);
+          final result = await service.select(
+            phaseTwoScanRunId: phaseTwoScanRunId,
+            limit: limit,
+            minimumProbability: minimumProbability,
+          );
+          return jsonResponse(result);
+        } catch (error) {
+          return jsonResponse({'error': error.toString()}, statusCode: 500);
+        }
+      },
+    );
+
+    router.get(
+      '/api/admin/football/engine/selections/<scanRunId|[0-9]+>',
+      (Request request, String scanRunId) async {
+        if (!_isAdmin(request)) {
+          return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+        }
+
+        final id = int.tryParse(scanRunId);
+        if (id == null) {
+          return jsonResponse({'error': 'Ungültige Scan-ID.'}, statusCode: 400);
+        }
+
+        final selections = await database.footballMarketSelections(id);
+        return jsonResponse({
+          'phaseTwoScanRunId': id,
+          'count': selections.length,
+          'selections': selections,
         });
       },
     );
