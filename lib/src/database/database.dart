@@ -311,9 +311,27 @@ await db.execute('''
       ON football_simulation_results (fixture_id, updated_at DESC)
     ''');
 
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS football_market_selections (
+        phase_two_scan_run_id BIGINT NOT NULL,
+        fixture_id TEXT NOT NULL,
+        model_version TEXT NOT NULL,
+        selection JSONB NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (phase_two_scan_run_id, fixture_id)
+      )
+    ''');
+
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_football_market_selection_fixture
+      ON football_market_selections (fixture_id, updated_at DESC)
+    ''');
+
     await db.execute('''
       INSERT INTO app_meta (key, value)
-      VALUES ('schema_version', '5')
+      VALUES ('schema_version', '6')
       ON CONFLICT (key) DO UPDATE
       SET value = EXCLUDED.value, updated_at = NOW()
     ''');
@@ -1228,6 +1246,119 @@ Future<List<Map<String, Object?>>> footballEngineInputs(
       }
 
       map['result'] = decoded is Map
+          ? Map<String, Object?>.from(decoded)
+          : <String, Object?>{};
+      return map;
+    }).toList();
+  }
+
+
+  Future<List<Map<String, Object?>>> simulationRowsForSelection({
+    required int phaseTwoScanRunId,
+    int limit = 1,
+  }) async {
+    final db = await connection();
+    final safeLimit = limit.clamp(1, 20);
+
+    final result = await db.execute(
+      Sql.named('''
+        SELECT
+          fixture_id,
+          model_version,
+          result::text AS result_text
+        FROM football_simulation_results
+        WHERE phase_two_scan_run_id = @scan_run_id
+        ORDER BY fixture_id
+        LIMIT @limit
+      '''),
+      parameters: {
+        'scan_run_id': phaseTwoScanRunId,
+        'limit': safeLimit,
+      },
+    );
+
+    return result.map((row) {
+      final map = Map<String, Object?>.from(row.toColumnMap());
+      final text = map.remove('result_text')?.toString() ?? '{}';
+      final decoded = jsonDecode(text);
+      map['result'] = decoded is Map
+          ? Map<String, Object?>.from(decoded)
+          : <String, Object?>{};
+      return map;
+    }).toList();
+  }
+
+  Future<void> saveFootballMarketSelection({
+    required int phaseTwoScanRunId,
+    required String fixtureId,
+    required String modelVersion,
+    required Map<String, Object?> selection,
+  }) async {
+    final db = await connection();
+
+    await db.execute(
+      Sql.named('''
+        INSERT INTO football_market_selections (
+          phase_two_scan_run_id,
+          fixture_id,
+          model_version,
+          selection,
+          updated_at
+        )
+        VALUES (
+          @phase_two_scan_run_id,
+          @fixture_id,
+          @model_version,
+          CAST(@selection AS JSONB),
+          NOW()
+        )
+        ON CONFLICT (phase_two_scan_run_id, fixture_id) DO UPDATE SET
+          model_version = EXCLUDED.model_version,
+          selection = EXCLUDED.selection,
+          updated_at = NOW()
+      '''),
+      parameters: {
+        'phase_two_scan_run_id': phaseTwoScanRunId,
+        'fixture_id': fixtureId,
+        'model_version': modelVersion,
+        'selection': jsonEncode(selection),
+      },
+    );
+  }
+
+  Future<List<Map<String, Object?>>> footballMarketSelections(
+    int phaseTwoScanRunId,
+  ) async {
+    final db = await connection();
+
+    final result = await db.execute(
+      Sql.named('''
+        SELECT
+          fixture_id,
+          model_version,
+          selection::text AS selection_text,
+          created_at,
+          updated_at
+        FROM football_market_selections
+        WHERE phase_two_scan_run_id = @scan_run_id
+        ORDER BY fixture_id
+      '''),
+      parameters: {'scan_run_id': phaseTwoScanRunId},
+    );
+
+    return result.map((row) {
+      final map = Map<String, Object?>.from(row.toColumnMap());
+      final text = map.remove('selection_text')?.toString() ?? '{}';
+      final decoded = jsonDecode(text);
+
+      for (final key in ['created_at', 'updated_at']) {
+        final value = map[key];
+        if (value is DateTime) {
+          map[key] = value.toUtc().toIso8601String();
+        }
+      }
+
+      map['selection'] = decoded is Map
           ? Map<String, Object?>.from(decoded)
           : <String, Object?>{};
       return map;
