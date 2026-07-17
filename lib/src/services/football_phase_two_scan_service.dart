@@ -62,10 +62,12 @@ class FootballPhaseTwoScanService {
 
   int _quality(Map<String, Object?> a) {
     var score = 10;
-    if (a['standings'] == true) score += 25;
-    if (a['homeRecent'] == true) score += 20;
-    if (a['awayRecent'] == true) score += 20;
-    if (a['odds'] == true) score += 25;
+    if (a['standings'] == true) score += 20;
+    if (a['homeRecent'] == true) score += 15;
+    if (a['awayRecent'] == true) score += 15;
+    if (a['odds'] == true) score += 20;
+    if (a['injuries'] == true) score += 10;
+    if (a['h2h'] == true) score += 10;
     return score.clamp(0, 100);
   }
   Map<String, Object?> _map(Object? v) => v is Map ? Map<String, Object?>.from(v) : <String, Object?>{};
