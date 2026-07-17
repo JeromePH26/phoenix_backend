@@ -1961,6 +1961,154 @@ Future<List<Map<String, Object?>>> footballEngineInputs(
     return map;
   }
 
+
+  Future<List<Map<String, Object?>>> pendingFootballTips({
+    DateTime? date,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT
+          phase_two_scan_run_id,
+          fixture_id,
+          market_key,
+          market_label,
+          market_odds,
+          assigned_units,
+          payload::text AS payload_text
+        FROM football_final_tips
+        WHERE result_status = 'pending'
+          AND (
+            @tip_date IS NULL
+            OR tip_date = CAST(@tip_date AS DATE)
+          )
+        ORDER BY kickoff
+      '''),
+      parameters: {
+        'tip_date': date?.toIso8601String().substring(0, 10),
+      },
+    );
+
+    return result.map((row) {
+      final map = Map<String, Object?>.from(row.toColumnMap());
+      final decoded = jsonDecode(
+        map.remove('payload_text')?.toString() ?? '{}',
+      );
+      map['payload'] = decoded is Map
+          ? Map<String, Object?>.from(decoded)
+          : <String, Object?>{};
+      return map;
+    }).toList();
+  }
+
+  Future<void> settleFootballTip({
+    required int phaseTwoScanRunId,
+    required String fixtureId,
+    required int homeScore,
+    required int awayScore,
+    required String resultStatus,
+    required double profitUnits,
+  }) async {
+    final db = await connection();
+
+    final current = await db.execute(
+      Sql.named('''
+        SELECT payload::text AS payload_text
+        FROM football_final_tips
+        WHERE phase_two_scan_run_id = @scan_run_id
+          AND fixture_id = @fixture_id
+        LIMIT 1
+      '''),
+      parameters: {
+        'scan_run_id': phaseTwoScanRunId,
+        'fixture_id': fixtureId,
+      },
+    );
+
+    if (current.isEmpty) return;
+
+    final decoded = jsonDecode(
+      current.first.toColumnMap()['payload_text']?.toString() ?? '{}',
+    );
+    final payload = decoded is Map
+        ? Map<String, Object?>.from(decoded)
+        : <String, Object?>{};
+
+    payload['homeScore'] = homeScore;
+    payload['awayScore'] = awayScore;
+    payload['resultStatus'] = resultStatus;
+    payload['profitUnits'] = profitUnits;
+    payload['settledAt'] = DateTime.now().toUtc().toIso8601String();
+
+    await db.execute(
+      Sql.named('''
+        UPDATE football_final_tips
+        SET home_score = @home_score,
+            away_score = @away_score,
+            result_status = @result_status,
+            profit_units = @profit_units,
+            settled_at = NOW(),
+            payload = CAST(@payload AS JSONB),
+            updated_at = NOW()
+        WHERE phase_two_scan_run_id = @scan_run_id
+          AND fixture_id = @fixture_id
+      '''),
+      parameters: {
+        'scan_run_id': phaseTwoScanRunId,
+        'fixture_id': fixtureId,
+        'home_score': homeScore,
+        'away_score': awayScore,
+        'result_status': resultStatus,
+        'profit_units': profitUnits,
+        'payload': jsonEncode(payload),
+      },
+    );
+  }
+
+  Future<Map<String, Object?>> footballPerformanceSummary() async {
+    final db = await connection();
+    final result = await db.execute('''
+      SELECT
+        COUNT(*) FILTER (
+          WHERE result_status IN ('won', 'lost', 'push')
+        ) AS settled_tips,
+        COUNT(*) FILTER (WHERE result_status = 'won') AS won,
+        COUNT(*) FILTER (WHERE result_status = 'lost') AS lost,
+        COUNT(*) FILTER (WHERE result_status = 'push') AS push,
+        COALESCE(SUM(assigned_units) FILTER (
+          WHERE result_status IN ('won', 'lost', 'push')
+            AND is_value_tip = TRUE
+        ), 0) AS staked_units,
+        COALESCE(SUM(profit_units) FILTER (
+          WHERE is_value_tip = TRUE
+        ), 0) AS profit_units
+      FROM football_final_tips
+    ''');
+
+    final map = Map<String, Object?>.from(result.first.toColumnMap());
+
+    double number(Object? value) {
+      if (value is num) return value.toDouble();
+      return double.tryParse(value?.toString() ?? '') ?? 0;
+    }
+
+    final staked = number(map['staked_units']);
+    final profit = number(map['profit_units']);
+    final settled = number(map['settled_tips']).toInt();
+    final won = number(map['won']).toInt();
+
+    return {
+      'settledTips': settled,
+      'won': won,
+      'lost': number(map['lost']).toInt(),
+      'push': number(map['push']).toInt(),
+      'hitRatePercent': settled == 0 ? 0 : (won / settled) * 100,
+      'stakedUnits': staked,
+      'profitUnits': profit,
+      'roiPercent': staked == 0 ? 0 : (profit / staked) * 100,
+    };
+  }
+
   Future<void> close() async {
     await _connection?.close();
     _connection = null;
