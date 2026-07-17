@@ -96,7 +96,7 @@ class FootballFinalizationService {
         'profitUnits': null,
         'resultStatus': 'pending',
         'engineRule':
-            'Die Engine berechnet Wahrscheinlichkeit, faire Quote und Value. OpenAI prüft ausschließlich den aktuellen Kontext.',
+            'Die Engine berechnet Wahrscheinlichkeit, faire Quote und Value. Gemini prüft ausschließlich den aktuellen Kontext.',
       };
 
       await database.saveFootballFinalTip(
