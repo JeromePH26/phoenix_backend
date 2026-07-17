@@ -134,6 +134,13 @@ class FootballValueService {
               betName: betName,
               valueLabel: label,
             )) {
+              if (_isSuspiciousOdds(
+                marketKey: marketKey,
+                odds: odd,
+              )) {
+                continue;
+              }
+
               if (best == null || odd > best) {
                 best = odd;
               }
@@ -151,59 +158,128 @@ class FootballValueService {
     required String betName,
     required String valueLabel,
   }) {
+    final fullTimeMarket = _isFullTimeMarket(betName);
+
     switch (marketKey) {
       case 'homeWin':
-        return _isMatchWinner(betName) &&
+        return fullTimeMarket &&
+            _isMatchWinner(betName) &&
             (valueLabel == 'home' ||
                 valueLabel == '1' ||
-                valueLabel.contains('home'));
+                valueLabel == 'home win');
       case 'draw':
-        return _isMatchWinner(betName) &&
+        return fullTimeMarket &&
+            _isMatchWinner(betName) &&
             (valueLabel == 'draw' ||
-                valueLabel == 'x' ||
-                valueLabel.contains('draw'));
+                valueLabel == 'x');
       case 'awayWin':
-        return _isMatchWinner(betName) &&
+        return fullTimeMarket &&
+            _isMatchWinner(betName) &&
             (valueLabel == 'away' ||
                 valueLabel == '2' ||
-                valueLabel.contains('away'));
+                valueLabel == 'away win');
       case 'over25':
-        return _isGoalsMarket(betName) &&
-            (valueLabel.contains('over 2.5') ||
-                valueLabel.contains('over 2,5'));
+        return fullTimeMarket &&
+            _isExactGoalsOverUnderMarket(betName) &&
+            _isExactLine(valueLabel, over: true, line: 2.5);
       case 'under25':
-        return _isGoalsMarket(betName) &&
-            (valueLabel.contains('under 2.5') ||
-                valueLabel.contains('under 2,5'));
+        return fullTimeMarket &&
+            _isExactGoalsOverUnderMarket(betName) &&
+            _isExactLine(valueLabel, over: false, line: 2.5);
       case 'bttsYes':
-        return _isBttsMarket(betName) &&
-            (valueLabel == 'yes' ||
-                valueLabel == 'ja' ||
-                valueLabel.contains('yes'));
+        return fullTimeMarket &&
+            _isBttsMarket(betName) &&
+            (valueLabel == 'yes' || valueLabel == 'ja');
       case 'bttsNo':
-        return _isBttsMarket(betName) &&
-            (valueLabel == 'no' ||
-                valueLabel == 'nein' ||
-                valueLabel.contains('no'));
+        return fullTimeMarket &&
+            _isBttsMarket(betName) &&
+            (valueLabel == 'no' || valueLabel == 'nein');
       default:
         return false;
     }
   }
 
-  bool _isMatchWinner(String value) =>
-      value.contains('match winner') ||
-      value == 'winner' ||
-      value.contains('1x2');
+  bool _isFullTimeMarket(String betName) {
+    final blocked = <String>[
+      '1st half',
+      'first half',
+      '2nd half',
+      'second half',
+      'half time',
+      'halftime',
+      'team total',
+      'home team total',
+      'away team total',
+      'asian',
+      'exact',
+      'correct score',
+      'goal range',
+      'corners',
+      'cards',
+    ];
 
-  bool _isGoalsMarket(String value) =>
-      value.contains('goals over/under') ||
-      value.contains('over/under') ||
-      value.contains('total goals');
+    if (blocked.any(betName.contains)) return false;
+
+    return betName.contains('full time') ||
+        betName.contains('match') ||
+        betName == 'goals over/under' ||
+        betName == 'over/under' ||
+        betName == 'both teams score' ||
+        betName == 'both teams to score' ||
+        betName == 'match winner' ||
+        betName == 'winner' ||
+        betName == '1x2';
+  }
+
+  bool _isMatchWinner(String value) =>
+      value == 'match winner' ||
+      value == 'winner' ||
+      value == '1x2' ||
+      value == 'full time result' ||
+      value == 'match result';
+
+  bool _isExactGoalsOverUnderMarket(String value) =>
+      value == 'goals over/under' ||
+      value == 'over/under' ||
+      value == 'full time goals over/under' ||
+      value == 'match goals over/under' ||
+      value == 'total goals';
+
+  bool _isExactLine(
+    String value, {
+    required bool over,
+    required double line,
+  }) {
+    final normalized = value
+        .replaceAll(',', '.')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+
+    final prefix = over ? 'over' : 'under';
+    final exact = '$prefix ${line.toStringAsFixed(1)}';
+
+    return normalized == exact;
+  }
 
   bool _isBttsMarket(String value) =>
-      value.contains('both teams score') ||
-      value.contains('both teams to score') ||
-      value.contains('btts');
+      value == 'both teams score' ||
+      value == 'both teams to score' ||
+      value == 'btts';
+
+  bool _isSuspiciousOdds({
+    required String marketKey,
+    required double odds,
+  }) {
+    if (marketKey == 'over25' || marketKey == 'under25') {
+      return odds > 4.00;
+    }
+
+    if (marketKey == 'bttsYes' || marketKey == 'bttsNo') {
+      return odds > 4.00;
+    }
+
+    return odds > 20.00;
+  }
 
   String _reason({
     required bool hasRequiredData,
