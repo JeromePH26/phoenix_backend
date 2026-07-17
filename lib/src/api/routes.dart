@@ -12,6 +12,8 @@ import '../services/football_engine_input_service.dart';
 import '../services/football_simulation_service.dart';
 import '../services/football_market_selection_service.dart';
 import '../services/football_value_service.dart';
+import '../services/football_finalization_service.dart';
+import '../services/football_daily_pipeline_service.dart';
 import '../services/openai_context_service.dart';
 import '../services/football_service.dart';
 import '../services/tennis_service.dart';
@@ -706,14 +708,150 @@ router.get(
       },
     );
 
-    router.get(
-      '/api/tips/today',
-      (Request request) => jsonResponse({
-        'date': _day(DateTime.now()),
-        'football': null,
+    router.get('/api/tips/today', (Request request) async {
+      final date = DateTime.now();
+      final tips = await database.footballFinalTipsForDate(date);
+      return jsonResponse({
+        'date': _day(date),
+        'football': tips,
+        'footballCount': tips.length,
         'tennis': null,
-        'status': 'Noch keine serverseitige Vollanalyse ausgeführt.',
-      }),
+      });
+    });
+
+    router.get(
+      '/api/football/tips/<date|[0-9]{4}-[0-9]{2}-[0-9]{2}>',
+      (Request request, String date) async {
+        final parsed = DateTime.tryParse(date);
+        if (parsed == null) {
+          return jsonResponse(
+            {'error': 'Datum muss YYYY-MM-DD sein.'},
+            statusCode: 400,
+          );
+        }
+        final tips = await database.footballFinalTipsForDate(parsed);
+        return jsonResponse({
+          'date': date,
+          'count': tips.length,
+          'tips': tips,
+        });
+      },
+    );
+
+    router.post('/api/admin/football/finalize', (Request request) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+      final scanId = int.tryParse(
+        request.url.queryParameters['phase2ScanRunId'] ?? '',
+      );
+      if (scanId == null) {
+        return jsonResponse(
+          {'error': 'phase2ScanRunId fehlt.'},
+          statusCode: 400,
+        );
+      }
+      try {
+        final result = await FootballFinalizationService(
+          database: database,
+        ).finalize(phaseTwoScanRunId: scanId);
+        return jsonResponse(result);
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
+    router.post('/api/admin/football/daily-scan', (Request request) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+
+      final dateText = request.url.queryParameters['date'];
+      final date = dateText == null
+          ? DateTime.now()
+          : DateTime.tryParse(dateText);
+      final limit = int.tryParse(
+            request.url.queryParameters['limit'] ?? '',
+          ) ??
+          20;
+      final minimumDataQuality = int.tryParse(
+            request.url.queryParameters['minimumDataQuality'] ?? '',
+          ) ??
+          50;
+      final simulations = int.tryParse(
+            request.url.queryParameters['simulations'] ?? '',
+          ) ??
+          10000;
+
+      if (date == null) {
+        return jsonResponse(
+          {'error': 'Datum muss YYYY-MM-DD sein.'},
+          statusCode: 400,
+        );
+      }
+      if (limit < 1 || limit > 20) {
+        return jsonResponse(
+          {'error': 'limit muss zwischen 1 und 20 liegen.'},
+          statusCode: 400,
+        );
+      }
+
+      final jobId = await database.createFootballDailyPipelineJob(
+        date: date,
+        limit: limit,
+        minimumDataQuality: minimumDataQuality,
+        simulations: simulations,
+      );
+
+      unawaited(
+        FootballDailyPipelineService(
+          database: database,
+          football: football,
+        ).run(
+          jobId: jobId,
+          date: date,
+          limit: limit,
+          minimumDataQuality: minimumDataQuality,
+          simulations: simulations,
+        ),
+      );
+
+      return jsonResponse({
+        'status': 'started',
+        'jobId': jobId,
+        'date': _day(date),
+        'limit': limit,
+        'minimumDataQuality': minimumDataQuality,
+        'simulations': simulations,
+        'statusUrl': '/api/admin/football/daily-scan/$jobId',
+      }, statusCode: 202);
+    });
+
+    router.get(
+      '/api/admin/football/daily-scan/<jobId|[0-9]+>',
+      (Request request, String jobId) async {
+        if (!_isAdmin(request)) {
+          return jsonResponse(
+            {'error': 'Nicht autorisiert.'},
+            statusCode: 401,
+          );
+        }
+        final id = int.tryParse(jobId);
+        if (id == null) {
+          return jsonResponse(
+            {'error': 'Ungültige Job-ID.'},
+            statusCode: 400,
+          );
+        }
+        final job = await database.footballDailyPipelineJob(id);
+        if (job == null) {
+          return jsonResponse(
+            {'error': 'Job nicht gefunden.'},
+            statusCode: 404,
+          );
+        }
+        return jsonResponse(job);
+      },
     );
 
     router.post('/api/admin/migrate', (Request request) async {
