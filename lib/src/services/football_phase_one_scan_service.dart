@@ -10,7 +10,10 @@ class FootballPhaseOneScanService {
   final PhoenixDatabase database;
   final FootballService football;
 
-  Future<Map<String, Object?>> run(DateTime date) async {
+  Future<Map<String, Object?>> run(
+    DateTime date, {
+    bool includeDetails = false,
+  }) async {
     final scanRunId = await database.createFootballScanRun(date);
 
     try {
@@ -58,8 +61,8 @@ class FootballPhaseOneScanService {
         'eligibleCount': eligible.length,
         'excludedCount': excluded.length,
         'exclusionReasons': reasons,
-        'eligibleMatches': eligible,
-        'excludedMatches': excluded,
+        if (includeDetails) 'eligibleMatches': eligible,
+        if (includeDetails) 'excludedMatches': excluded,
       };
 
       await database.completeFootballScanRun(
