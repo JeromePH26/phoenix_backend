@@ -7,7 +7,7 @@ import 'football_phase_two_scan_service.dart';
 import 'football_service.dart';
 import 'football_simulation_service.dart';
 import 'football_value_service.dart';
-import 'openai_context_service.dart';
+import 'gemini_context_service.dart';
 
 class FootballDailyPipelineService {
   FootballDailyPipelineService({
@@ -99,10 +99,10 @@ class FootballDailyPipelineService {
         minimumValuePercent: 5,
       );
 
-      await _step(jobId, 'openai_context');
-      await OpenAiContextService(database: database).verify(
+      await _step(jobId, 'gemini_context');
+      await GeminiContextService(database: database).verifyAllEligibleTips(
         phaseTwoScanRunId: phaseTwoId,
-        limit: limit,
+        candidateLimit: limit,
       );
 
       await _step(jobId, 'finalization');
