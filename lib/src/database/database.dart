@@ -344,9 +344,24 @@ await db.execute('''
       )
     ''');
 
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS football_ai_context_jobs (
+        id BIGSERIAL PRIMARY KEY,
+        phase_two_scan_run_id BIGINT NOT NULL,
+        requested_limit INTEGER NOT NULL DEFAULT 1,
+        status TEXT NOT NULL DEFAULT 'running',
+        processed INTEGER NOT NULL DEFAULT 0,
+        error_message TEXT,
+        started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        completed_at TIMESTAMPTZ,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    ''');
+
     await db.execute('''
       INSERT INTO app_meta (key, value)
-      VALUES ('schema_version', '7')
+      VALUES ('schema_version', '8')
       ON CONFLICT (key) DO UPDATE
       SET value = EXCLUDED.value, updated_at = NOW()
     ''');
@@ -1514,6 +1529,110 @@ Future<List<Map<String, Object?>>> footballEngineInputs(
       map['contextResult']=decoded is Map ? Map<String,Object?>.from(decoded) : <String,Object?>{};
       return map;
     }).toList();
+  }
+
+
+  Future<int> createFootballAiContextJob({
+    required int phaseTwoScanRunId,
+    required int limit,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        INSERT INTO football_ai_context_jobs (
+          phase_two_scan_run_id,
+          requested_limit,
+          status
+        )
+        VALUES (@scan_run_id, @requested_limit, 'running')
+        RETURNING id
+      '''),
+      parameters: {
+        'scan_run_id': phaseTwoScanRunId,
+        'requested_limit': limit,
+      },
+    );
+
+    final value = result.first[0];
+    if (value is int) return value;
+    return int.parse(value.toString());
+  }
+
+  Future<void> completeFootballAiContextJob({
+    required int jobId,
+    required int processed,
+  }) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        UPDATE football_ai_context_jobs
+        SET status = 'completed',
+            processed = @processed,
+            completed_at = NOW(),
+            updated_at = NOW()
+        WHERE id = @job_id
+      '''),
+      parameters: {'job_id': jobId, 'processed': processed},
+    );
+  }
+
+  Future<void> failFootballAiContextJob({
+    required int jobId,
+    required Object error,
+  }) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        UPDATE football_ai_context_jobs
+        SET status = 'failed',
+            error_message = @error_message,
+            completed_at = NOW(),
+            updated_at = NOW()
+        WHERE id = @job_id
+      '''),
+      parameters: {
+        'job_id': jobId,
+        'error_message': error.toString(),
+      },
+    );
+  }
+
+  Future<Map<String, Object?>?> footballAiContextJobStatus(
+    int jobId,
+  ) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT id,
+               phase_two_scan_run_id,
+               requested_limit,
+               status,
+               processed,
+               error_message,
+               started_at,
+               completed_at,
+               updated_at
+        FROM football_ai_context_jobs
+        WHERE id = @job_id
+        LIMIT 1
+      '''),
+      parameters: {'job_id': jobId},
+    );
+
+    if (result.isEmpty) return null;
+
+    final map = Map<String, Object?>.from(
+      result.first.toColumnMap(),
+    );
+
+    for (final key in ['started_at', 'completed_at', 'updated_at']) {
+      final value = map[key];
+      if (value is DateTime) {
+        map[key] = value.toUtc().toIso8601String();
+      }
+    }
+
+    return map;
   }
 
   Future<void> close() async {
