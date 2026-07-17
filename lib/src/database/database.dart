@@ -271,9 +271,30 @@ class PhoenixDatabase {
       ON football_phase_two_results (scan_run_id, data_quality)
     ''');
 
+
+    await db.execute('''
+  CREATE TABLE IF NOT EXISTS football_engine_inputs (
+    phase_two_scan_run_id BIGINT NOT NULL,
+    fixture_id TEXT NOT NULL,
+    league_id TEXT NOT NULL,
+    season INTEGER NOT NULL,
+    data_quality INTEGER NOT NULL,
+    model_version TEXT NOT NULL,
+    normalized_input JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (phase_two_scan_run_id, fixture_id)
+  )
+''');
+
+await db.execute('''
+  CREATE INDEX IF NOT EXISTS idx_football_engine_inputs_fixture
+  ON football_engine_inputs (fixture_id, season)
+''');
+
     await db.execute('''
       INSERT INTO app_meta (key, value)
-      VALUES ('schema_version', '3')
+      VALUES ('schema_version', '4')
       ON CONFLICT (key) DO UPDATE
       SET value = EXCLUDED.value, updated_at = NOW()
     ''');
@@ -916,6 +937,164 @@ class PhoenixDatabase {
       };
     }).toList();
   }
+
+
+Future<int?> latestCompletedPhaseTwoScanRunId() async {
+  final db = await connection();
+  final result = await db.execute('''
+    SELECT id
+    FROM football_scan_runs
+    WHERE phase = 2 AND status = 'completed'
+    ORDER BY id DESC
+    LIMIT 1
+  ''');
+
+  if (result.isEmpty) return null;
+  final value = result.first[0];
+  if (value is int) return value;
+  return int.tryParse(value.toString());
+}
+
+Future<List<Map<String, Object?>>> allowedPhaseTwoRows({
+  required int scanRunId,
+  int limit = 1,
+}) async {
+  final db = await connection();
+  final safeLimit = limit.clamp(1, 20);
+
+  final result = await db.execute(
+    Sql.named('''
+      SELECT
+        fixture_id,
+        league_id,
+        season,
+        data_quality,
+        availability::text AS availability_text,
+        payload::text AS payload_text
+      FROM football_phase_two_results
+      WHERE scan_run_id = @scan_run_id
+        AND analysis_allowed = TRUE
+      ORDER BY data_quality DESC, fixture_id
+      LIMIT @limit
+    '''),
+    parameters: {
+      'scan_run_id': scanRunId,
+      'limit': safeLimit,
+    },
+  );
+
+  return result.map((row) {
+    final map = Map<String, Object?>.from(row.toColumnMap());
+    final availabilityText =
+        map.remove('availability_text')?.toString() ?? '{}';
+    final payloadText = map.remove('payload_text')?.toString() ?? '{}';
+
+    final availabilityDecoded = jsonDecode(availabilityText);
+    final payloadDecoded = jsonDecode(payloadText);
+
+    map['availability'] = availabilityDecoded is Map
+        ? Map<String, Object?>.from(availabilityDecoded)
+        : <String, Object?>{};
+    map['payload'] = payloadDecoded is Map
+        ? Map<String, Object?>.from(payloadDecoded)
+        : <String, Object?>{};
+
+    return map;
+  }).toList();
+}
+
+Future<void> saveFootballEngineInput({
+  required int phaseTwoScanRunId,
+  required String fixtureId,
+  required String leagueId,
+  required int season,
+  required int dataQuality,
+  required String modelVersion,
+  required Map<String, Object?> normalizedInput,
+}) async {
+  final db = await connection();
+
+  await db.execute(
+    Sql.named('''
+      INSERT INTO football_engine_inputs (
+        phase_two_scan_run_id,
+        fixture_id,
+        league_id,
+        season,
+        data_quality,
+        model_version,
+        normalized_input,
+        updated_at
+      )
+      VALUES (
+        @phase_two_scan_run_id,
+        @fixture_id,
+        @league_id,
+        @season,
+        @data_quality,
+        @model_version,
+        CAST(@normalized_input AS JSONB),
+        NOW()
+      )
+      ON CONFLICT (phase_two_scan_run_id, fixture_id) DO UPDATE SET
+        data_quality = EXCLUDED.data_quality,
+        model_version = EXCLUDED.model_version,
+        normalized_input = EXCLUDED.normalized_input,
+        updated_at = NOW()
+    '''),
+    parameters: {
+      'phase_two_scan_run_id': phaseTwoScanRunId,
+      'fixture_id': fixtureId,
+      'league_id': leagueId,
+      'season': season,
+      'data_quality': dataQuality,
+      'model_version': modelVersion,
+      'normalized_input': jsonEncode(normalizedInput),
+    },
+  );
+}
+
+Future<List<Map<String, Object?>>> footballEngineInputs(
+  int phaseTwoScanRunId,
+) async {
+  final db = await connection();
+
+  final result = await db.execute(
+    Sql.named('''
+      SELECT
+        fixture_id,
+        league_id,
+        season,
+        data_quality,
+        model_version,
+        normalized_input::text AS normalized_input_text,
+        created_at,
+        updated_at
+      FROM football_engine_inputs
+      WHERE phase_two_scan_run_id = @scan_run_id
+      ORDER BY data_quality DESC, fixture_id
+    '''),
+    parameters: {'scan_run_id': phaseTwoScanRunId},
+  );
+
+  return result.map((row) {
+    final map = Map<String, Object?>.from(row.toColumnMap());
+    final text = map.remove('normalized_input_text')?.toString() ?? '{}';
+    final decoded = jsonDecode(text);
+
+    for (final key in ['created_at', 'updated_at']) {
+      final value = map[key];
+      if (value is DateTime) {
+        map[key] = value.toUtc().toIso8601String();
+      }
+    }
+
+    map['normalizedInput'] = decoded is Map
+        ? Map<String, Object?>.from(decoded)
+        : <String, Object?>{};
+    return map;
+  }).toList();
+}
 
   Future<void> close() async {
     await _connection?.close();
