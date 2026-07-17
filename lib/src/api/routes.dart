@@ -162,6 +162,48 @@ class ApiRoutes {
       },
     );
 
+
+    router.get(
+      '/api/admin/football/scan/phase2/<scanRunId|[0-9]+>/results',
+      (Request request, String scanRunId) async {
+        if (!_isAdmin(request)) {
+          return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+        }
+
+        final id = int.tryParse(scanRunId);
+        if (id == null) {
+          return jsonResponse(
+            {'error': 'Ungültige Scan-ID.'},
+            statusCode: 400,
+          );
+        }
+
+        try {
+          final status = await database.footballScanRunStatus(id);
+          if (status == null) {
+            return jsonResponse(
+              {'error': 'Scan nicht gefunden.'},
+              statusCode: 404,
+            );
+          }
+
+          final results = await database.footballPhaseTwoResults(id);
+
+          return jsonResponse({
+            'scanRunId': id,
+            'status': status['status'],
+            'checked': status['checked'] ?? 0,
+            'analysisAllowed': status['analysis_allowed'] ?? 0,
+            'belowThreshold': status['below_threshold'] ?? 0,
+            'count': results.length,
+            'results': results,
+          });
+        } catch (error) {
+          return jsonResponse({'error': error.toString()}, statusCode: 500);
+        }
+      },
+    );
+
     router.post('/api/admin/football/leagues/seed-start', (Request request) async {
       if (!_isAdmin(request)) {
         return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
