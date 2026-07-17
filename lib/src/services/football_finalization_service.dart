@@ -47,6 +47,11 @@ class FootballFinalizationService {
       final rawAdjustment = _integer(ai['suggestedTrustAdjustment']);
       final aiAdjustment = rawAdjustment.clamp(-5, 5);
       final finalTrust = (baseTrust + aiAdjustment).clamp(0, 100);
+      final isValueTip = value['isValueTip'] == true;
+      final assignedUnits = _assignedUnits(
+        isValueTip: isValueTip,
+        finalTrust: finalTrust,
+      );
 
       final kickoff =
           selection['kickoff']?.toString() ??
@@ -71,7 +76,7 @@ class FootballFinalizationService {
         'fairOdds': _number(bestMarket['fairOdds']),
         'marketOdds': _number(value['marketOdds']),
         'valuePercent': _number(value['valuePercent']),
-        'isValueTip': value['isValueTip'] == true,
+        'isValueTip': isValueTip,
         'dataQuality': dataQuality,
         'baseTrust': baseTrust,
         'aiTrustAdjustment': aiAdjustment,
@@ -87,6 +92,8 @@ class FootballFinalizationService {
         'sourceUrls': ai['sourceUrls'] ?? <Object?>[],
         'topScorelines': simulation['topScorelines'] ?? <Object?>[],
         'publicationStatus': finalTrust >= 50 ? 'published' : 'withheld',
+        'assignedUnits': assignedUnits,
+        'profitUnits': null,
         'resultStatus': 'pending',
         'engineRule':
             'Die Engine berechnet Wahrscheinlichkeit, faire Quote und Value. OpenAI prüft ausschließlich den aktuellen Kontext.',
@@ -107,6 +114,18 @@ class FootballFinalizationService {
       'published': results.where((e) => e['publicationStatus'] == 'published').length,
       'results': results,
     };
+  }
+
+  double _assignedUnits({
+    required bool isValueTip,
+    required int finalTrust,
+  }) {
+    if (!isValueTip || finalTrust < 50) return 0.0;
+    if (finalTrust >= 90) return 2.5;
+    if (finalTrust >= 80) return 2.0;
+    if (finalTrust >= 70) return 1.5;
+    if (finalTrust >= 60) return 1.0;
+    return 0.5;
   }
 
   int _fallbackTrust({
