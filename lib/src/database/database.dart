@@ -494,6 +494,78 @@ class PhoenixDatabase {
     );
   }
 
+
+  Future<List<Map<String, Object?>>> listFootballLeagueProfiles({
+    int limit = 200,
+  }) async {
+    final db = await connection();
+    final safeLimit = limit.clamp(1, 1000);
+    final result = await db.execute(
+      Sql.named('''
+        SELECT
+          l.league_id,
+          l.league_name,
+          l.country,
+          l.gender,
+          l.competition_level,
+          l.manual_status,
+          l.historical_status,
+          l.total_samples,
+          l.successful_full_analyses,
+          l.last_seen_at,
+          COALESCE(
+            jsonb_agg(
+              jsonb_build_object(
+                'season', s.season,
+                'status', s.status,
+                'samples', s.samples,
+                'fullAnalysisAvailable', s.full_analysis_available
+              ) ORDER BY s.season DESC
+            ) FILTER (WHERE s.season IS NOT NULL),
+            '[]'::jsonb
+          ) AS seasons
+        FROM football_leagues l
+        LEFT JOIN football_league_seasons s
+          ON s.league_id = l.league_id
+        GROUP BY l.league_id
+        ORDER BY l.last_seen_at DESC, l.league_name ASC
+        LIMIT @limit
+      '''),
+      parameters: {'limit': safeLimit},
+    );
+
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  Future<bool> setFootballLeagueManualStatus({
+    required String leagueId,
+    required String manualStatus,
+  }) async {
+    if (!const {'auto', 'whitelist', 'blacklist'}.contains(manualStatus)) {
+      throw ArgumentError(
+        'Status muss auto, whitelist oder blacklist sein.',
+      );
+    }
+
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        UPDATE football_leagues
+        SET manual_status = @manual_status, updated_at = NOW()
+        WHERE league_id = @league_id
+        RETURNING league_id
+      '''),
+      parameters: {
+        'league_id': leagueId,
+        'manual_status': manualStatus,
+      },
+    );
+
+    return result.isNotEmpty;
+  }
+
   Future<void> close() async {
     await _connection?.close();
     _connection = null;
