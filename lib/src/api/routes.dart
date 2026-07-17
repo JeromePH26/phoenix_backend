@@ -14,6 +14,7 @@ import '../services/football_market_selection_service.dart';
 import '../services/football_value_service.dart';
 import '../services/football_finalization_service.dart';
 import '../services/football_daily_pipeline_service.dart';
+import '../services/football_result_settlement_service.dart';
 import '../services/gemini_context_service.dart';
 import '../services/football_service.dart';
 import '../services/tennis_service.dart';
@@ -707,6 +708,37 @@ router.get(
         }
       },
     );
+
+    router.post('/api/admin/football/settle', (Request request) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+
+      final dateValue = request.url.queryParameters['date'];
+      final date =
+          dateValue == null ? DateTime.now() : DateTime.tryParse(dateValue);
+
+      if (date == null) {
+        return jsonResponse(
+          {'error': 'Datum muss YYYY-MM-DD sein.'},
+          statusCode: 400,
+        );
+      }
+
+      try {
+        final result = await FootballResultSettlementService(
+          database: database,
+          football: football,
+        ).settle(date: date);
+        return jsonResponse(result);
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
+    router.get('/api/football/performance', (Request request) async {
+      return jsonResponse(await database.footballPerformanceSummary());
+    });
 
     router.get('/api/tips/today', (Request request) async {
       final date = DateTime.now();
