@@ -5,6 +5,7 @@ import '../config/app_config.dart';
 import '../database/database.dart';
 import '../http/json_response.dart';
 import '../services/football_phase_one_scan_service.dart';
+import '../services/football_phase_two_scan_service.dart';
 import '../services/football_service.dart';
 import '../services/tennis_service.dart';
 
@@ -124,6 +125,54 @@ class ApiRoutes {
       }
     });
 
+
+
+    router.post('/api/admin/football/scan/phase2', (Request request) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+
+      final phaseOneScanRunId = int.tryParse(
+        request.url.queryParameters['scanRunId'] ?? '',
+      );
+      final limit = int.tryParse(
+            request.url.queryParameters['limit'] ?? '',
+          ) ??
+          1;
+      final minimumDataQuality = int.tryParse(
+            request.url.queryParameters['minimumDataQuality'] ?? '',
+          ) ??
+          50;
+
+      if (limit < 1 || limit > 20) {
+        return jsonResponse(
+          {'error': 'limit muss zwischen 1 und 20 liegen.'},
+          statusCode: 400,
+        );
+      }
+
+      if (minimumDataQuality < 0 || minimumDataQuality > 100) {
+        return jsonResponse(
+          {'error': 'minimumDataQuality muss zwischen 0 und 100 liegen.'},
+          statusCode: 400,
+        );
+      }
+
+      try {
+        final scanner = FootballPhaseTwoScanService(
+          database: database,
+          football: football,
+        );
+        final result = await scanner.run(
+          phaseOneScanRunId: phaseOneScanRunId,
+          limit: limit,
+          minimumDataQuality: minimumDataQuality,
+        );
+        return jsonResponse(result);
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 502);
+      }
+    });
 
     router.post('/api/admin/football/leagues/seed-start', (Request request) async {
       if (!_isAdmin(request)) {
