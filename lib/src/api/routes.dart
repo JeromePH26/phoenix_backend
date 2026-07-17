@@ -466,18 +466,101 @@ router.get(
     });
 
 
-    router.post('/api/admin/football/ai/verify-context', (Request request) async {
-      if (!_isAdmin(request)) return jsonResponse({'error':'Nicht autorisiert.'}, statusCode:401);
-      final scanId=int.tryParse(request.url.queryParameters['phase2ScanRunId'] ?? '');
-      final limit=int.tryParse(request.url.queryParameters['limit'] ?? '') ?? 1;
-      if (scanId==null) return jsonResponse({'error':'phase2ScanRunId fehlt.'}, statusCode:400);
-      try {
-        final service=OpenAiContextService(database:database);
-        return jsonResponse(await service.verify(phaseTwoScanRunId:scanId, limit:limit.clamp(1,10)));
-      } catch (error) {
-        return jsonResponse({'error':error.toString()}, statusCode:502);
-      }
-    });
+    router.post(
+      '/api/admin/football/ai/verify-context',
+      (Request request) async {
+        if (!_isAdmin(request)) {
+          return jsonResponse(
+            {'error': 'Nicht autorisiert.'},
+            statusCode: 401,
+          );
+        }
+
+        final scanId = int.tryParse(
+          request.url.queryParameters['phase2ScanRunId'] ?? '',
+        );
+        final limit =
+            int.tryParse(
+              request.url.queryParameters['limit'] ?? '',
+            ) ??
+            1;
+
+        if (scanId == null) {
+          return jsonResponse(
+            {'error': 'phase2ScanRunId fehlt.'},
+            statusCode: 400,
+          );
+        }
+
+        if (limit < 1 || limit > 10) {
+          return jsonResponse(
+            {'error': 'limit muss zwischen 1 und 10 liegen.'},
+            statusCode: 400,
+          );
+        }
+
+        try {
+          final jobId = await database.createFootballAiContextJob(
+            phaseTwoScanRunId: scanId,
+            limit: limit,
+          );
+
+          final service = OpenAiContextService(database: database);
+
+          unawaited(
+            service.runBackground(
+              jobId: jobId,
+              phaseTwoScanRunId: scanId,
+              limit: limit,
+            ),
+          );
+
+          return jsonResponse({
+            'status': 'started',
+            'jobId': jobId,
+            'phaseTwoScanRunId': scanId,
+            'limit': limit,
+            'statusUrl': '/api/admin/football/ai/jobs/$jobId',
+            'resultUrl': '/api/admin/football/ai/context/$scanId',
+          }, statusCode: 202);
+        } catch (error) {
+          return jsonResponse(
+            {'error': error.toString()},
+            statusCode: 500,
+          );
+        }
+      },
+    );
+
+    router.get(
+      '/api/admin/football/ai/jobs/<jobId|[0-9]+>',
+      (Request request, String jobId) async {
+        if (!_isAdmin(request)) {
+          return jsonResponse(
+            {'error': 'Nicht autorisiert.'},
+            statusCode: 401,
+          );
+        }
+
+        final id = int.tryParse(jobId);
+        if (id == null) {
+          return jsonResponse(
+            {'error': 'Ungültige Job-ID.'},
+            statusCode: 400,
+          );
+        }
+
+        final status = await database.footballAiContextJobStatus(id);
+        if (status == null) {
+          return jsonResponse(
+            {'error': 'Job nicht gefunden.'},
+            statusCode: 404,
+          );
+        }
+
+        return jsonResponse(status);
+      },
+    );
 
     router.get('/api/admin/football/ai/context/<scanRunId|[0-9]+>', (Request request, String scanRunId) async {
       if (!_isAdmin(request)) return jsonResponse({'error':'Nicht autorisiert.'}, statusCode:401);
