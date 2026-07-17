@@ -112,12 +112,80 @@ class ApiRoutes {
           database: database,
           football: football,
         );
-        final result = await scanner.run(date);
+        final includeDetails =
+            request.url.queryParameters['details'] == 'true';
+        final result = await scanner.run(
+          date,
+          includeDetails: includeDetails,
+        );
         return jsonResponse(result);
       } catch (error) {
         return jsonResponse({'error': error.toString()}, statusCode: 502);
       }
     });
+
+    router.get('/api/admin/football/leagues', (Request request) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+
+      final limit = int.tryParse(
+            request.url.queryParameters['limit'] ?? '',
+          ) ??
+          200;
+
+      try {
+        final leagues = await database.listFootballLeagueProfiles(limit: limit);
+        return jsonResponse({
+          'count': leagues.length,
+          'leagues': leagues,
+        });
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
+    router.post(
+      '/api/admin/football/leagues/<leagueId>/status',
+      (Request request, String leagueId) async {
+        if (!_isAdmin(request)) {
+          return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+        }
+
+        final value = request.url.queryParameters['value']?.trim() ?? '';
+        if (!const {'auto', 'whitelist', 'blacklist'}.contains(value)) {
+          return jsonResponse(
+            {'error': 'value muss auto, whitelist oder blacklist sein.'},
+            statusCode: 400,
+          );
+        }
+
+        try {
+          final updated = await database.setFootballLeagueManualStatus(
+            leagueId: leagueId,
+            manualStatus: value,
+          );
+          if (!updated) {
+            return jsonResponse(
+              {'error': 'Liga nicht gefunden.'},
+              statusCode: 404,
+            );
+          }
+          return jsonResponse({
+            'status': 'updated',
+            'leagueId': leagueId,
+            'manualStatus': value,
+          });
+        } on ArgumentError catch (error) {
+          return jsonResponse(
+            {'error': error.message?.toString() ?? error.toString()},
+            statusCode: 400,
+          );
+        } catch (error) {
+          return jsonResponse({'error': error.toString()}, statusCode: 500);
+        }
+      },
+    );
 
     router.get('/api/tennis/matches/today', (Request request) async {
       try {
