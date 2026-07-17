@@ -68,7 +68,7 @@ class OpenAiContextService {
         'tools': [{'type': 'web_search'}],
         'include': ['web_search_call.action.sources'],
         'instructions': 'Du prüfst aktuelle Kontextfakten für PHÖNIX. Berechne keine Wahrscheinlichkeiten, fairen Quoten oder Value-Werte. Erfinde keine Verletzungen, Sperren, Aufstellungen oder Quellen. Nutze bevorzugt offizielle Vereins- und Wettbewerbsquellen. Antworte ausschließlich im verlangten JSON-Schema. Halte summary, evidence und contextPoints kurz und präzise.',
-        'input': 'Spiel: ${payload['homeTeam']} gegen ${payload['awayTeam']}\nLiga: ${payload['league']}\nAnstoß: ${payload['kickoff']}\nPHÖNIX-Tipp: ${phoenixTip['market']}\nAPI-Verletzungsdatensätze: ${availability['injuriesCount']}\nPrüfe aktuelle Ausfälle, Sperren, Rückkehrer, Rotation, Belastung, Motivation, Reise und Aufstellungsstatus. Bewerte nur, ob der Kontext den Tipp unterstützt, neutral ist oder schwächt.',
+        'input': 'Spiel: ${payload['homeTeam']} gegen ${payload['awayTeam']}\nLiga: ${payload['league']}\nAnstoß: ${payload['kickoff']}\nPHÖNIX-Tipp: ${phoenixTip['market']}\nAPI-Verletzungsdatensätze: ${availability['injuriesCount']}\nPrüfe aktuelle Ausfälle, Sperren, Rückkehrer, Rotation, Belastung, Motivation, Reise und Aufstellungsstatus. Bewerte nur, ob der Kontext den Tipp unterstützt, neutral ist oder schwächt. Die Trust-Anpassung darf höchstens zwischen -5 und +5 liegen.',
         'text': {
           'format': {
             'type': 'json_schema',
@@ -80,7 +80,7 @@ class OpenAiContextService {
               'properties': {
                 'verificationStatus': {'type':'string','enum':['verified','partial','unclear']},
                 'contextEffect': {'type':'string','enum':['supports_tip','neutral','weakens_tip']},
-                'suggestedTrustAdjustment': {'type':'integer','minimum':-10,'maximum':10},
+                'suggestedTrustAdjustment': {'type':'integer','minimum':-5,'maximum':5},
                 'lineupStatus': {'type':'string','enum':['confirmed','expected_only','not_available']},
                 'injuries': {
                   'type':'array',
