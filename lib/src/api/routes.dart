@@ -12,6 +12,7 @@ import '../services/football_engine_input_service.dart';
 import '../services/football_simulation_service.dart';
 import '../services/football_market_selection_service.dart';
 import '../services/football_value_service.dart';
+import '../services/openai_context_service.dart';
 import '../services/football_service.dart';
 import '../services/tennis_service.dart';
 
@@ -462,6 +463,28 @@ router.get(
       } catch (error) {
         return jsonResponse({'error': error.toString()}, statusCode: 500);
       }
+    });
+
+
+    router.post('/api/admin/football/ai/verify-context', (Request request) async {
+      if (!_isAdmin(request)) return jsonResponse({'error':'Nicht autorisiert.'}, statusCode:401);
+      final scanId=int.tryParse(request.url.queryParameters['phase2ScanRunId'] ?? '');
+      final limit=int.tryParse(request.url.queryParameters['limit'] ?? '') ?? 1;
+      if (scanId==null) return jsonResponse({'error':'phase2ScanRunId fehlt.'}, statusCode:400);
+      try {
+        final service=OpenAiContextService(database:database);
+        return jsonResponse(await service.verify(phaseTwoScanRunId:scanId, limit:limit.clamp(1,10)));
+      } catch (error) {
+        return jsonResponse({'error':error.toString()}, statusCode:502);
+      }
+    });
+
+    router.get('/api/admin/football/ai/context/<scanRunId|[0-9]+>', (Request request, String scanRunId) async {
+      if (!_isAdmin(request)) return jsonResponse({'error':'Nicht autorisiert.'}, statusCode:401);
+      final id=int.tryParse(scanRunId);
+      if (id==null) return jsonResponse({'error':'Ungültige Scan-ID.'}, statusCode:400);
+      final results=await database.footballAiContextChecks(id);
+      return jsonResponse({'phaseTwoScanRunId':id,'count':results.length,'results':results});
     });
 
     router.post('/api/admin/football/leagues/seed-start', (Request request) async {
