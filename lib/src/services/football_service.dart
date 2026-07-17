@@ -193,6 +193,14 @@ class FootballService {
     return result;
   }
 
+
+  Future<List<Map<String, Object?>>> oddsForFixture(String fixtureId) async {
+    return _getResponseList(
+      '/odds',
+      {'fixture': fixtureId},
+    );
+  }
+
   Future<List<Map<String, Object?>>> _getResponseList(
     String path,
     Map<String, String> queryParameters,
