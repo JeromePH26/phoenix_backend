@@ -4,6 +4,7 @@ import 'package:shelf_router/shelf_router.dart';
 import '../config/app_config.dart';
 import '../database/database.dart';
 import '../http/json_response.dart';
+import '../services/football_phase_one_scan_service.dart';
 import '../services/football_service.dart';
 import '../services/tennis_service.dart';
 
@@ -66,26 +67,6 @@ class ApiRoutes {
     });
 
     router.get(
-      '/api/football/matches/<fixtureId|[0-9]+>',
-      (Request request, String fixtureId) async {
-        try {
-          final details = await football.matchDetails(fixtureId);
-          return jsonResponse({
-            'sport': 'football',
-            'match': details,
-          });
-        } on ArgumentError catch (error) {
-          return jsonResponse(
-            {'error': error.message?.toString() ?? error.toString()},
-            statusCode: 400,
-          );
-        } catch (error) {
-          return jsonResponse({'error': error.toString()}, statusCode: 502);
-        }
-      },
-    );
-
-    router.get(
       '/api/football/matches/<date|[0-9]{4}-[0-9]{2}-[0-9]{2}>',
       (Request request, String date) async {
         final parsed = DateTime.tryParse(date);
@@ -109,6 +90,34 @@ class ApiRoutes {
         }
       },
     );
+
+    router.post('/api/admin/football/scan/phase1', (Request request) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+
+      final dateValue = request.url.queryParameters['date'];
+      final date =
+          dateValue == null ? DateTime.now() : DateTime.tryParse(dateValue);
+
+      if (date == null) {
+        return jsonResponse(
+          {'error': 'Datum muss YYYY-MM-DD sein.'},
+          statusCode: 400,
+        );
+      }
+
+      try {
+        final scanner = FootballPhaseOneScanService(
+          database: database,
+          football: football,
+        );
+        final result = await scanner.run(date);
+        return jsonResponse(result);
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 502);
+      }
+    });
 
     router.get('/api/tennis/matches/today', (Request request) async {
       try {
