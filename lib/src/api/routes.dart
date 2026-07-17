@@ -33,6 +33,7 @@ class ApiRoutes {
           databaseError = error.toString();
         }
       }
+
       return jsonResponse({
         'status': 'ok',
         'service': 'phoenix-backend',
@@ -64,25 +65,50 @@ class ApiRoutes {
       }
     });
 
-    router.get('/api/football/matches/<date>',
-        (Request request, String date) async {
-      final parsed = DateTime.tryParse(date);
-      if (parsed == null) {
-        return jsonResponse({'error': 'Datum muss YYYY-MM-DD sein.'},
-            statusCode: 400);
-      }
-      try {
-        final matches = await football.matchesForDate(parsed);
-        return jsonResponse({
-          'sport': 'football',
-          'date': _day(parsed),
-          'count': matches.length,
-          'matches': matches,
-        });
-      } catch (error) {
-        return jsonResponse({'error': error.toString()}, statusCode: 502);
-      }
-    });
+    router.get(
+      '/api/football/matches/<fixtureId|[0-9]+>',
+      (Request request, String fixtureId) async {
+        try {
+          final details = await football.matchDetails(fixtureId);
+          return jsonResponse({
+            'sport': 'football',
+            'match': details,
+          });
+        } on ArgumentError catch (error) {
+          return jsonResponse(
+            {'error': error.message?.toString() ?? error.toString()},
+            statusCode: 400,
+          );
+        } catch (error) {
+          return jsonResponse({'error': error.toString()}, statusCode: 502);
+        }
+      },
+    );
+
+    router.get(
+      '/api/football/matches/<date|[0-9]{4}-[0-9]{2}-[0-9]{2}>',
+      (Request request, String date) async {
+        final parsed = DateTime.tryParse(date);
+        if (parsed == null) {
+          return jsonResponse(
+            {'error': 'Datum muss YYYY-MM-DD sein.'},
+            statusCode: 400,
+          );
+        }
+
+        try {
+          final matches = await football.matchesForDate(parsed);
+          return jsonResponse({
+            'sport': 'football',
+            'date': _day(parsed),
+            'count': matches.length,
+            'matches': matches,
+          });
+        } catch (error) {
+          return jsonResponse({'error': error.toString()}, statusCode: 502);
+        }
+      },
+    );
 
     router.get('/api/tennis/matches/today', (Request request) async {
       try {
@@ -98,37 +124,46 @@ class ApiRoutes {
       }
     });
 
-    router.get('/api/tennis/matches/<date>',
-        (Request request, String date) async {
-      final parsed = DateTime.tryParse(date);
-      if (parsed == null) {
-        return jsonResponse({'error': 'Datum muss YYYY-MM-DD sein.'},
-            statusCode: 400);
-      }
-      try {
-        final matches = await tennis.matchesForDate(parsed);
-        return jsonResponse({
-          'sport': 'tennis',
-          'date': _day(parsed),
-          'count': matches.length,
-          'matches': matches,
-        });
-      } catch (error) {
-        return jsonResponse({'error': error.toString()}, statusCode: 502);
-      }
-    });
+    router.get(
+      '/api/tennis/matches/<date|[0-9]{4}-[0-9]{2}-[0-9]{2}>',
+      (Request request, String date) async {
+        final parsed = DateTime.tryParse(date);
+        if (parsed == null) {
+          return jsonResponse(
+            {'error': 'Datum muss YYYY-MM-DD sein.'},
+            statusCode: 400,
+          );
+        }
 
-    router.get('/api/tips/today', (Request request) => jsonResponse({
-          'date': _day(DateTime.now()),
-          'football': null,
-          'tennis': null,
-          'status': 'Noch keine serverseitige Vollanalyse ausgeführt.',
-        }));
+        try {
+          final matches = await tennis.matchesForDate(parsed);
+          return jsonResponse({
+            'sport': 'tennis',
+            'date': _day(parsed),
+            'count': matches.length,
+            'matches': matches,
+          });
+        } catch (error) {
+          return jsonResponse({'error': error.toString()}, statusCode: 502);
+        }
+      },
+    );
+
+    router.get(
+      '/api/tips/today',
+      (Request request) => jsonResponse({
+        'date': _day(DateTime.now()),
+        'football': null,
+        'tennis': null,
+        'status': 'Noch keine serverseitige Vollanalyse ausgeführt.',
+      }),
+    );
 
     router.post('/api/admin/migrate', (Request request) async {
       if (!_isAdmin(request)) {
         return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
       }
+
       try {
         await database.migrate();
         return jsonResponse({'status': 'migration_complete'});
@@ -137,8 +172,11 @@ class ApiRoutes {
       }
     });
 
-    router.all('/<ignored|.*>', (Request request) =>
-        jsonResponse({'error': 'Route nicht gefunden.'}, statusCode: 404));
+    router.all(
+      '/<ignored|.*>',
+      (Request request) =>
+          jsonResponse({'error': 'Route nicht gefunden.'}, statusCode: 404),
+    );
 
     return router;
   }
