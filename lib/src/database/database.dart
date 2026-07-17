@@ -359,9 +359,76 @@ await db.execute('''
       )
     ''');
 
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS football_final_tips (
+        phase_two_scan_run_id BIGINT NOT NULL,
+        fixture_id TEXT NOT NULL,
+        tip_date DATE,
+        kickoff TIMESTAMPTZ,
+        home_team TEXT,
+        away_team TEXT,
+        league TEXT,
+        market_key TEXT NOT NULL,
+        market_label TEXT NOT NULL,
+        model_probability DOUBLE PRECISION,
+        fair_odds DOUBLE PRECISION,
+        market_odds DOUBLE PRECISION,
+        value_percent DOUBLE PRECISION,
+        is_value_tip BOOLEAN NOT NULL DEFAULT FALSE,
+        data_quality INTEGER,
+        base_trust INTEGER,
+        ai_trust_adjustment INTEGER NOT NULL DEFAULT 0,
+        final_trust INTEGER,
+        trust_level TEXT,
+        lineup_status TEXT,
+        verification_status TEXT,
+        context_effect TEXT,
+        explanation TEXT,
+        source_urls JSONB NOT NULL DEFAULT '[]'::jsonb,
+        top_scorelines JSONB NOT NULL DEFAULT '[]'::jsonb,
+        publication_status TEXT NOT NULL DEFAULT 'published',
+        result_status TEXT NOT NULL DEFAULT 'pending',
+        home_score INTEGER,
+        away_score INTEGER,
+        closing_odds DOUBLE PRECISION,
+        profit_units DOUBLE PRECISION,
+        settled_at TIMESTAMPTZ,
+        payload JSONB NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (phase_two_scan_run_id, fixture_id)
+      )
+    ''');
+
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_football_final_tips_date
+      ON football_final_tips (tip_date, final_trust DESC)
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS football_daily_pipeline_jobs (
+        id BIGSERIAL PRIMARY KEY,
+        scan_date DATE NOT NULL,
+        status TEXT NOT NULL DEFAULT 'running',
+        current_step TEXT NOT NULL DEFAULT 'starting',
+        phase_one_scan_run_id BIGINT,
+        phase_two_scan_run_id BIGINT,
+        requested_limit INTEGER NOT NULL DEFAULT 20,
+        minimum_data_quality INTEGER NOT NULL DEFAULT 50,
+        simulations INTEGER NOT NULL DEFAULT 10000,
+        processed INTEGER NOT NULL DEFAULT 0,
+        published INTEGER NOT NULL DEFAULT 0,
+        error_message TEXT,
+        started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        completed_at TIMESTAMPTZ,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    ''');
+
     await db.execute('''
       INSERT INTO app_meta (key, value)
-      VALUES ('schema_version', '8')
+      VALUES ('schema_version', '10')
       ON CONFLICT (key) DO UPDATE
       SET value = EXCLUDED.value, updated_at = NOW()
     ''');
@@ -1448,6 +1515,13 @@ Future<List<Map<String, Object?>>> footballEngineInputs(
           ON p.scan_run_id = s.phase_two_scan_run_id
          AND p.fixture_id = s.fixture_id
         WHERE s.phase_two_scan_run_id = @scan_run_id
+          AND NOT EXISTS (
+            SELECT 1
+            FROM football_ai_context_checks c
+            WHERE c.phase_two_scan_run_id = s.phase_two_scan_run_id
+              AND c.fixture_id = s.fixture_id
+              AND c.status = 'completed'
+          )
         ORDER BY s.fixture_id
         LIMIT @limit
       '''),
@@ -1632,6 +1706,249 @@ Future<List<Map<String, Object?>>> footballEngineInputs(
       }
     }
 
+    return map;
+  }
+
+
+  Future<List<Map<String, Object?>>> footballFinalizationRows(
+    int phaseTwoScanRunId,
+  ) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT
+          s.fixture_id,
+          s.selection::text AS selection_text,
+          p.data_quality,
+          p.payload::text AS phase_two_payload_text,
+          sim.result::text AS simulation_text,
+          ai.context_result::text AS context_text
+        FROM football_market_selections s
+        INNER JOIN football_phase_two_results p
+          ON p.scan_run_id = s.phase_two_scan_run_id
+         AND p.fixture_id = s.fixture_id
+        LEFT JOIN football_simulation_results sim
+          ON sim.phase_two_scan_run_id = s.phase_two_scan_run_id
+         AND sim.fixture_id = s.fixture_id
+        LEFT JOIN football_ai_context_checks ai
+          ON ai.phase_two_scan_run_id = s.phase_two_scan_run_id
+         AND ai.fixture_id = s.fixture_id
+        WHERE s.phase_two_scan_run_id = @scan_run_id
+          AND p.analysis_allowed = TRUE
+        ORDER BY s.fixture_id
+      '''),
+      parameters: {'scan_run_id': phaseTwoScanRunId},
+    );
+
+    Map<String, Object?> decode(Object? value) {
+      final decoded = jsonDecode(value?.toString() ?? '{}');
+      return decoded is Map
+          ? Map<String, Object?>.from(decoded)
+          : <String, Object?>{};
+    }
+
+    return result.map((row) {
+      final map = Map<String, Object?>.from(row.toColumnMap());
+      map['selection'] = decode(map.remove('selection_text'));
+      map['phaseTwoPayload'] = decode(map.remove('phase_two_payload_text'));
+      map['simulation'] = decode(map.remove('simulation_text'));
+      map['aiContext'] = decode(map.remove('context_text'));
+      return map;
+    }).toList();
+  }
+
+  Future<void> saveFootballFinalTip({
+    required int phaseTwoScanRunId,
+    required String fixtureId,
+    required Map<String, Object?> tip,
+  }) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        INSERT INTO football_final_tips (
+          phase_two_scan_run_id, fixture_id, tip_date, kickoff,
+          home_team, away_team, league, market_key, market_label,
+          model_probability, fair_odds, market_odds, value_percent,
+          is_value_tip, data_quality, base_trust, ai_trust_adjustment,
+          final_trust, trust_level, lineup_status, verification_status,
+          context_effect, explanation, source_urls, top_scorelines,
+          publication_status, payload, updated_at
+        ) VALUES (
+          @scan_run_id, @fixture_id, CAST(@tip_date AS DATE),
+          CAST(NULLIF(@kickoff, '') AS TIMESTAMPTZ),
+          @home_team, @away_team, @league, @market_key, @market_label,
+          @model_probability, @fair_odds, @market_odds, @value_percent,
+          @is_value_tip, @data_quality, @base_trust, @ai_adjustment,
+          @final_trust, @trust_level, @lineup_status, @verification_status,
+          @context_effect, @explanation, CAST(@source_urls AS JSONB),
+          CAST(@top_scorelines AS JSONB), @publication_status,
+          CAST(@payload AS JSONB), NOW()
+        )
+        ON CONFLICT (phase_two_scan_run_id, fixture_id) DO UPDATE SET
+          market_key = EXCLUDED.market_key,
+          market_label = EXCLUDED.market_label,
+          model_probability = EXCLUDED.model_probability,
+          fair_odds = EXCLUDED.fair_odds,
+          market_odds = EXCLUDED.market_odds,
+          value_percent = EXCLUDED.value_percent,
+          is_value_tip = EXCLUDED.is_value_tip,
+          data_quality = EXCLUDED.data_quality,
+          base_trust = EXCLUDED.base_trust,
+          ai_trust_adjustment = EXCLUDED.ai_trust_adjustment,
+          final_trust = EXCLUDED.final_trust,
+          trust_level = EXCLUDED.trust_level,
+          lineup_status = EXCLUDED.lineup_status,
+          verification_status = EXCLUDED.verification_status,
+          context_effect = EXCLUDED.context_effect,
+          explanation = EXCLUDED.explanation,
+          source_urls = EXCLUDED.source_urls,
+          top_scorelines = EXCLUDED.top_scorelines,
+          publication_status = EXCLUDED.publication_status,
+          payload = EXCLUDED.payload,
+          updated_at = NOW()
+      '''),
+      parameters: {
+        'scan_run_id': phaseTwoScanRunId,
+        'fixture_id': fixtureId,
+        'tip_date': tip['tipDate']?.toString() ?? '',
+        'kickoff': tip['kickoff']?.toString() ?? '',
+        'home_team': tip['homeTeam']?.toString(),
+        'away_team': tip['awayTeam']?.toString(),
+        'league': tip['league']?.toString(),
+        'market_key': tip['marketKey']?.toString() ?? '',
+        'market_label': tip['marketLabel']?.toString() ?? '',
+        'model_probability': tip['modelProbability'],
+        'fair_odds': tip['fairOdds'],
+        'market_odds': tip['marketOdds'],
+        'value_percent': tip['valuePercent'],
+        'is_value_tip': tip['isValueTip'] == true,
+        'data_quality': tip['dataQuality'],
+        'base_trust': tip['baseTrust'],
+        'ai_adjustment': tip['aiTrustAdjustment'],
+        'final_trust': tip['finalTrust'],
+        'trust_level': tip['trustLevel']?.toString(),
+        'lineup_status': tip['lineupStatus']?.toString(),
+        'verification_status': tip['verificationStatus']?.toString(),
+        'context_effect': tip['contextEffect']?.toString(),
+        'explanation': tip['explanation']?.toString(),
+        'source_urls': jsonEncode(tip['sourceUrls'] ?? <Object?>[]),
+        'top_scorelines': jsonEncode(tip['topScorelines'] ?? <Object?>[]),
+        'publication_status': tip['publicationStatus']?.toString() ?? 'published',
+        'payload': jsonEncode(tip),
+      },
+    );
+  }
+
+  Future<List<Map<String, Object?>>> footballFinalTipsForDate(
+    DateTime date,
+  ) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT payload::text AS payload_text
+        FROM football_final_tips
+        WHERE tip_date = CAST(@tip_date AS DATE)
+          AND publication_status = 'published'
+        ORDER BY is_value_tip DESC, final_trust DESC, kickoff
+      '''),
+      parameters: {'tip_date': date.toIso8601String().substring(0, 10)},
+    );
+    return result.map((row) {
+      final decoded = jsonDecode(
+        row.toColumnMap()['payload_text']?.toString() ?? '{}',
+      );
+      return decoded is Map
+          ? Map<String, Object?>.from(decoded)
+          : <String, Object?>{};
+    }).toList();
+  }
+
+  Future<int> createFootballDailyPipelineJob({
+    required DateTime date,
+    required int limit,
+    required int minimumDataQuality,
+    required int simulations,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        INSERT INTO football_daily_pipeline_jobs (
+          scan_date, requested_limit, minimum_data_quality, simulations
+        ) VALUES (
+          CAST(@scan_date AS DATE), @limit, @minimum_data_quality, @simulations
+        )
+        RETURNING id
+      '''),
+      parameters: {
+        'scan_date': date.toIso8601String().substring(0, 10),
+        'limit': limit,
+        'minimum_data_quality': minimumDataQuality,
+        'simulations': simulations,
+      },
+    );
+    final value = result.first[0];
+    return value is int ? value : int.parse(value.toString());
+  }
+
+  Future<void> updateFootballDailyPipelineJob({
+    required int jobId,
+    required String status,
+    required String currentStep,
+    int? phaseOneScanRunId,
+    int? phaseTwoScanRunId,
+    int? processed,
+    int? published,
+    Object? error,
+    bool completed = false,
+  }) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        UPDATE football_daily_pipeline_jobs
+        SET status = @status,
+            current_step = @current_step,
+            phase_one_scan_run_id =
+              COALESCE(@phase_one_scan_run_id, phase_one_scan_run_id),
+            phase_two_scan_run_id =
+              COALESCE(@phase_two_scan_run_id, phase_two_scan_run_id),
+            processed = COALESCE(@processed, processed),
+            published = COALESCE(@published, published),
+            error_message = @error_message,
+            completed_at = CASE WHEN @completed THEN NOW() ELSE completed_at END,
+            updated_at = NOW()
+        WHERE id = @job_id
+      '''),
+      parameters: {
+        'job_id': jobId,
+        'status': status,
+        'current_step': currentStep,
+        'phase_one_scan_run_id': phaseOneScanRunId,
+        'phase_two_scan_run_id': phaseTwoScanRunId,
+        'processed': processed,
+        'published': published,
+        'error_message': error?.toString(),
+        'completed': completed,
+      },
+    );
+  }
+
+  Future<Map<String, Object?>?> footballDailyPipelineJob(int jobId) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT *
+        FROM football_daily_pipeline_jobs
+        WHERE id = @job_id
+        LIMIT 1
+      '''),
+      parameters: {'job_id': jobId},
+    );
+    if (result.isEmpty) return null;
+    final map = Map<String, Object?>.from(result.first.toColumnMap());
+    for (final key in ['scan_date', 'started_at', 'completed_at', 'updated_at']) {
+      final value = map[key];
+      if (value is DateTime) map[key] = value.toUtc().toIso8601String();
+    }
     return map;
   }
 
