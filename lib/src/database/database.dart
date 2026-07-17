@@ -329,9 +329,24 @@ await db.execute('''
       ON football_market_selections (fixture_id, updated_at DESC)
     ''');
 
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS football_ai_context_checks (
+        phase_two_scan_run_id BIGINT NOT NULL,
+        fixture_id TEXT NOT NULL,
+        model TEXT NOT NULL,
+        response_id TEXT,
+        status TEXT NOT NULL,
+        context_result JSONB NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (phase_two_scan_run_id, fixture_id)
+      )
+    ''');
+
     await db.execute('''
       INSERT INTO app_meta (key, value)
-      VALUES ('schema_version', '6')
+      VALUES ('schema_version', '7')
       ON CONFLICT (key) DO UPDATE
       SET value = EXCLUDED.value, updated_at = NOW()
     ''');
@@ -1397,6 +1412,106 @@ Future<List<Map<String, Object?>>> footballEngineInputs(
       map['selection'] = decoded is Map
           ? Map<String, Object?>.from(decoded)
           : <String, Object?>{};
+      return map;
+    }).toList();
+  }
+
+
+  Future<List<Map<String, Object?>>> contextCandidates({
+    required int phaseTwoScanRunId,
+    int limit = 1,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT s.fixture_id,
+               s.selection::text AS selection_text,
+               p.availability::text AS availability_text,
+               p.payload::text AS payload_text
+        FROM football_market_selections s
+        INNER JOIN football_phase_two_results p
+          ON p.scan_run_id = s.phase_two_scan_run_id
+         AND p.fixture_id = s.fixture_id
+        WHERE s.phase_two_scan_run_id = @scan_run_id
+        ORDER BY s.fixture_id
+        LIMIT @limit
+      '''),
+      parameters: {
+        'scan_run_id': phaseTwoScanRunId,
+        'limit': limit.clamp(1, 10),
+      },
+    );
+
+    return result.map((row) {
+      final map = Map<String, Object?>.from(row.toColumnMap());
+      Map<String, Object?> decode(String key) {
+        final decoded = jsonDecode(map.remove(key)?.toString() ?? '{}');
+        return decoded is Map ? Map<String, Object?>.from(decoded) : <String, Object?>{};
+      }
+      map['selection'] = decode('selection_text');
+      map['availability'] = decode('availability_text');
+      map['payload'] = decode('payload_text');
+      return map;
+    }).toList();
+  }
+
+  Future<void> saveFootballAiContextCheck({
+    required int phaseTwoScanRunId,
+    required String fixtureId,
+    required String model,
+    required String? responseId,
+    required String status,
+    required Map<String, Object?> contextResult,
+  }) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        INSERT INTO football_ai_context_checks (
+          phase_two_scan_run_id, fixture_id, model, response_id,
+          status, context_result, updated_at
+        ) VALUES (
+          @scan_run_id, @fixture_id, @model, @response_id,
+          @status, CAST(@context_result AS JSONB), NOW()
+        )
+        ON CONFLICT (phase_two_scan_run_id, fixture_id) DO UPDATE SET
+          model = EXCLUDED.model,
+          response_id = EXCLUDED.response_id,
+          status = EXCLUDED.status,
+          context_result = EXCLUDED.context_result,
+          updated_at = NOW()
+      '''),
+      parameters: {
+        'scan_run_id': phaseTwoScanRunId,
+        'fixture_id': fixtureId,
+        'model': model,
+        'response_id': responseId,
+        'status': status,
+        'context_result': jsonEncode(contextResult),
+      },
+    );
+  }
+
+  Future<List<Map<String, Object?>>> footballAiContextChecks(int phaseTwoScanRunId) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT fixture_id, model, response_id, status,
+               context_result::text AS context_result_text,
+               created_at, updated_at
+        FROM football_ai_context_checks
+        WHERE phase_two_scan_run_id = @scan_run_id
+        ORDER BY fixture_id
+      '''),
+      parameters: {'scan_run_id': phaseTwoScanRunId},
+    );
+    return result.map((row) {
+      final map = Map<String, Object?>.from(row.toColumnMap());
+      final decoded = jsonDecode(map.remove('context_result_text')?.toString() ?? '{}');
+      for (final key in ['created_at','updated_at']) {
+        final value=map[key];
+        if (value is DateTime) map[key]=value.toUtc().toIso8601String();
+      }
+      map['contextResult']=decoded is Map ? Map<String,Object?>.from(decoded) : <String,Object?>{};
       return map;
     }).toList();
   }
