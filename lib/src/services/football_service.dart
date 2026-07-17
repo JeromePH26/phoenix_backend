@@ -2,6 +2,16 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+class _FootballCacheEntry {
+  const _FootballCacheEntry({
+    required this.payload,
+    required this.expiresAt,
+  });
+
+  final Map<String, dynamic> payload;
+  final DateTime expiresAt;
+}
+
 class FootballService {
   FootballService({required this.apiKey, http.Client? client})
       : _client = client ?? http.Client();
@@ -9,6 +19,11 @@ class FootballService {
   static const _baseUrl = 'https://v3.football.api-sports.io';
   final String apiKey;
   final http.Client _client;
+
+  final Map<String, _FootballCacheEntry> _providerCache =
+      <String, _FootballCacheEntry>{};
+  final Map<String, Future<Map<String, dynamic>>> _providerFlights =
+      <String, Future<Map<String, dynamic>>>{};
 
   bool get isConfigured => apiKey.trim().isNotEmpty;
 
@@ -48,6 +63,126 @@ class FootballService {
       };
     }).where((row) => (row['id'] as String).isNotEmpty).toList();
   }
+
+  /// Zentraler, begrenzter API-Football-Zugriff für die PHÖNIX-App.
+  ///
+  /// Der geheime API-Key bleibt ausschließlich auf Railway. Die App sendet
+  /// nur den benötigten Anbieterpfad und dessen Query-Parameter.
+  Future<Map<String, dynamic>> providerRequest({
+    required String path,
+    required Map<String, String> query,
+  }) {
+    final normalizedPath = _normalizeProviderPath(path);
+    _assertAllowedProviderPath(normalizedPath);
+
+    final sortedEntries = query.entries.toList()
+      ..sort((a, b) => a.key.compareTo(b.key));
+    final cacheKey = '$normalizedPath?'
+        '${sortedEntries.map((entry) => '${entry.key}=${entry.value}').join('&')}';
+
+    final cached = _providerCache[cacheKey];
+    final now = DateTime.now();
+    if (cached != null && now.isBefore(cached.expiresAt)) {
+      return Future<Map<String, dynamic>>.value(cached.payload);
+    }
+
+    final running = _providerFlights[cacheKey];
+    if (running != null) return running;
+
+    late final Future<Map<String, dynamic>> tracked;
+    tracked = _get(normalizedPath, query).then((payload) {
+      _providerCache[cacheKey] = _FootballCacheEntry(
+        payload: payload,
+        expiresAt: DateTime.now().add(
+          _providerCacheDuration(normalizedPath, query),
+        ),
+      );
+
+      if (_providerCache.length > 500) {
+        _providerCache.removeWhere(
+          (_, value) => DateTime.now().isAfter(value.expiresAt),
+        );
+      }
+      return payload;
+    }).whenComplete(() {
+      if (identical(_providerFlights[cacheKey], tracked)) {
+        _providerFlights.remove(cacheKey);
+      }
+    });
+
+    _providerFlights[cacheKey] = tracked;
+    return tracked;
+  }
+
+  String _normalizeProviderPath(String raw) {
+    final value = raw.trim();
+    if (value.isEmpty) {
+      throw ArgumentError('Provider-Pfad fehlt.');
+    }
+    return value.startsWith('/') ? value : '/$value';
+  }
+
+  void _assertAllowedProviderPath(String path) {
+    const allowed = <String>{
+      '/fixtures',
+      '/fixtures/events',
+      '/fixtures/statistics',
+      '/fixtures/lineups',
+      '/standings',
+      '/odds',
+      '/injuries',
+      '/players',
+      '/players/squads',
+      '/teams',
+      '/teams/statistics',
+      '/leagues',
+      '/coachs',
+      '/transfers',
+      '/trophies',
+      '/sidelined',
+    };
+
+    if (!allowed.contains(path)) {
+      throw ArgumentError('Provider-Pfad ist nicht freigegeben: $path');
+    }
+  }
+
+  Duration _providerCacheDuration(
+    String path,
+    Map<String, String> query,
+  ) {
+    final liveStatus = query['live']?.isNotEmpty == true ||
+        query['status']?.contains('1H') == true ||
+        query['status']?.contains('2H') == true;
+
+    if (liveStatus ||
+        path == '/fixtures/events' ||
+        path == '/fixtures/statistics') {
+      return const Duration(seconds: 15);
+    }
+
+    if (path == '/fixtures/lineups') {
+      return const Duration(seconds: 45);
+    }
+
+    if (path == '/odds') {
+      return const Duration(minutes: 2);
+    }
+
+    if (path == '/standings' ||
+        path == '/teams/statistics' ||
+        path == '/players' ||
+        path == '/players/squads') {
+      return const Duration(minutes: 10);
+    }
+
+    if (path == '/fixtures' && query.containsKey('date')) {
+      return const Duration(minutes: 1);
+    }
+
+    return const Duration(minutes: 5);
+  }
+
 
   Future<Map<String, Object?>> liveSnapshot(String fixtureId) async {
     final normalized = fixtureId.trim();
