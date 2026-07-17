@@ -1365,6 +1365,42 @@ Future<List<Map<String, Object?>>> footballEngineInputs(
     }).toList();
   }
 
+
+  Future<List<Map<String, Object?>>> marketSelectionsForValue({
+    required int phaseTwoScanRunId,
+    int limit = 1,
+  }) async {
+    final db = await connection();
+    final safeLimit = limit.clamp(1, 20);
+
+    final result = await db.execute(
+      Sql.named('''
+        SELECT
+          fixture_id,
+          model_version,
+          selection::text AS selection_text
+        FROM football_market_selections
+        WHERE phase_two_scan_run_id = @scan_run_id
+        ORDER BY fixture_id
+        LIMIT @limit
+      '''),
+      parameters: {
+        'scan_run_id': phaseTwoScanRunId,
+        'limit': safeLimit,
+      },
+    );
+
+    return result.map((row) {
+      final map = Map<String, Object?>.from(row.toColumnMap());
+      final text = map.remove('selection_text')?.toString() ?? '{}';
+      final decoded = jsonDecode(text);
+      map['selection'] = decoded is Map
+          ? Map<String, Object?>.from(decoded)
+          : <String, Object?>{};
+      return map;
+    }).toList();
+  }
+
   Future<void> close() async {
     await _connection?.close();
     _connection = null;
