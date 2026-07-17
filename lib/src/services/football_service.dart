@@ -64,6 +64,168 @@ class FootballService {
     }).where((row) => (row['id'] as String).isNotEmpty).toList();
   }
 
+
+  Future<Map<String, Object?>> coverageForFixture({
+    required String fixtureId,
+    required String leagueId,
+    required int season,
+    required String homeTeamId,
+    required String awayTeamId,
+    Duration pauseBetweenCalls = const Duration(seconds: 4),
+  }) async {
+    final result = <String, Object?>{};
+
+    Future<void> pause() async {
+      if (pauseBetweenCalls > Duration.zero) {
+        await Future<void>.delayed(pauseBetweenCalls);
+      }
+    }
+
+    Future<void> checkList(
+      String key,
+      String path,
+      Map<String, String> query,
+    ) async {
+      try {
+        final decoded = await _get(path, query);
+        final rows = _responseRows(decoded);
+        result[key] = rows.isNotEmpty;
+        result['${key}Count'] = rows.length;
+      } catch (error) {
+        result[key] = false;
+        result['${key}Error'] = error.toString();
+      }
+
+      await pause();
+    }
+
+    Future<void> checkTeamStatistics(
+      String prefix,
+      String teamId,
+    ) async {
+      try {
+        final decoded = await _get(
+          '/teams/statistics',
+          {
+            'league': leagueId,
+            'season': season.toString(),
+            'team': teamId,
+          },
+        );
+
+        final raw = decoded['response'];
+        final statistics = raw is Map
+            ? Map<String, dynamic>.from(raw)
+            : <String, dynamic>{};
+
+        final hasStatistics = statistics.isNotEmpty;
+        result['${prefix}TeamStatistics'] = hasStatistics;
+
+        if (hasStatistics) {
+          final goals = _map(statistics['goals']);
+          final goalsFor = _map(goals['for']);
+          final goalsAgainst = _map(goals['against']);
+          final goalsForAverage = _map(goalsFor['average']);
+          final goalsAgainstAverage = _map(goalsAgainst['average']);
+          final fixtures = _map(statistics['fixtures']);
+
+          result['${prefix}Played'] = fixtures['played'];
+          result['${prefix}GoalsForAverageTotal'] =
+              goalsForAverage['total'];
+          result['${prefix}GoalsForAverageHome'] =
+              goalsForAverage['home'];
+          result['${prefix}GoalsForAverageAway'] =
+              goalsForAverage['away'];
+          result['${prefix}GoalsAgainstAverageTotal'] =
+              goalsAgainstAverage['total'];
+          result['${prefix}GoalsAgainstAverageHome'] =
+              goalsAgainstAverage['home'];
+          result['${prefix}GoalsAgainstAverageAway'] =
+              goalsAgainstAverage['away'];
+          result['${prefix}Form'] = statistics['form'];
+        }
+      } catch (error) {
+        result['${prefix}TeamStatistics'] = false;
+        result['${prefix}TeamStatisticsError'] = error.toString();
+      }
+
+      await pause();
+    }
+
+    await checkList(
+      'standings',
+      '/standings',
+      {
+        'league': leagueId,
+        'season': season.toString(),
+      },
+    );
+
+    await checkList(
+      'homeRecent',
+      '/fixtures',
+      {
+        'team': homeTeamId,
+        'season': season.toString(),
+        'last': '5',
+      },
+    );
+
+    await checkList(
+      'awayRecent',
+      '/fixtures',
+      {
+        'team': awayTeamId,
+        'season': season.toString(),
+        'last': '5',
+      },
+    );
+
+    await checkList(
+      'odds',
+      '/odds',
+      {'fixture': fixtureId},
+    );
+
+    await checkList(
+      'injuries',
+      '/injuries',
+      {'fixture': fixtureId},
+    );
+
+    await checkList(
+      'h2h',
+      '/fixtures/headtohead',
+      {
+        'h2h': '$homeTeamId-$awayTeamId',
+        'last': '5',
+      },
+    );
+
+    await checkTeamStatistics('home', homeTeamId);
+    await checkTeamStatistics('away', awayTeamId);
+
+    result['realXgAvailable'] = false;
+    result['xgSource'] = 'not_available_from_api_football';
+
+    return result;
+  }
+
+  Future<List<Map<String, Object?>>> oddsForFixture(
+    String fixtureId,
+  ) async {
+    final decoded = await _get(
+      '/odds',
+      {'fixture': fixtureId},
+    );
+
+    return _responseRows(decoded)
+        .whereType<Map>()
+        .map((row) => Map<String, Object?>.from(row))
+        .toList();
+  }
+
+
   /// Zentraler, begrenzter API-Football-Zugriff für die PHÖNIX-App.
   ///
   /// Der geheime API-Key bleibt ausschließlich auf Railway. Die App sendet
