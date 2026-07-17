@@ -11,6 +11,7 @@ import '../services/football_phase_two_scan_service.dart';
 import '../services/football_engine_input_service.dart';
 import '../services/football_simulation_service.dart';
 import '../services/football_market_selection_service.dart';
+import '../services/football_value_service.dart';
 import '../services/football_service.dart';
 import '../services/tennis_service.dart';
 
@@ -409,6 +410,59 @@ router.get(
         });
       },
     );
+
+
+    router.post('/api/admin/football/engine/check-value', (Request request) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+
+      final phaseTwoScanRunId = int.tryParse(
+        request.url.queryParameters['phase2ScanRunId'] ?? '',
+      );
+      final limit = int.tryParse(
+            request.url.queryParameters['limit'] ?? '',
+          ) ??
+          1;
+      final minimumMarketOdds = double.tryParse(
+            request.url.queryParameters['minimumMarketOdds'] ?? '',
+          ) ??
+          1.40;
+      final minimumValuePercent = double.tryParse(
+            request.url.queryParameters['minimumValuePercent'] ?? '',
+          ) ??
+          5.0;
+
+      if (phaseTwoScanRunId == null) {
+        return jsonResponse(
+          {'error': 'phase2ScanRunId fehlt.'},
+          statusCode: 400,
+        );
+      }
+
+      if (limit < 1 || limit > 20) {
+        return jsonResponse(
+          {'error': 'limit muss zwischen 1 und 20 liegen.'},
+          statusCode: 400,
+        );
+      }
+
+      try {
+        final service = FootballValueService(
+          database: database,
+          football: football,
+        );
+        final result = await service.check(
+          phaseTwoScanRunId: phaseTwoScanRunId,
+          limit: limit,
+          minimumMarketOdds: minimumMarketOdds,
+          minimumValuePercent: minimumValuePercent,
+        );
+        return jsonResponse(result);
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
 
     router.post('/api/admin/football/leagues/seed-start', (Request request) async {
       if (!_isAdmin(request)) {
