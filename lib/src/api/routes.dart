@@ -14,7 +14,7 @@ import '../services/football_market_selection_service.dart';
 import '../services/football_value_service.dart';
 import '../services/football_finalization_service.dart';
 import '../services/football_daily_pipeline_service.dart';
-import '../services/openai_context_service.dart';
+import '../services/gemini_context_service.dart';
 import '../services/football_service.dart';
 import '../services/tennis_service.dart';
 
@@ -507,7 +507,7 @@ router.get(
             limit: limit,
           );
 
-          final service = OpenAiContextService(database: database);
+          final service = GeminiContextService(database: database);
 
           unawaited(
             service.runBackground(
