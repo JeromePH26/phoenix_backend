@@ -35,10 +35,10 @@ class OpenAiContextService {
       final body = {
         'model': model,
         'store': false,
-        'max_output_tokens': 1600,
+        'max_output_tokens': 3500,
         'tools': [{'type': 'web_search'}],
         'include': ['web_search_call.action.sources'],
-        'instructions': 'Du prüfst aktuelle Kontextfakten für PHÖNIX. Berechne keine Wahrscheinlichkeiten, fairen Quoten oder Value-Werte. Erfinde keine Verletzungen, Sperren, Aufstellungen oder Quellen. Nutze bevorzugt offizielle Vereins- und Wettbewerbsquellen. Antworte ausschließlich im verlangten JSON-Schema.',
+        'instructions': 'Du prüfst aktuelle Kontextfakten für PHÖNIX. Berechne keine Wahrscheinlichkeiten, fairen Quoten oder Value-Werte. Erfinde keine Verletzungen, Sperren, Aufstellungen oder Quellen. Nutze bevorzugt offizielle Vereins- und Wettbewerbsquellen. Antworte ausschließlich im verlangten JSON-Schema. Halte summary, evidence und contextPoints kurz und präzise.',
         'input': 'Spiel: ${payload['homeTeam']} gegen ${payload['awayTeam']}\nLiga: ${payload['league']}\nAnstoß: ${payload['kickoff']}\nPHÖNIX-Tipp: ${phoenixTip['market']}\nAPI-Verletzungsdatensätze: ${availability['injuriesCount']}\nPrüfe aktuelle Ausfälle, Sperren, Rückkehrer, Rotation, Belastung, Motivation, Reise und Aufstellungsstatus. Bewerte nur, ob der Kontext den Tipp unterstützt, neutral ist oder schwächt.',
         'text': {
           'format': {
@@ -55,6 +55,7 @@ class OpenAiContextService {
                 'lineupStatus': {'type':'string','enum':['confirmed','expected_only','not_available']},
                 'injuries': {
                   'type':'array',
+                  'maxItems': 8,
                   'items': {
                     'type':'object','additionalProperties':false,
                     'properties': {
@@ -62,13 +63,13 @@ class OpenAiContextService {
                       'team': {'type':'string'},
                       'status': {'type':'string','enum':['out','doubtful','available','unclear']},
                       'importance': {'type':'string','enum':['high','medium','low','unknown']},
-                      'evidence': {'type':'string'}
+                      'evidence': {'type':'string','maxLength':240}
                     },
                     'required':['player','team','status','importance','evidence']
                   }
                 },
-                'contextPoints': {'type':'array','items':{'type':'string'}},
-                'summary': {'type':'string'},
+                'contextPoints': {'type':'array','maxItems':6,'items':{'type':'string','maxLength':240}},
+                'summary': {'type':'string','maxLength':700},
                 'sourceUrls': {'type':'array','items':{'type':'string'}}
               },
               'required':['verificationStatus','contextEffect','suggestedTrustAdjustment','lineupStatus','injuries','contextPoints','summary','sourceUrls']
@@ -88,6 +89,15 @@ class OpenAiContextService {
       final decoded = jsonDecode(response.body);
       if (decoded is! Map) throw StateError('Ungültige OpenAI-Antwort.');
       final responseMap=Map<String,Object?>.from(decoded);
+
+      final responseStatus = responseMap['status']?.toString() ?? 'unknown';
+      if (responseStatus == 'incomplete') {
+        final details = responseMap['incomplete_details'];
+        throw StateError(
+          'OpenAI-Antwort unvollständig: $details',
+        );
+      }
+
       final context=jsonDecode(_extractOutputText(responseMap));
       if (context is! Map) throw StateError('OpenAI lieferte kein JSON-Objekt.');
       final result=<String,Object?>{
