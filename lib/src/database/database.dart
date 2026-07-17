@@ -813,6 +813,49 @@ class PhoenixDatabase {
     );
   }
 
+
+  Future<Map<String, Object?>?> footballScanRunStatus(int scanRunId) async {
+    final db = await connection();
+    final runResult = await db.execute(
+      Sql.named('''
+        SELECT id, scan_date, phase, status, total_matches, eligible_matches,
+          excluded_matches, payload::text AS payload_text, started_at, completed_at
+        FROM football_scan_runs
+        WHERE id = @scan_run_id
+        LIMIT 1
+      '''),
+      parameters: {'scan_run_id': scanRunId},
+    );
+    if (runResult.isEmpty) return null;
+    final row = Map<String, Object?>.from(runResult.first.toColumnMap());
+    final payloadText = row.remove('payload_text')?.toString() ?? '{}';
+    final decodedPayload = jsonDecode(payloadText);
+    for (final key in ['scan_date', 'started_at', 'completed_at']) {
+      final value = row[key];
+      if (value is DateTime) row[key] = value.toUtc().toIso8601String();
+    }
+    final resultCount = await db.execute(
+      Sql.named('''
+        SELECT COUNT(*)::INTEGER AS checked,
+          COUNT(*) FILTER (WHERE analysis_allowed = TRUE)::INTEGER AS analysis_allowed,
+          COUNT(*) FILTER (WHERE analysis_allowed = FALSE)::INTEGER AS below_threshold
+        FROM football_phase_two_results
+        WHERE scan_run_id = @scan_run_id
+      '''),
+      parameters: {'scan_run_id': scanRunId},
+    );
+    final counts = resultCount.isEmpty
+        ? <String, Object?>{}
+        : Map<String, Object?>.from(resultCount.first.toColumnMap());
+    return {
+      ...row,
+      'payload': decodedPayload is Map
+          ? Map<String, Object?>.from(decodedPayload)
+          : <String, Object?>{},
+      ...counts,
+    };
+  }
+
   Future<void> close() async {
     await _connection?.close();
     _connection = null;
