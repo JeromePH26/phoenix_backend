@@ -340,9 +340,9 @@ router.get(
         );
       }
 
-      if (limit < 1 || limit > 20) {
+      if (limit < 1 || limit > 250) {
         return jsonResponse(
-          {'error': 'limit muss zwischen 1 und 20 liegen.'},
+          {'error': 'limit muss zwischen 1 und 250 liegen.'},
           statusCode: 400,
         );
       }
@@ -493,9 +493,9 @@ router.get(
         );
       }
 
-      if (limit < 1 || limit > 20) {
+      if (limit < 1 || limit > 250) {
         return jsonResponse(
-          {'error': 'limit muss zwischen 1 und 20 liegen.'},
+          {'error': 'limit muss zwischen 1 und 250 liegen.'},
           statusCode: 400,
         );
       }
@@ -854,7 +854,7 @@ router.get(
       final limit = int.tryParse(
             request.url.queryParameters['limit'] ?? '',
           ) ??
-          20;
+          100;
       final minimumDataQuality = int.tryParse(
             request.url.queryParameters['minimumDataQuality'] ?? '',
           ) ??
@@ -870,9 +870,9 @@ router.get(
           statusCode: 400,
         );
       }
-      if (limit < 1 || limit > 20) {
+      if (limit < 1 || limit > 250) {
         return jsonResponse(
-          {'error': 'limit muss zwischen 1 und 20 liegen.'},
+          {'error': 'limit muss zwischen 1 und 250 liegen.'},
           statusCode: 400,
         );
       }
