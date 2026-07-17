@@ -1534,7 +1534,7 @@ Future<List<Map<String, Object?>>> footballEngineInputs(
       '''),
       parameters: {
         'scan_run_id': phaseTwoScanRunId,
-        'limit': limit.clamp(1, 10),
+        'limit': limit.clamp(1, 20),
       },
     );
 
