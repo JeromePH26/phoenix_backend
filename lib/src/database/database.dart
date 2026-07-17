@@ -535,15 +535,15 @@ class PhoenixDatabase {
     );
 
     return result.map((row) {
-  final map = Map<String, Object?>.from(row.toColumnMap());
+      final map = Map<String, Object?>.from(row.toColumnMap());
 
-  final lastSeenAt = map['last_seen_at'];
-  if (lastSeenAt is DateTime) {
-    map['last_seen_at'] = lastSeenAt.toIso8601String();
-  }
+      final lastSeenAt = map['last_seen_at'];
+      if (lastSeenAt is DateTime) {
+        map['last_seen_at'] = lastSeenAt.toUtc().toIso8601String();
+      }
 
-  return map;
-}).toList();
+      return map;
+    }).toList();
   }
 
   Future<bool> setFootballLeagueManualStatus({
@@ -571,6 +571,99 @@ class PhoenixDatabase {
     );
 
     return result.isNotEmpty;
+  }
+
+
+  Future<void> seedFootballStartLeagues({int season = 2026}) async {
+    final leagues = <Map<String, Object?>>[
+      {'league_id': '39', 'league_name': 'Premier League', 'country': 'England', 'level': 1},
+      {'league_id': '61', 'league_name': 'Ligue 1', 'country': 'France', 'level': 1},
+      {'league_id': '78', 'league_name': 'Bundesliga', 'country': 'Germany', 'level': 1},
+      {'league_id': '79', 'league_name': '2. Bundesliga', 'country': 'Germany', 'level': 2},
+      {'league_id': '80', 'league_name': '3. Liga', 'country': 'Germany', 'level': 3},
+      {'league_id': '88', 'league_name': 'Eredivisie', 'country': 'Netherlands', 'level': 1},
+      {'league_id': '94', 'league_name': 'Primeira Liga', 'country': 'Portugal', 'level': 1},
+      {'league_id': '135', 'league_name': 'Serie A', 'country': 'Italy', 'level': 1},
+      {'league_id': '140', 'league_name': 'La Liga', 'country': 'Spain', 'level': 1},
+      {'league_id': '144', 'league_name': 'Jupiler Pro League', 'country': 'Belgium', 'level': 1},
+    ];
+
+    final db = await connection();
+
+    for (final league in leagues) {
+      await db.execute(
+        Sql.named('''
+          INSERT INTO football_leagues (
+            league_id,
+            league_name,
+            country,
+            gender,
+            competition_level,
+            manual_status,
+            historical_status,
+            last_seen_at,
+            updated_at
+          )
+          VALUES (
+            @league_id,
+            @league_name,
+            @country,
+            'men',
+            @competition_level,
+            'whitelist',
+            'provisional',
+            NOW(),
+            NOW()
+          )
+          ON CONFLICT (league_id) DO UPDATE SET
+            league_name = EXCLUDED.league_name,
+            country = EXCLUDED.country,
+            gender = 'men',
+            competition_level = EXCLUDED.competition_level,
+            manual_status = 'whitelist',
+            historical_status = CASE
+              WHEN football_leagues.historical_status = 'approved'
+                THEN 'approved'
+              ELSE 'provisional'
+            END,
+            updated_at = NOW()
+        '''),
+        parameters: {
+          'league_id': league['league_id'],
+          'league_name': league['league_name'],
+          'country': league['country'],
+          'competition_level': league['level'],
+        },
+      );
+
+      await db.execute(
+        Sql.named('''
+          INSERT INTO football_league_seasons (
+            league_id,
+            season,
+            status,
+            updated_at
+          )
+          VALUES (
+            @league_id,
+            @season,
+            'provisional',
+            NOW()
+          )
+          ON CONFLICT (league_id, season) DO UPDATE SET
+            status = CASE
+              WHEN football_league_seasons.status = 'approved'
+                THEN 'approved'
+              ELSE 'provisional'
+            END,
+            updated_at = NOW()
+        '''),
+        parameters: {
+          'league_id': league['league_id'],
+          'season': season,
+        },
+      );
+    }
   }
 
   Future<void> close() async {
