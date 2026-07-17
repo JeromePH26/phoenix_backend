@@ -534,9 +534,16 @@ class PhoenixDatabase {
       parameters: {'limit': safeLimit},
     );
 
-    return result
-        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
-        .toList();
+    return result.map((row) {
+  final map = Map<String, Object?>.from(row.toColumnMap());
+
+  final lastSeenAt = map['last_seen_at'];
+  if (lastSeenAt is DateTime) {
+    map['last_seen_at'] = lastSeenAt.toIso8601String();
+  }
+
+  return map;
+}).toList();
   }
 
   Future<bool> setFootballLeagueManualStatus({
