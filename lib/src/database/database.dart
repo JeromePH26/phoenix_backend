@@ -392,6 +392,7 @@ await db.execute('''
         home_score INTEGER,
         away_score INTEGER,
         closing_odds DOUBLE PRECISION,
+        assigned_units DOUBLE PRECISION NOT NULL DEFAULT 0,
         profit_units DOUBLE PRECISION,
         settled_at TIMESTAMPTZ,
         payload JSONB NOT NULL,
@@ -399,6 +400,12 @@ await db.execute('''
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         PRIMARY KEY (phase_two_scan_run_id, fixture_id)
       )
+    ''');
+
+
+    await db.execute('''
+      ALTER TABLE football_final_tips
+      ADD COLUMN IF NOT EXISTS assigned_units DOUBLE PRECISION NOT NULL DEFAULT 0
     ''');
 
     await db.execute('''
@@ -428,7 +435,7 @@ await db.execute('''
 
     await db.execute('''
       INSERT INTO app_meta (key, value)
-      VALUES ('schema_version', '10')
+      VALUES ('schema_version', '11')
       ON CONFLICT (key) DO UPDATE
       SET value = EXCLUDED.value, updated_at = NOW()
     ''');
@@ -1772,7 +1779,7 @@ Future<List<Map<String, Object?>>> footballEngineInputs(
           is_value_tip, data_quality, base_trust, ai_trust_adjustment,
           final_trust, trust_level, lineup_status, verification_status,
           context_effect, explanation, source_urls, top_scorelines,
-          publication_status, payload, updated_at
+          publication_status, assigned_units, payload, updated_at
         ) VALUES (
           @scan_run_id, @fixture_id, CAST(@tip_date AS DATE),
           CAST(NULLIF(@kickoff, '') AS TIMESTAMPTZ),
@@ -1782,7 +1789,7 @@ Future<List<Map<String, Object?>>> footballEngineInputs(
           @final_trust, @trust_level, @lineup_status, @verification_status,
           @context_effect, @explanation, CAST(@source_urls AS JSONB),
           CAST(@top_scorelines AS JSONB), @publication_status,
-          CAST(@payload AS JSONB), NOW()
+          @assigned_units, CAST(@payload AS JSONB), NOW()
         )
         ON CONFLICT (phase_two_scan_run_id, fixture_id) DO UPDATE SET
           market_key = EXCLUDED.market_key,
@@ -1804,6 +1811,7 @@ Future<List<Map<String, Object?>>> footballEngineInputs(
           source_urls = EXCLUDED.source_urls,
           top_scorelines = EXCLUDED.top_scorelines,
           publication_status = EXCLUDED.publication_status,
+          assigned_units = EXCLUDED.assigned_units,
           payload = EXCLUDED.payload,
           updated_at = NOW()
       '''),
@@ -1834,6 +1842,7 @@ Future<List<Map<String, Object?>>> footballEngineInputs(
         'source_urls': jsonEncode(tip['sourceUrls'] ?? <Object?>[]),
         'top_scorelines': jsonEncode(tip['topScorelines'] ?? <Object?>[]),
         'publication_status': tip['publicationStatus']?.toString() ?? 'published',
+        'assigned_units': tip['assignedUnits'] ?? 0,
         'payload': jsonEncode(tip),
       },
     );
