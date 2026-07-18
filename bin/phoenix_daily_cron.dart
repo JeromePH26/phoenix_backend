@@ -299,7 +299,7 @@ class _CronConfig {
     return _CronConfig(
       backendUrl: backendUrl,
       adminToken: adminToken,
-      limit: integer('PHOENIX_CRON_LIMIT', 100).clamp(1, 250),
+      limit: integer('PHOENIX_CRON_LIMIT', 20).clamp(1, 20),
       minimumDataQuality:
           integer('PHOENIX_CRON_MINIMUM_DATA_QUALITY', 50).clamp(0, 100),
       simulations:
