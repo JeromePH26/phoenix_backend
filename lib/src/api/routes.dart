@@ -288,6 +288,13 @@ router.post('/api/admin/football/engine/prepare', (Request request) async {
       ) ??
       1;
 
+  if (phaseTwoScanRunId == null) {
+    return jsonResponse(
+      {'error': 'phase2ScanRunId fehlt.'},
+      statusCode: 400,
+    );
+  }
+
   if (limit < 1 || limit > 20) {
     return jsonResponse(
       {'error': 'limit muss zwischen 1 und 20 liegen.'},
