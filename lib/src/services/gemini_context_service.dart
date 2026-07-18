@@ -35,11 +35,20 @@ class GeminiContextService {
     );
 
     final results = <Map<String, Object?>>[];
+    final failures = <Map<String, Object?>>[];
+
     for (final candidate in candidates) {
-      results.add(await _verifyCandidate(
-        phaseTwoScanRunId: phaseTwoScanRunId,
-        candidate: candidate,
-      ));
+      try {
+        results.add(await _verifyCandidate(
+          phaseTwoScanRunId: phaseTwoScanRunId,
+          candidate: candidate,
+        ));
+      } catch (error) {
+        failures.add({
+          'fixtureId': candidate['fixture_id']?.toString() ?? '',
+          'error': error.toString(),
+        });
+      }
     }
 
     return {
@@ -47,7 +56,9 @@ class GeminiContextService {
       'phase': 3,
       'provider': 'gemini',
       'processed': results.length,
+      'failed': failures.length,
       'results': results,
+      'failures': failures,
     };
   }
 
@@ -303,4 +314,9 @@ Reise, Taktikhinweise, Trainerwechsel, Wetter/Platz und Aufstellungsstatus.
     if (value is num) return value.round();
     return int.tryParse(value?.toString() ?? '') ?? 0;
   }
+
+  void close() {
+    _client.close();
+  }
+
 }
