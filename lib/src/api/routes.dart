@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:shelf/shelf.dart';
 import 'package:shelf_router/shelf_router.dart';
 
 import '../config/app_config.dart';
 import '../database/database.dart';
 import '../http/json_response.dart';
+import '../services/football_daily_pipeline_service.dart';
 import '../services/football_phase_one_scan_service.dart';
 import '../services/football_service.dart';
 import '../services/tennis_service.dart';
@@ -293,6 +296,79 @@ class ApiRoutes {
         'tennis': null,
         'status': 'Noch keine serverseitige Vollanalyse ausgeführt.',
       }),
+    );
+
+
+    router.post('/api/admin/football/daily-scan', (Request request) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+
+      final dateText = request.url.queryParameters['date'];
+      final date =
+          dateText == null ? DateTime.now() : DateTime.tryParse(dateText);
+      final limit =
+          int.tryParse(request.url.queryParameters['limit'] ?? '') ?? 20;
+      final minimumDataQuality = int.tryParse(
+            request.url.queryParameters['minimumDataQuality'] ?? '',
+          ) ??
+          50;
+      final simulations = int.tryParse(
+            request.url.queryParameters['simulations'] ?? '',
+          ) ??
+          100000;
+
+      if (date == null) {
+        return jsonResponse(
+          {'error': 'Datum muss YYYY-MM-DD sein.'},
+          statusCode: 400,
+        );
+      }
+
+      final jobId = await database.createFootballDailyPipelineJob(
+        date: date,
+        limit: limit.clamp(1, 20),
+        minimumDataQuality: minimumDataQuality.clamp(50, 100),
+        simulations: simulations.clamp(10000, 100000),
+      );
+
+      unawaited(
+        FootballDailyPipelineService(
+          database: database,
+          football: football,
+        ).run(
+          jobId: jobId,
+          date: date,
+          limit: limit.clamp(1, 20),
+          minimumDataQuality: minimumDataQuality.clamp(50, 100),
+          simulations: simulations.clamp(10000, 100000),
+        ),
+      );
+
+      return jsonResponse({
+        'status': 'started',
+        'jobId': jobId,
+        'date': _day(date),
+        'statusUrl': '/api/admin/football/daily-scan/$jobId',
+      }, statusCode: 202);
+    });
+
+    router.get(
+      '/api/admin/football/daily-scan/<jobId|[0-9]+>',
+      (Request request, String jobId) async {
+        if (!_isAdmin(request)) {
+          return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+        }
+        final id = int.tryParse(jobId);
+        if (id == null) {
+          return jsonResponse({'error': 'Ungültige Job-ID.'}, statusCode: 400);
+        }
+        final job = await database.footballDailyPipelineJob(id);
+        if (job == null) {
+          return jsonResponse({'error': 'Job nicht gefunden.'}, statusCode: 404);
+        }
+        return jsonResponse(job);
+      },
     );
 
     router.post('/api/admin/migrate', (Request request) async {
