@@ -5,19 +5,21 @@ class FootballMarketSelectionService {
 
   final PhoenixDatabase database;
 
-  static const modelVersion = 'market_selection_trust_v2_context100k';
+  static const modelVersion = 'market_selection_trust_v2_decimal';
 
   Future<Map<String, Object?>> select({
     required int phaseTwoScanRunId,
-    int limit = 1,
+    int limit = 20,
     double minimumProbability = 0,
   }) async {
     final rows = await database.simulationRowsForSelection(
       phaseTwoScanRunId: phaseTwoScanRunId,
-      limit: limit,
+      limit: limit.clamp(1, 20),
     );
 
     final outputs = <Map<String, Object?>>[];
+    final minimumProbabilityDecimal =
+        minimumProbability > 1 ? minimumProbability / 100 : minimumProbability;
 
     for (final row in rows) {
       final fixtureId = _string(row['fixture_id']);
@@ -31,8 +33,8 @@ class FootballMarketSelectionService {
         _candidate(
           key: 'homeWin',
           label: 'Heimsieg',
-          probability: probabilities['homeWin'],
-          fairOdds: fairOdds['homeWin'],
+          probability: probabilities['homeWin'] ?? probabilities['home'],
+          fairOdds: fairOdds['homeWin'] ?? fairOdds['home'],
         ),
         _candidate(
           key: 'draw',
@@ -43,8 +45,8 @@ class FootballMarketSelectionService {
         _candidate(
           key: 'awayWin',
           label: 'Auswärtssieg',
-          probability: probabilities['awayWin'],
-          fairOdds: fairOdds['awayWin'],
+          probability: probabilities['awayWin'] ?? probabilities['away'],
+          fairOdds: fairOdds['awayWin'] ?? fairOdds['away'],
         ),
         _candidate(
           key: 'over25',
@@ -70,9 +72,7 @@ class FootballMarketSelectionService {
           probability: probabilities['bttsNo'],
           fairOdds: fairOdds['bttsNo'],
         ),
-      ].where((candidate) => candidate['probability'] != null).toList();
-
-      if (candidates.isEmpty) continue;
+      ];
 
       candidates.sort((a, b) {
         final pA = _number(a['probability']) ?? 0;
@@ -82,36 +82,30 @@ class FootballMarketSelectionService {
 
       final best = candidates.first;
       final second = candidates.length > 1 ? candidates[1] : candidates.first;
-      final bestProbability = _number(best['probability']) ?? 0;
-      final secondProbability = _number(second['probability']) ?? 0;
+
+      final bestProbability = _asProbability(best['probability']);
+      final secondProbability = _asProbability(second['probability']);
       final probabilityGap =
-          (bestProbability - secondProbability).clamp(0, 100).toDouble();
+          (bestProbability - secondProbability).clamp(0.0, 1.0).toDouble();
+
+      final bestProbabilityPercent = bestProbability * 100;
+      final probabilityGapPercent = probabilityGap * 100;
 
       final dataQuality = _int(simulation['dataQuality'], fallback: 0);
       final realXgAvailable = goalExpectations['realXgAvailable'] == true;
-      final aiContextVerified = goalExpectations['aiContextApplied'] == true ||
-          aiContext['applied'] == true;
-      final lineupConfirmed = simulation['lineupConfirmed'] == true ||
-          goalExpectations['lineupConfirmed'] == true;
-      final confidenceDelta =
-          _int(simulation['confidenceDelta']).clamp(-10, 5);
-      final simulationCount =
+      final simulations =
           _int(simulation['simulations'], fallback: 100000);
 
-      final baseTrust = _trustScore(
-        bestProbability: bestProbability,
-        probabilityGap: probabilityGap,
+      final trustScore = _trustScore(
+        bestProbabilityPercent: bestProbabilityPercent,
+        probabilityGapPercent: probabilityGapPercent,
         dataQuality: dataQuality,
-        simulations: simulationCount,
+        simulations: simulations,
         realXgAvailable: realXgAvailable,
-        aiContextVerified: aiContextVerified,
-        lineupConfirmed: lineupConfirmed,
       );
-      final trustScore =
-          (baseTrust + confidenceDelta).clamp(0, 100).toInt();
 
-      final belowRequestedProbability =
-          minimumProbability > 0 && bestProbability < minimumProbability;
+      final qualifiesForTip =
+          bestProbability >= minimumProbabilityDecimal.clamp(0.0, 1.0);
 
       final selection = <String, Object?>{
         'fixtureId': fixtureId,
@@ -120,30 +114,33 @@ class FootballMarketSelectionService {
         'league': simulation['league'],
         'kickoff': simulation['kickoff'],
         'modelVersion': modelVersion,
-        'qualifiesForTip': !belowRequestedProbability,
+        'qualifiesForTip': qualifiesForTip,
         'phoenixTip': {
           'marketKey': best['key'],
           'market': best['label'],
-          'probability': bestProbability,
+          'probability': _roundProbability(bestProbability),
+          'probabilityPercent': _round(bestProbabilityPercent),
           'fairOdds': best['fairOdds'],
         },
         'trust': {
           'score': trustScore,
-          'baseScore': baseTrust,
-          'confidenceDelta': confidenceDelta,
           'label': _trustLabel(trustScore),
           'components': {
-            'modelProbability': bestProbability,
-            'probabilityGapToSecondMarket': _round(probabilityGap),
+            'modelProbability': _roundProbability(bestProbability),
+            'modelProbabilityPercent': _round(bestProbabilityPercent),
+            'probabilityGapToSecondMarket':
+                _roundProbability(probabilityGap),
+            'probabilityGapPercent': _round(probabilityGapPercent),
             'dataQuality': dataQuality,
-            'simulationCount': simulationCount,
+            'simulationCount': simulations,
             'realXgAvailable': realXgAvailable,
-            'lineupConfirmed': lineupConfirmed,
-            'aiContextVerified': aiContextVerified,
+            'lineupConfirmed':
+                aiContext['lineupStatus'] == 'confirmed',
+            'aiContextVerified': aiContext['applied'] == true,
           },
         },
-        'aiContext': aiContext,
         'topMarkets': candidates.take(3).toList(),
+        'aiContext': aiContext,
         'value': {
           'status': 'not_checked',
           'marketOdds': null,
@@ -152,7 +149,7 @@ class FootballMarketSelectionService {
           'valuePercent': null,
           'isValueTip': false,
           'reason':
-              'Die echte Buchmacherquote wurde noch nicht mit der fairen Quote verglichen.',
+              'Die Buchmacherquote wurde noch nicht mit der fairen Quote verglichen.',
         },
         'display': {
           'primaryLabel': 'PHÖNIX-TIPP',
@@ -163,12 +160,14 @@ class FootballMarketSelectionService {
         'warnings': [
           if (!realXgAvailable)
             'Noch keine echten xG/xGA-Daten vorhanden.',
-          if (!lineupConfirmed)
-            'Bestätigte Aufstellung ist noch nicht eingerechnet.',
-          if (!aiContextVerified)
-            'Keine ausreichend verlässliche Gemini-Kontextprüfung angewendet.',
-          if (belowRequestedProbability)
-            'Die Tippwahrscheinlichkeit liegt unter der angeforderten Mindestgrenze.',
+          if (aiContext['lineupStatus'] != 'confirmed')
+            'Bestätigte Aufstellung ist noch nicht verfügbar.',
+          if (aiContext['applied'] == true)
+            'Gemini-Kontext wurde bereits vor der Simulation angewendet.',
+          if (aiContext['applied'] != true)
+            'Kein verifizierter Gemini-Kontext angewendet.',
+          if (aiContext['fallbackUsed'] == true)
+            'Verifizierter Kontext-Fallback wurde verwendet.',
         ],
       };
 
@@ -191,42 +190,55 @@ class FootballMarketSelectionService {
     };
   }
 
+  Map<String, Object?> _candidate({
+    required String key,
+    required String label,
+    required Object? probability,
+    required Object? fairOdds,
+  }) {
+    final normalizedProbability = _asProbability(probability);
+    final parsedFairOdds = _number(fairOdds) ??
+        (normalizedProbability > 0 ? 1 / normalizedProbability : null);
+
+    return {
+      'key': key,
+      'label': label,
+      'probability': _roundProbability(normalizedProbability),
+      'probabilityPercent': _round(normalizedProbability * 100),
+      'fairOdds': parsedFairOdds == null
+          ? null
+          : double.parse(parsedFairOdds.toStringAsFixed(2)),
+    };
+  }
+
   int _trustScore({
-    required double bestProbability,
-    required double probabilityGap,
+    required double bestProbabilityPercent,
+    required double probabilityGapPercent,
     required int dataQuality,
     required int simulations,
     required bool realXgAvailable,
-    required bool aiContextVerified,
-    required bool lineupConfirmed,
   }) {
-    // 30 % Modellwahrscheinlichkeit
-    // 15 % Abstand zum zweitbesten Markt
-    // 30 % Datenqualität
-    // 10 % Simulationsumfang
-    // 5 % echte xG/xGA
-    // 5 % verifizierter KI-Kontext
-    // 5 % bestätigte Aufstellung
     final probabilityComponent =
-        (bestProbability.clamp(0, 100) / 100) * 30;
-    final gapComponent = (probabilityGap.clamp(0, 25) / 25) * 15;
+        (bestProbabilityPercent.clamp(0, 100) / 100) * 35;
+
+    final gapComponent =
+        (probabilityGapPercent.clamp(0, 25) / 25) * 20;
+
     final dataQualityComponent =
         (dataQuality.clamp(0, 100) / 100) * 30;
+
     final simulationComponent =
         (simulations.clamp(1000, 100000) / 100000) * 10;
-    final xgComponent = realXgAvailable ? 5.0 : 0.0;
-    final aiComponent = aiContextVerified ? 5.0 : 0.0;
-    final lineupComponent = lineupConfirmed ? 5.0 : 0.0;
 
-    return (probabilityComponent +
-            gapComponent +
-            dataQualityComponent +
-            simulationComponent +
-            xgComponent +
-            aiComponent +
-            lineupComponent)
-        .round()
-        .clamp(0, 100);
+    final xgComponent = realXgAvailable ? 5.0 : 0.0;
+
+    final score = probabilityComponent +
+        gapComponent +
+        dataQualityComponent +
+        simulationComponent +
+        xgComponent;
+
+    return score.round().clamp(0, 100);
   }
 
   String _trustLabel(int score) {
@@ -236,18 +248,10 @@ class FootballMarketSelectionService {
     return 'Niedriges Vertrauen';
   }
 
-  Map<String, Object?> _candidate({
-    required String key,
-    required String label,
-    required Object? probability,
-    required Object? fairOdds,
-  }) {
-    return {
-      'key': key,
-      'label': label,
-      'probability': _number(probability),
-      'fairOdds': _number(fairOdds),
-    };
+  double _asProbability(Object? value) {
+    final number = _number(value) ?? 0;
+    if (number > 1) return (number / 100).clamp(0.0, 1.0).toDouble();
+    return number.clamp(0.0, 1.0).toDouble();
   }
 
   double? _number(Object? value) {
@@ -255,16 +259,20 @@ class FootballMarketSelectionService {
     return double.tryParse(value?.toString().replaceAll(',', '.') ?? '');
   }
 
-  int _int(Object? value, {int fallback = 0}) {
-    if (value is int) return value;
-    if (value is num) return value.round();
-    return int.tryParse(value?.toString() ?? '') ?? fallback;
-  }
+  double _roundProbability(double value) =>
+      double.parse(value.toStringAsFixed(6));
 
-  double _round(double value) => double.parse(value.toStringAsFixed(2));
+  double _round(double value) =>
+      double.parse(value.toStringAsFixed(2));
 
   Map<String, Object?> _map(Object? value) =>
       value is Map ? Map<String, Object?>.from(value) : <String, Object?>{};
 
   String _string(Object? value) => value?.toString().trim() ?? '';
+
+  int _int(Object? value, {int fallback = 0}) {
+    if (value is int) return value;
+    if (value is num) return value.round();
+    return int.tryParse(value?.toString() ?? '') ?? fallback;
+  }
 }
