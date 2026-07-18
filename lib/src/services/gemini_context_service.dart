@@ -71,27 +71,117 @@ class GeminiContextService {
     final availability = _map(candidate['availability']);
 
     final prompt = '''
-Du prüfst aktuelle Nachrichten und Kontextfakten für die PHÖNIX-Fußballanalyse.
+Du bist die externe Kontext- und Taktikprüfung für die PHÖNIX-Fußballanalyse.
 
-WICHTIG:
+GRUNDSÄTZE:
 - Berechne keine Wettwahrscheinlichkeit, keine faire Quote und kein Value.
-- Erfinde keine Verletzungen, Sperren, Aufstellungen oder Quellen.
-- Nutze bevorzugt offizielle Vereins-, Liga- und Wettbewerbsquellen.
-- Prüfe nur neue Informationen, die nicht bereits sicher in den strukturierten API-Daten enthalten sind.
-- Markiere mögliche Doppelzählungen.
-- Die Torerwartungs-Anpassung je Team darf nur zwischen -0.20 und +0.20 liegen.
-- Der Confidence-Einfluss darf nur zwischen -10 und +5 liegen.
+- Erfinde keine Fakten, Quellen, Verletzungen, Sperren oder Aufstellungen.
+- Nutze bevorzugt offizielle Vereins-, Liga-, Trainer- und Wettbewerbsquellen.
+- Ergänze nur Informationen, die nicht bereits sicher in den strukturierten API-Daten enthalten sind.
+- Markiere mögliche Doppelzählungen ausdrücklich.
+- Trenne gesicherte aktuelle Fakten von längerfristigen taktischen Tendenzen.
+- Eine taktische Vermutung ohne belastbare Quelle darf die Torerwartung nicht verändern.
+- Die gesamte Torerwartungs-Anpassung je Team darf nur zwischen -0.20 und +0.20 liegen.
+- Der gesamte Confidence-Einfluss darf nur zwischen -10 und +5 liegen.
 
-Spiel: ${payload['homeTeam']} gegen ${payload['awayTeam']}
-Liga: ${payload['league']}
+SPIEL:
+${payload['homeTeam']} gegen ${payload['awayTeam']}
+Liga/Wettbewerb: ${payload['league']}
 Anstoß: ${payload['kickoff']}
+Land: ${payload['country']}
 Vorhandene Verletzungsdatensätze: ${availability['injuriesCount']}
 Aufstellungen verfügbar: ${availability['lineups']}
 Datenqualität: ${candidate['data_quality']}
 
-Prüfe aktuelle Ausfälle, Sperren, Rückkehrer, Rotation, Belastung, Motivation,
-Reise, Taktikhinweise, Trainerwechsel, Wetter/Platz und Aufstellungsstatus.
+PRÜFAUFTRAG:
+1. Ausfälle, Sperren, Rückkehrer, Rotation und voraussichtliche/confirmierte Aufstellungen.
+2. Wichtigkeit des Spiels: Titel, Aufstieg, Abstieg, Qualifikation, K.-o.-Lage, Derby,
+   Hin-/Rückspiel, Must-win, Tabellenkontext, mögliche Schonung und Motivationslage.
+3. Erwartete taktische Grundordnung beider Teams und wahrscheinliche Anpassungen.
+4. Spielaufbau: kurz/lang, Aufbau über Außen/Zentrum, Ballbesitzabsicht und Pressingresistenz.
+5. Pressing: Intensität, Höhe, Auslöser, Gegenpressing, Pressinganfälligkeit und mögliche Auswege.
+6. Defensive: hoher/mittlerer/tiefer Block, Raum-/Mannorientierung, Restverteidigung und Flankenverteidigung.
+7. Umschalten: Konterstärke, Tempo, Tiefe, Absicherung und Risiko nach Ballverlusten.
+8. Breite, Halbräume, Überladungen, Standards, zweite Bälle und erwartetes Spieltempo.
+9. Direkter taktischer Matchup: Welche Spielweise kann die andere neutralisieren oder bestrafen?
+10. Belastung, Reise, Wetter, Platz, Trainerwechsel und sonstige aktuelle Kontextfaktoren.
+
+Gib eine strukturierte, vorsichtige Bewertung zurück. homeGoalDelta und awayGoalDelta
+müssen bereits die gesamte zulässige Kontextwirkung enthalten; taktische Teilwerte dürfen
+nicht zusätzlich ein zweites Mal eingerechnet werden.
 ''';
+
+    final tacticalProfileSchema = {
+      'type': 'object',
+      'additionalProperties': false,
+      'properties': {
+        'baseFormation': {'type': 'string', 'maxLength': 40},
+        'likelyFormationChange': {'type': 'string', 'maxLength': 100},
+        'buildUpStyle': {
+          'type': 'string',
+          'enum': ['short', 'mixed', 'direct', 'unknown'],
+        },
+        'possessionIntent': {
+          'type': 'string',
+          'enum': ['dominant', 'balanced', 'reactive', 'unknown'],
+        },
+        'pressingIntensity': {'type': 'integer', 'minimum': 0, 'maximum': 100},
+        'pressingHeight': {
+          'type': 'string',
+          'enum': ['high', 'medium', 'low', 'variable', 'unknown'],
+        },
+        'pressingTriggers': {
+          'type': 'array',
+          'maxItems': 6,
+          'items': {'type': 'string', 'maxLength': 120},
+        },
+        'counterPressing': {'type': 'integer', 'minimum': 0, 'maximum': 100},
+        'pressResistance': {'type': 'integer', 'minimum': 0, 'maximum': 100},
+        'defensiveBlock': {
+          'type': 'string',
+          'enum': ['high', 'mid', 'low', 'variable', 'unknown'],
+        },
+        'transitionThreat': {'type': 'integer', 'minimum': 0, 'maximum': 100},
+        'transitionRisk': {'type': 'integer', 'minimum': 0, 'maximum': 100},
+        'widthUsage': {
+          'type': 'string',
+          'enum': ['wide', 'half_spaces', 'central', 'mixed', 'unknown'],
+        },
+        'setPieceThreat': {'type': 'integer', 'minimum': 0, 'maximum': 100},
+        'expectedTempo': {'type': 'integer', 'minimum': 0, 'maximum': 100},
+        'keyStrengths': {
+          'type': 'array',
+          'maxItems': 5,
+          'items': {'type': 'string', 'maxLength': 160},
+        },
+        'keyWeaknesses': {
+          'type': 'array',
+          'maxItems': 5,
+          'items': {'type': 'string', 'maxLength': 160},
+        },
+        'sourceConfidence': {'type': 'integer', 'minimum': 0, 'maximum': 100},
+      },
+      'required': [
+        'baseFormation',
+        'likelyFormationChange',
+        'buildUpStyle',
+        'possessionIntent',
+        'pressingIntensity',
+        'pressingHeight',
+        'pressingTriggers',
+        'counterPressing',
+        'pressResistance',
+        'defensiveBlock',
+        'transitionThreat',
+        'transitionRisk',
+        'widthUsage',
+        'setPieceThreat',
+        'expectedTempo',
+        'keyStrengths',
+        'keyWeaknesses',
+        'sourceConfidence',
+      ],
+    };
 
     final schema = {
       'type': 'object',
@@ -111,11 +201,78 @@ Reise, Taktikhinweise, Trainerwechsel, Wetter/Platz und Aufstellungsstatus.
           'type': 'string',
           'enum': ['confirmed', 'expected_only', 'not_available'],
         },
+        'matchImportance': {
+          'type': 'object',
+          'additionalProperties': false,
+          'properties': {
+            'level': {
+              'type': 'string',
+              'enum': ['low', 'normal', 'high', 'critical', 'unclear'],
+            },
+            'homeMotivation': {'type': 'integer', 'minimum': -100, 'maximum': 100},
+            'awayMotivation': {'type': 'integer', 'minimum': -100, 'maximum': 100},
+            'pressureLevel': {'type': 'integer', 'minimum': 0, 'maximum': 100},
+            'rotationRiskHome': {'type': 'integer', 'minimum': 0, 'maximum': 100},
+            'rotationRiskAway': {'type': 'integer', 'minimum': 0, 'maximum': 100},
+            'reasons': {
+              'type': 'array',
+              'maxItems': 6,
+              'items': {'type': 'string', 'maxLength': 180},
+            },
+          },
+          'required': [
+            'level',
+            'homeMotivation',
+            'awayMotivation',
+            'pressureLevel',
+            'rotationRiskHome',
+            'rotationRiskAway',
+            'reasons',
+          ],
+        },
+        'homeTacticalProfile': tacticalProfileSchema,
+        'awayTacticalProfile': tacticalProfileSchema,
+        'tacticalMatchup': {
+          'type': 'object',
+          'additionalProperties': false,
+          'properties': {
+            'expectedTempo': {'type': 'integer', 'minimum': 0, 'maximum': 100},
+            'expectedPressingLevel': {'type': 'integer', 'minimum': 0, 'maximum': 100},
+            'fieldTiltHome': {'type': 'integer', 'minimum': -100, 'maximum': 100},
+            'homeAdvantages': {
+              'type': 'array',
+              'maxItems': 5,
+              'items': {'type': 'string', 'maxLength': 180},
+            },
+            'awayAdvantages': {
+              'type': 'array',
+              'maxItems': 5,
+              'items': {'type': 'string', 'maxLength': 180},
+            },
+            'keyRisks': {
+              'type': 'array',
+              'maxItems': 6,
+              'items': {'type': 'string', 'maxLength': 180},
+            },
+            'likelyGameState': {'type': 'string', 'maxLength': 320},
+            'sourceConfidence': {'type': 'integer', 'minimum': 0, 'maximum': 100},
+          },
+          'required': [
+            'expectedTempo',
+            'expectedPressingLevel',
+            'fieldTiltHome',
+            'homeAdvantages',
+            'awayAdvantages',
+            'keyRisks',
+            'likelyGameState',
+            'sourceConfidence',
+          ],
+        },
         'critical': {'type': 'boolean'},
         'requiresReanalysis': {'type': 'boolean'},
         'facts': {
           'type': 'array',
-          'maxItems': 8,
+          'maxItems': 14,
           'items': {
             'type': 'object',
             'additionalProperties': false,
@@ -129,8 +286,15 @@ Reise, Taktikhinweise, Trainerwechsel, Wetter/Platz und Aufstellungsstatus.
                   'rotation',
                   'fatigue',
                   'motivation',
+                  'match_importance',
                   'travel',
-                  'tactics',
+                  'formation',
+                  'build_up',
+                  'pressing',
+                  'defensive_block',
+                  'transition',
+                  'set_piece',
+                  'tactical_matchup',
                   'weather',
                   'coach',
                   'lineup',
@@ -138,7 +302,7 @@ Reise, Taktikhinweise, Trainerwechsel, Wetter/Platz und Aufstellungsstatus.
                 ],
               },
               'team': {'type': 'string'},
-              'summary': {'type': 'string', 'maxLength': 240},
+              'summary': {'type': 'string', 'maxLength': 260},
               'importance': {
                 'type': 'string',
                 'enum': ['high', 'medium', 'low', 'unknown'],
@@ -156,10 +320,10 @@ Reise, Taktikhinweise, Trainerwechsel, Wetter/Platz und Aufstellungsstatus.
             ],
           },
         },
-        'summary': {'type': 'string', 'maxLength': 700},
+        'summary': {'type': 'string', 'maxLength': 1100},
         'sourceUrls': {
           'type': 'array',
-          'maxItems': 10,
+          'maxItems': 16,
           'items': {'type': 'string'},
         },
       },
@@ -172,6 +336,10 @@ Reise, Taktikhinweise, Trainerwechsel, Wetter/Platz und Aufstellungsstatus.
         'awayGoalDelta',
         'confidenceDelta',
         'lineupStatus',
+        'matchImportance',
+        'homeTacticalProfile',
+        'awayTacticalProfile',
+        'tacticalMatchup',
         'critical',
         'requiresReanalysis',
         'facts',
@@ -204,7 +372,7 @@ Reise, Taktikhinweise, Trainerwechsel, Wetter/Platz und Aufstellungsstatus.
             },
           }),
         )
-        .timeout(const Duration(seconds: 120));
+        .timeout(const Duration(seconds: 150));
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw HttpException(
@@ -232,14 +400,26 @@ Reise, Taktikhinweise, Trainerwechsel, Wetter/Platz und Aufstellungsstatus.
 
     context['reliability'] = reliability;
     context['homeGoalDelta'] = reliableEnough
-        ? (_number(context['homeGoalDelta']) ?? 0).clamp(-0.20, 0.20)
+        ? (_number(context['homeGoalDelta']) ?? 0).clamp(-0.20, 0.20).toDouble()
         : 0.0;
     context['awayGoalDelta'] = reliableEnough
-        ? (_number(context['awayGoalDelta']) ?? 0).clamp(-0.20, 0.20)
+        ? (_number(context['awayGoalDelta']) ?? 0).clamp(-0.20, 0.20).toDouble()
         : 0.0;
     context['confidenceDelta'] = reliableEnough
         ? _integer(context['confidenceDelta']).clamp(-10, 5)
         : 0;
+    context['matchImportance'] = _sanitizeMatchImportance(
+      _map(context['matchImportance']),
+    );
+    context['homeTacticalProfile'] = _sanitizeTacticalProfile(
+      _map(context['homeTacticalProfile']),
+    );
+    context['awayTacticalProfile'] = _sanitizeTacticalProfile(
+      _map(context['awayTacticalProfile']),
+    );
+    context['tacticalMatchup'] = _sanitizeTacticalMatchup(
+      _map(context['tacticalMatchup']),
+    );
     context['provider'] = 'gemini';
     context['model'] = model;
     context['applied'] = reliableEnough;
@@ -259,6 +439,48 @@ Reise, Taktikhinweise, Trainerwechsel, Wetter/Platz und Aufstellungsstatus.
     );
 
     return {'fixtureId': fixtureId, 'context': context};
+  }
+
+  Map<String, Object?> _sanitizeMatchImportance(
+    Map<String, Object?> value,
+  ) {
+    return {
+      ...value,
+      'homeMotivation': _integer(value['homeMotivation']).clamp(-100, 100),
+      'awayMotivation': _integer(value['awayMotivation']).clamp(-100, 100),
+      'pressureLevel': _integer(value['pressureLevel']).clamp(0, 100),
+      'rotationRiskHome': _integer(value['rotationRiskHome']).clamp(0, 100),
+      'rotationRiskAway': _integer(value['rotationRiskAway']).clamp(0, 100),
+    };
+  }
+
+  Map<String, Object?> _sanitizeTacticalProfile(
+    Map<String, Object?> value,
+  ) {
+    return {
+      ...value,
+      'pressingIntensity': _integer(value['pressingIntensity']).clamp(0, 100),
+      'counterPressing': _integer(value['counterPressing']).clamp(0, 100),
+      'pressResistance': _integer(value['pressResistance']).clamp(0, 100),
+      'transitionThreat': _integer(value['transitionThreat']).clamp(0, 100),
+      'transitionRisk': _integer(value['transitionRisk']).clamp(0, 100),
+      'setPieceThreat': _integer(value['setPieceThreat']).clamp(0, 100),
+      'expectedTempo': _integer(value['expectedTempo']).clamp(0, 100),
+      'sourceConfidence': _integer(value['sourceConfidence']).clamp(0, 100),
+    };
+  }
+
+  Map<String, Object?> _sanitizeTacticalMatchup(
+    Map<String, Object?> value,
+  ) {
+    return {
+      ...value,
+      'expectedTempo': _integer(value['expectedTempo']).clamp(0, 100),
+      'expectedPressingLevel':
+          _integer(value['expectedPressingLevel']).clamp(0, 100),
+      'fieldTiltHome': _integer(value['fieldTiltHome']).clamp(-100, 100),
+      'sourceConfidence': _integer(value['sourceConfidence']).clamp(0, 100),
+    };
   }
 
   String _extractOutputText(Map<String, Object?> response) {
@@ -318,5 +540,4 @@ Reise, Taktikhinweise, Trainerwechsel, Wetter/Platz und Aufstellungsstatus.
   void close() {
     _client.close();
   }
-
 }
