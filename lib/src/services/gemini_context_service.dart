@@ -44,10 +44,42 @@ class GeminiContextService {
           candidate: candidate,
         ));
       } catch (error) {
+        final fixtureId = candidate['fixture_id']?.toString() ?? '';
+        final message = error.toString();
+
         failures.add({
-          'fixtureId': candidate['fixture_id']?.toString() ?? '',
-          'error': error.toString(),
+          'fixtureId': fixtureId,
+          'error': message,
         });
+
+        // Auch technische Fehler werden gespeichert. Damit ist später klar,
+        // ob Gemini fehlgeschlagen ist oder nur wegen geringer Zuverlässigkeit
+        // nicht angewendet wurde.
+        if (fixtureId.isNotEmpty) {
+          await database.saveFootballAiContextCheck(
+            phaseTwoScanRunId: phaseTwoScanRunId,
+            fixtureId: fixtureId,
+            model: model,
+            status: 'failed',
+            contextResult: {
+              'fixtureId': fixtureId,
+              'provider': 'gemini',
+              'error': message,
+              'context': {
+                'provider': 'gemini',
+                'model': model,
+                'verificationStatus': 'unclear',
+                'reliability': 0,
+                'applied': false,
+                'critical': false,
+                'requiresReanalysis': true,
+                'summary': 'Gemini-Kontextprüfung fehlgeschlagen.',
+                'facts': const <Object?>[],
+                'sourceUrls': const <Object?>[],
+              },
+            },
+          );
+        }
       }
     }
 
