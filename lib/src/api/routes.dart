@@ -825,36 +825,6 @@ router.get(
       },
     );
 
-    router.get('/api/tips/today', (Request request) async {
-      final date = DateTime.now();
-      final tips = await database.footballFinalTipsForDate(date);
-      return jsonResponse({
-        'date': _day(date),
-        'football': tips,
-        'footballCount': tips.length,
-        'tennis': null,
-      });
-    });
-
-    router.get(
-      '/api/football/tips/<date|[0-9]{4}-[0-9]{2}-[0-9]{2}>',
-      (Request request, String date) async {
-        final parsed = DateTime.tryParse(date);
-        if (parsed == null) {
-          return jsonResponse(
-            {'error': 'Datum muss YYYY-MM-DD sein.'},
-            statusCode: 400,
-          );
-        }
-        final tips = await database.footballFinalTipsForDate(parsed);
-        return jsonResponse({
-          'date': date,
-          'count': tips.length,
-          'tips': tips,
-        });
-      },
-    );
-
     router.post('/api/admin/football/finalize', (Request request) async {
       if (!_isAdmin(request)) {
         return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
