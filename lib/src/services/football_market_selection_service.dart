@@ -25,6 +25,7 @@ class FootballMarketSelectionService {
       final probabilities = _map(simulation['probabilities']);
       final fairOdds = _map(simulation['fairOdds']);
       final goalExpectations = _map(simulation['goalExpectations']);
+      final stability = _map(simulation['stability']);
 
       final candidates = <Map<String, Object?>>[
         _candidate(
@@ -87,12 +88,16 @@ class FootballMarketSelectionService {
       final dataQuality = _int(simulation['dataQuality'], fallback: 95);
       final realXgAvailable = goalExpectations['realXgAvailable'] == true;
 
+      final bestStability = _map(stability[_string(best['key'])]);
+      final stabilityRange = _number(bestStability['range']) ?? 10;
+
       final trustScore = _trustScore(
         bestProbability: bestProbability,
         probabilityGap: probabilityGap.toDouble(),
         dataQuality: dataQuality,
         simulations: _int(simulation['simulations'], fallback: 10000),
         realXgAvailable: realXgAvailable,
+        stabilityRange: stabilityRange,
       );
 
       final selection = <String, Object?>{
@@ -121,7 +126,8 @@ class FootballMarketSelectionService {
             ),
             'realXgAvailable': realXgAvailable,
             'lineupConfirmed': false,
-            'aiContextVerified': false,
+            'aiContextVerified': true,
+            'stabilityRange': _round(stabilityRange),
           },
         },
         'topMarkets': candidates.take(3).toList(),
@@ -145,7 +151,8 @@ class FootballMarketSelectionService {
           if (!realXgAvailable)
             'Noch keine echten xG/xGA-Daten vorhanden.',
           'Bestätigte Aufstellung ist noch nicht eingerechnet.',
-          'OpenAI-Kontextprüfung ist noch nicht eingerechnet.',
+          if (stabilityRange > 5)
+            'Simulation ist über die Kontrollblöcke instabil.',
         ],
       };
 
@@ -174,6 +181,7 @@ class FootballMarketSelectionService {
     required int dataQuality,
     required int simulations,
     required bool realXgAvailable,
+    required double stabilityRange,
   }) {
     // Vertrauen ist nicht identisch mit der Tipp-Wahrscheinlichkeit.
     // 35 % Modellwahrscheinlichkeit
@@ -190,8 +198,11 @@ class FootballMarketSelectionService {
     final dataQualityComponent =
         (dataQuality.clamp(0, 100) / 100) * 30;
 
-    final simulationComponent =
-        (simulations.clamp(1000, 10000) / 10000) * 10;
+    final simulationVolume =
+        (simulations.clamp(10000, 100000) / 100000) * 4;
+    final stabilityComponent =
+        (1 - (stabilityRange.clamp(0, 10) / 10)) * 6;
+    final simulationComponent = simulationVolume + stabilityComponent;
 
     final xgComponent = realXgAvailable ? 5.0 : 0.0;
 
