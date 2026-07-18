@@ -220,7 +220,7 @@ class FootballDailyPipelineService {
       final analysisPayload = <String, Object?>{
         ...matchPayload,
         'source': 'server_prepared',
-        'modelVersion': 'phoenix_daily_pipeline_v4_tactical_context100k',
+        'modelVersion': 'phoenix_daily_pipeline_v5_context_persistence100k',
         'dataQuality': dataQuality,
         'confidence': confidence,
         'recommendation': recommendation,
@@ -248,7 +248,7 @@ class FootballDailyPipelineService {
 
       await database.saveFinalFootballAnalysis(
         fixtureId: fixtureId,
-        modelVersion: 'phoenix_daily_pipeline_v4_tactical_context100k',
+        modelVersion: 'phoenix_daily_pipeline_v5_context_persistence100k',
         dataQuality: dataQuality,
         confidence: confidence,
         recommendation:
