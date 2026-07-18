@@ -81,6 +81,16 @@ class FootballPhaseOneScanService {
   }
 
   Future<_PhaseOneDecision> _decide(Map<String, Object?> match) async {
+    final fixtureId = _string(match['id']);
+    final homeTeamId = _string(match['homeTeamId']);
+    final awayTeamId = _string(match['awayTeamId']);
+    final homeTeam = _string(match['homeTeam']).isNotEmpty
+        ? _string(match['homeTeam'])
+        : _string(match['homeTeamName']);
+    final awayTeam = _string(match['awayTeam']).isNotEmpty
+        ? _string(match['awayTeam'])
+        : _string(match['awayTeamName']);
+
     final leagueId = _string(match['leagueId']);
     final leagueName = _string(match['league']);
     final country = _string(match['country']);
@@ -88,11 +98,18 @@ class FootballPhaseOneScanService {
     final season = _int(match['season']);
     final status = _string(match['status']).toUpperCase();
 
-    if (leagueId.isEmpty || leagueName.isEmpty || season <= 0) {
+    // Absolutes Minimum:
+    // Nur eine fehlende Spiel-ID oder komplett fehlende Teams schließen aus.
+    // Liga, Saison, Tabelle, Form, xG und Quoten werden erst in späteren
+    // Phasen bewertet und dürfen Phase 1 nicht mehr blockieren.
+    final hasHomeTeam = homeTeamId.isNotEmpty || homeTeam.isNotEmpty;
+    final hasAwayTeam = awayTeamId.isNotEmpty || awayTeam.isNotEmpty;
+
+    if (fixtureId.isEmpty || !hasHomeTeam || !hasAwayTeam) {
       return const _PhaseOneDecision(
         eligible: false,
         status: 'excluded',
-        reason: 'missing_basic_data',
+        reason: 'missing_absolute_minimum',
       );
     }
 
@@ -117,6 +134,16 @@ class FootballPhaseOneScanService {
         eligible: false,
         status: 'excluded',
         reason: 'youth_competition',
+      );
+    }
+
+    // Fehlen nur Liga-Metadaten, darf das Spiel trotzdem in Phase 2.
+    // Dort entscheidet die tatsächliche Datenqualität über die Nutzung.
+    if (leagueId.isEmpty || leagueName.isEmpty || season <= 0) {
+      return const _PhaseOneDecision(
+        eligible: true,
+        status: 'minimum_data',
+        reason: null,
       );
     }
 
