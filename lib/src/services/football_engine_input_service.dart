@@ -5,7 +5,7 @@ class FootballEngineInputService {
 
   final PhoenixDatabase database;
 
-  static const modelVersion = 'goal_rate_normalization_v5_context_persistence';
+  static const modelVersion = 'goal_rate_normalization_v3_gemini_context';
 
   Future<Map<String, Object?>> prepare({
     int? phaseTwoScanRunId,
@@ -39,8 +39,6 @@ class FootballEngineInputService {
         availability: _map(row['availability']),
         payload: _map(row['payload']),
         contextResult: _map(row['context_result']),
-        contextSource: _string(row['context_source']),
-        contextSourceScanRunId: _int(row['context_source_scan_run_id']),
       );
 
       await database.saveFootballEngineInput(
@@ -73,8 +71,6 @@ class FootballEngineInputService {
     required Map<String, Object?> availability,
     required Map<String, Object?> payload,
     required Map<String, Object?> contextResult,
-    required String contextSource,
-    required int contextSourceScanRunId,
   }) {
     final homeFor = _number(availability['homeGoalsForAverageHome']);
     final homeAgainst = _number(availability['homeGoalsAgainstAverageHome']);
@@ -83,36 +79,64 @@ class FootballEngineInputService {
 
     final calculatedHome = _averageAvailable(homeFor, awayAgainst);
     final calculatedAway = _averageAvailable(awayFor, homeAgainst);
+
+    final baseExpectedHome = calculatedHome ?? 1.35;
+    final baseExpectedAway = calculatedAway ?? 1.10;
     final usesFallback = calculatedHome == null || calculatedAway == null;
 
-    final contextWrapper = _map(contextResult['context']);
-    final context = contextWrapper.isNotEmpty ? contextWrapper : contextResult;
-    final reliability = _int(context['reliability']).clamp(0, 100);
-    final contextApplied = context['applied'] == true && reliability >= 60;
+    final rawContext = _map(contextResult['context']);
+    final reliability = _int(rawContext['reliability']).clamp(0, 100);
+    final verificationStatus =
+        _string(rawContext['verificationStatus']).isEmpty
+            ? 'unclear'
+            : _string(rawContext['verificationStatus']);
 
-    // Diese beiden Deltas enthalten bereits die gesamte zulässige Wirkung
-    // aus Taktik, Pressing, Wichtigkeit, Personal und sonstigem Kontext.
-    // Einzelne taktische Teilwerte werden deshalb nicht erneut addiert.
+    final contextApplied = _bool(rawContext['applied']) &&
+        reliability >= 60 &&
+        verificationStatus != 'unclear';
+
     final homeGoalDelta = contextApplied
-        ? (_number(context['homeGoalDelta']) ?? 0).clamp(-0.20, 0.20).toDouble()
+        ? ((_number(rawContext['homeGoalDelta']) ?? 0)
+            .clamp(-0.20, 0.20)
+            .toDouble())
         : 0.0;
     final awayGoalDelta = contextApplied
-        ? (_number(context['awayGoalDelta']) ?? 0).clamp(-0.20, 0.20).toDouble()
+        ? ((_number(rawContext['awayGoalDelta']) ?? 0)
+            .clamp(-0.20, 0.20)
+            .toDouble())
         : 0.0;
     final confidenceDelta = contextApplied
-        ? _int(context['confidenceDelta']).clamp(-10, 5)
+        ? _int(rawContext['confidenceDelta']).clamp(-10, 5)
         : 0;
 
-    final matchImportance = _map(context['matchImportance']);
-    final homeTactics = _map(context['homeTacticalProfile']);
-    final awayTactics = _map(context['awayTacticalProfile']);
-    final tacticalMatchup = _map(context['tacticalMatchup']);
+    final expectedHome =
+        (baseExpectedHome + homeGoalDelta).clamp(0.05, 5.0).toDouble();
+    final expectedAway =
+        (baseExpectedAway + awayGoalDelta).clamp(0.05, 5.0).toDouble();
 
-    final baseHome = calculatedHome ?? 1.35;
-    final baseAway = calculatedAway ?? 1.10;
-    final expectedHome = _goalRate(baseHome + homeGoalDelta);
-    final expectedAway = _goalRate(baseAway + awayGoalDelta);
-    final lineupConfirmed = context['lineupStatus'] == 'confirmed';
+    final aiContext = <String, Object?>{
+      'applied': contextApplied,
+      'provider': rawContext['provider'],
+      'model': rawContext['model'],
+      'verificationStatus': verificationStatus,
+      'reliability': reliability,
+      'summary': rawContext['summary'],
+      'homeGoalDelta': _round(homeGoalDelta),
+      'awayGoalDelta': _round(awayGoalDelta),
+      'confidenceDelta': confidenceDelta,
+      'lineupStatus': rawContext['lineupStatus'],
+      'critical': rawContext['critical'] == true,
+      'requiresReanalysis': rawContext['requiresReanalysis'] == true,
+      'facts': rawContext['facts'] is List
+          ? List<Object?>.from(rawContext['facts'] as List)
+          : <Object?>[],
+      'sourceUrls': rawContext['sourceUrls'] is List
+          ? List<Object?>.from(rawContext['sourceUrls'] as List)
+          : <Object?>[],
+      'contextSource': rawContext['contextSource'],
+      'contextSourceScanRunId': rawContext['contextSourceScanRunId'],
+      'fallbackUsed': rawContext['fallbackUsed'] == true,
+    };
 
     return {
       'fixtureId': fixtureId,
@@ -130,63 +154,14 @@ class FootballEngineInputService {
       'awayLogo': _string(payload['awayLogo']),
       'dataQuality': dataQuality,
       'modelVersion': modelVersion,
-      'sourceType': usesFallback
-          ? 'safe_baseline_fallback'
-          : 'goal_rates_not_xg',
+      'sourceType': contextApplied
+          ? (usesFallback
+              ? 'safe_baseline_fallback_gemini_adjusted'
+              : 'goal_rates_gemini_adjusted')
+          : (usesFallback
+              ? 'safe_baseline_fallback'
+              : 'goal_rates_not_xg'),
       'realXgAvailable': availability['realXgAvailable'] == true,
-      'lineupConfirmed': lineupConfirmed,
-      'aiContextApplied': contextApplied,
-      'tacticalContextAvailable':
-          homeTactics.isNotEmpty && awayTactics.isNotEmpty,
-      'confidenceDelta': confidenceDelta,
-      'aiContext': {
-        'applied': contextApplied,
-        'contextSource': contextSource.isEmpty ? 'missing' : contextSource,
-        'contextSourceScanRunId': contextSourceScanRunId,
-        'fallbackUsed': contextSource == 'fallback',
-        'provider': context['provider'],
-        'model': context['model'],
-        'verificationStatus': context['verificationStatus'],
-        'reliability': reliability,
-        'homeContextScore': _int(context['homeContextScore']),
-        'awayContextScore': _int(context['awayContextScore']),
-        'homeGoalDelta': homeGoalDelta,
-        'awayGoalDelta': awayGoalDelta,
-        'confidenceDelta': confidenceDelta,
-        'lineupStatus': context['lineupStatus'],
-        'critical': context['critical'] == true,
-        'requiresReanalysis': context['requiresReanalysis'] == true,
-        'matchImportance': matchImportance,
-        'homeTacticalProfile': homeTactics,
-        'awayTacticalProfile': awayTactics,
-        'tacticalMatchup': tacticalMatchup,
-        'summary': context['summary'],
-        'facts': context['facts'],
-        'sourceUrls': context['sourceUrls'],
-      },
-      'tacticalSummary': {
-        'matchImportanceLevel': _string(matchImportance['level']),
-        'pressureLevel': _int(matchImportance['pressureLevel']).clamp(0, 100),
-        'homeMotivation':
-            _int(matchImportance['homeMotivation']).clamp(-100, 100),
-        'awayMotivation':
-            _int(matchImportance['awayMotivation']).clamp(-100, 100),
-        'homePressingIntensity':
-            _int(homeTactics['pressingIntensity']).clamp(0, 100),
-        'awayPressingIntensity':
-            _int(awayTactics['pressingIntensity']).clamp(0, 100),
-        'homePressResistance':
-            _int(homeTactics['pressResistance']).clamp(0, 100),
-        'awayPressResistance':
-            _int(awayTactics['pressResistance']).clamp(0, 100),
-        'expectedPressingLevel':
-            _int(tacticalMatchup['expectedPressingLevel']).clamp(0, 100),
-        'expectedTempo':
-            _int(tacticalMatchup['expectedTempo']).clamp(0, 100),
-        'fieldTiltHome':
-            _int(tacticalMatchup['fieldTiltHome']).clamp(-100, 100),
-        'likelyGameState': tacticalMatchup['likelyGameState'],
-      },
       'raw': {
         'homeGoalsForAverageHome': homeFor,
         'homeGoalsAgainstAverageHome': homeAgainst,
@@ -200,23 +175,25 @@ class FootballEngineInputService {
         'awayAttackStrength': _relativeStrength(awayFor, 1.15) ?? 1.0,
         'awayDefenseStrength':
             _inverseRelativeStrength(awayAgainst, 1.35) ?? 1.0,
-        'goalRateBeforeContextHome': _round(baseHome),
-        'goalRateBeforeContextAway': _round(baseAway),
+        'baseGoalRateExpectedHome': _round(baseExpectedHome),
+        'baseGoalRateExpectedAway': _round(baseExpectedAway),
         'goalRateExpectedHome': _round(expectedHome),
         'goalRateExpectedAway': _round(expectedAway),
         'goalRateExpectedTotal': _round(expectedHome + expectedAway),
+        'contextAdjusted': contextApplied,
       },
+      'aiContext': aiContext,
       'warnings': [
         if (usesFallback)
-          'Torwerte fehlen teilweise; PHÖNIX nutzt vorübergehend eine neutrale Basis.',
+          'Torwerte fehlen teilweise; PHÖNIX nutzt eine neutrale Basis.',
         if (availability['realXgAvailable'] != true)
           'Keine echten xG/xGA-Daten vorhanden.',
-        if (contextResult.isEmpty)
-          'Keine aktuelle KI-Kontextprüfung gespeichert.',
-        if (contextResult.isNotEmpty && !contextApplied)
-          'KI-Kontext wurde wegen zu geringer Verlässlichkeit nicht angewendet.',
-        if (homeTactics.isEmpty || awayTactics.isEmpty)
-          'Mindestens ein taktisches Teamprofil fehlt.',
+        if (contextApplied)
+          'Verifizierter Gemini-Kontext wurde vor der Simulation angewendet.',
+        if (!contextApplied)
+          'Kein ausreichend verifizierter Gemini-Kontext angewendet.',
+        if (aiContext['fallbackUsed'] == true)
+          'Verifizierter Kontext eines vorherigen Laufs wurde wiederverwendet.',
       ],
       'engineReady': true,
     };
@@ -244,7 +221,10 @@ class FootballEngineInputService {
     return _round(baseline / value);
   }
 
-  double _goalRate(double value) => value.clamp(0.20, 3.80).toDouble();
+  bool _bool(Object? value) {
+    if (value is bool) return value;
+    return value?.toString().toLowerCase() == 'true';
+  }
 
   double _round(double value) => double.parse(value.toStringAsFixed(3));
 
