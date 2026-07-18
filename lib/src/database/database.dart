@@ -126,6 +126,91 @@ class PhoenixDatabase {
       )
     ''');
 
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS football_phase_two_results (
+        scan_run_id BIGINT NOT NULL,
+        fixture_id TEXT NOT NULL,
+        league_id TEXT NOT NULL,
+        season INTEGER NOT NULL,
+        data_quality INTEGER NOT NULL,
+        analysis_allowed BOOLEAN NOT NULL,
+        availability JSONB NOT NULL,
+        payload JSONB NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (scan_run_id, fixture_id)
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS football_ai_context_checks (
+        phase_two_scan_run_id BIGINT NOT NULL,
+        fixture_id TEXT NOT NULL,
+        model TEXT NOT NULL,
+        response_id TEXT,
+        status TEXT NOT NULL,
+        context_result JSONB NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (phase_two_scan_run_id, fixture_id)
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS football_engine_inputs (
+        phase_two_scan_run_id BIGINT NOT NULL,
+        fixture_id TEXT NOT NULL,
+        league_id TEXT NOT NULL,
+        season INTEGER NOT NULL,
+        data_quality INTEGER NOT NULL,
+        model_version TEXT NOT NULL,
+        normalized_input JSONB NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (phase_two_scan_run_id, fixture_id)
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS football_simulation_results (
+        phase_two_scan_run_id BIGINT NOT NULL,
+        fixture_id TEXT NOT NULL,
+        model_version TEXT NOT NULL,
+        simulations INTEGER NOT NULL,
+        result JSONB NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (phase_two_scan_run_id, fixture_id)
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS football_market_selections (
+        phase_two_scan_run_id BIGINT NOT NULL,
+        fixture_id TEXT NOT NULL,
+        model_version TEXT NOT NULL,
+        selection JSONB NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (phase_two_scan_run_id, fixture_id)
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS football_daily_pipeline_jobs (
+        id BIGSERIAL PRIMARY KEY,
+        scan_date DATE NOT NULL,
+        status TEXT NOT NULL DEFAULT 'running',
+        current_step TEXT NOT NULL DEFAULT 'created',
+        phase_one_scan_run_id BIGINT,
+        phase_two_scan_run_id BIGINT,
+        requested_limit INTEGER NOT NULL,
+        minimum_data_quality INTEGER NOT NULL,
+        simulations INTEGER NOT NULL,
+        processed INTEGER NOT NULL DEFAULT 0,
+        published INTEGER NOT NULL DEFAULT 0,
+        error TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        completed_at TIMESTAMPTZ
+      )
+    ''');
+
     await db.execute('''
       CREATE TABLE IF NOT EXISTS football_leagues (
         league_id TEXT PRIMARY KEY,
@@ -672,6 +757,535 @@ class PhoenixDatabase {
     }
 
     return <String, Object?>{};
+  }
+
+
+  Future<int> createFootballPhaseTwoScanRun(DateTime date) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        INSERT INTO football_scan_runs (scan_date, phase, status)
+        VALUES (@date, 2, 'running')
+        RETURNING id
+      '''),
+      parameters: {'date': _dateOnly(date)},
+    );
+    return result.first[0] as int;
+  }
+
+  Future<List<Map<String, Object?>>> eligiblePhaseOneMatches({
+    int? scanRunId,
+    int limit = 20,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT sm.*, sr.scan_date
+        FROM football_scan_matches sm
+        INNER JOIN football_scan_runs sr ON sr.id = sm.scan_run_id
+        WHERE sm.eligible = TRUE
+          AND (@scan_run_id::BIGINT IS NULL OR sm.scan_run_id = @scan_run_id)
+        ORDER BY sm.created_at ASC
+        LIMIT @limit
+      '''),
+      parameters: {'scan_run_id': scanRunId, 'limit': limit.clamp(1, 100)},
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  Future<void> savePhaseTwoResult({
+    required int scanRunId,
+    required String fixtureId,
+    required String leagueId,
+    required int season,
+    required int dataQuality,
+    required bool analysisAllowed,
+    required Map<String, Object?> availability,
+    required Map<String, Object?> payload,
+  }) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        INSERT INTO football_phase_two_results (
+          scan_run_id, fixture_id, league_id, season, data_quality,
+          analysis_allowed, availability, payload
+        ) VALUES (
+          @scan_run_id, @fixture_id, @league_id, @season, @data_quality,
+          @analysis_allowed, CAST(@availability AS JSONB), CAST(@payload AS JSONB)
+        )
+        ON CONFLICT (scan_run_id, fixture_id) DO UPDATE SET
+          data_quality = EXCLUDED.data_quality,
+          analysis_allowed = EXCLUDED.analysis_allowed,
+          availability = EXCLUDED.availability,
+          payload = EXCLUDED.payload
+      '''),
+      parameters: {
+        'scan_run_id': scanRunId,
+        'fixture_id': fixtureId,
+        'league_id': leagueId,
+        'season': season,
+        'data_quality': dataQuality,
+        'analysis_allowed': analysisAllowed,
+        'availability': jsonEncode(availability),
+        'payload': jsonEncode(payload),
+      },
+    );
+  }
+
+  Future<List<Map<String, Object?>>> geminiPhaseTwoCandidates({
+    required int phaseTwoScanRunId,
+    int limit = 20,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT fixture_id, league_id, season, data_quality, availability, payload
+        FROM football_phase_two_results
+        WHERE scan_run_id = @scan_run_id
+          AND analysis_allowed = TRUE
+        ORDER BY data_quality DESC, fixture_id
+        LIMIT @limit
+      '''),
+      parameters: {
+        'scan_run_id': phaseTwoScanRunId,
+        'limit': limit.clamp(1, 20),
+      },
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  Future<void> saveFootballAiContextCheck({
+    required int phaseTwoScanRunId,
+    required String fixtureId,
+    required String model,
+    String? responseId,
+    required String status,
+    required Map<String, Object?> contextResult,
+  }) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        INSERT INTO football_ai_context_checks (
+          phase_two_scan_run_id, fixture_id, model, response_id, status,
+          context_result
+        ) VALUES (
+          @scan_run_id, @fixture_id, @model, @response_id, @status,
+          CAST(@context_result AS JSONB)
+        )
+        ON CONFLICT (phase_two_scan_run_id, fixture_id) DO UPDATE SET
+          model = EXCLUDED.model,
+          response_id = EXCLUDED.response_id,
+          status = EXCLUDED.status,
+          context_result = EXCLUDED.context_result,
+          created_at = NOW()
+      '''),
+      parameters: {
+        'scan_run_id': phaseTwoScanRunId,
+        'fixture_id': fixtureId,
+        'model': model,
+        'response_id': responseId,
+        'status': status,
+        'context_result': jsonEncode(contextResult),
+      },
+    );
+  }
+
+  Future<List<Map<String, Object?>>> phaseFourCandidates({
+    required int phaseTwoScanRunId,
+    int limit = 20,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT
+          p.fixture_id,
+          p.league_id,
+          p.season,
+          p.data_quality,
+          p.availability,
+          p.payload,
+          COALESCE(c.context_result, '{}'::jsonb) AS context_result
+        FROM football_phase_two_results p
+        LEFT JOIN football_ai_context_checks c
+          ON c.phase_two_scan_run_id = p.scan_run_id
+         AND c.fixture_id = p.fixture_id
+        WHERE p.scan_run_id = @scan_run_id
+          AND p.analysis_allowed = TRUE
+        ORDER BY p.data_quality DESC, p.fixture_id
+        LIMIT @limit
+      '''),
+      parameters: {
+        'scan_run_id': phaseTwoScanRunId,
+        'limit': limit.clamp(1, 100),
+      },
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  Future<void> saveFootballEngineInput({
+    required int phaseTwoScanRunId,
+    required String fixtureId,
+    required String leagueId,
+    required int season,
+    required int dataQuality,
+    required String modelVersion,
+    required Map<String, Object?> normalizedInput,
+  }) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        INSERT INTO football_engine_inputs (
+          phase_two_scan_run_id, fixture_id, league_id, season,
+          data_quality, model_version, normalized_input
+        ) VALUES (
+          @scan_run_id, @fixture_id, @league_id, @season,
+          @data_quality, @model_version, CAST(@normalized_input AS JSONB)
+        )
+        ON CONFLICT (phase_two_scan_run_id, fixture_id) DO UPDATE SET
+          data_quality = EXCLUDED.data_quality,
+          model_version = EXCLUDED.model_version,
+          normalized_input = EXCLUDED.normalized_input,
+          created_at = NOW()
+      '''),
+      parameters: {
+        'scan_run_id': phaseTwoScanRunId,
+        'fixture_id': fixtureId,
+        'league_id': leagueId,
+        'season': season,
+        'data_quality': dataQuality,
+        'model_version': modelVersion,
+        'normalized_input': jsonEncode(normalizedInput),
+      },
+    );
+  }
+
+  Future<List<Map<String, Object?>>> engineInputsForSimulation({
+    required int phaseTwoScanRunId,
+    int limit = 20,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT fixture_id, normalized_input
+        FROM football_engine_inputs
+        WHERE phase_two_scan_run_id = @scan_run_id
+        ORDER BY data_quality DESC, fixture_id
+        LIMIT @limit
+      '''),
+      parameters: {
+        'scan_run_id': phaseTwoScanRunId,
+        'limit': limit.clamp(1, 100),
+      },
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  Future<void> saveFootballSimulationResult({
+    required int phaseTwoScanRunId,
+    required String fixtureId,
+    required String modelVersion,
+    required int simulations,
+    required Map<String, Object?> result,
+  }) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        INSERT INTO football_simulation_results (
+          phase_two_scan_run_id, fixture_id, model_version, simulations, result
+        ) VALUES (
+          @scan_run_id, @fixture_id, @model_version, @simulations,
+          CAST(@result AS JSONB)
+        )
+        ON CONFLICT (phase_two_scan_run_id, fixture_id) DO UPDATE SET
+          model_version = EXCLUDED.model_version,
+          simulations = EXCLUDED.simulations,
+          result = EXCLUDED.result,
+          created_at = NOW()
+      '''),
+      parameters: {
+        'scan_run_id': phaseTwoScanRunId,
+        'fixture_id': fixtureId,
+        'model_version': modelVersion,
+        'simulations': simulations,
+        'result': jsonEncode(result),
+      },
+    );
+  }
+
+  Future<List<Map<String, Object?>>> simulationRowsForSelection({
+    required int phaseTwoScanRunId,
+    int limit = 20,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT fixture_id, result
+        FROM football_simulation_results
+        WHERE phase_two_scan_run_id = @scan_run_id
+        ORDER BY fixture_id
+        LIMIT @limit
+      '''),
+      parameters: {
+        'scan_run_id': phaseTwoScanRunId,
+        'limit': limit.clamp(1, 100),
+      },
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  Future<void> saveFootballMarketSelection({
+    required int phaseTwoScanRunId,
+    required String fixtureId,
+    required String modelVersion,
+    required Map<String, Object?> selection,
+  }) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        INSERT INTO football_market_selections (
+          phase_two_scan_run_id, fixture_id, model_version, selection
+        ) VALUES (
+          @scan_run_id, @fixture_id, @model_version, CAST(@selection AS JSONB)
+        )
+        ON CONFLICT (phase_two_scan_run_id, fixture_id) DO UPDATE SET
+          model_version = EXCLUDED.model_version,
+          selection = EXCLUDED.selection,
+          created_at = NOW()
+      '''),
+      parameters: {
+        'scan_run_id': phaseTwoScanRunId,
+        'fixture_id': fixtureId,
+        'model_version': modelVersion,
+        'selection': jsonEncode(selection),
+      },
+    );
+  }
+
+  Future<List<Map<String, Object?>>> marketSelectionsForValue({
+    required int phaseTwoScanRunId,
+    int limit = 20,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT fixture_id, selection
+        FROM football_market_selections
+        WHERE phase_two_scan_run_id = @scan_run_id
+        ORDER BY fixture_id
+        LIMIT @limit
+      '''),
+      parameters: {
+        'scan_run_id': phaseTwoScanRunId,
+        'limit': limit.clamp(1, 100),
+      },
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  Future<List<Map<String, Object?>>> finalizationCandidates({
+    required int phaseTwoScanRunId,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT
+          p.fixture_id,
+          p.data_quality,
+          p.payload,
+          s.result AS simulation,
+          m.selection
+        FROM football_phase_two_results p
+        INNER JOIN football_simulation_results s
+          ON s.phase_two_scan_run_id = p.scan_run_id
+         AND s.fixture_id = p.fixture_id
+        INNER JOIN football_market_selections m
+          ON m.phase_two_scan_run_id = p.scan_run_id
+         AND m.fixture_id = p.fixture_id
+        WHERE p.scan_run_id = @scan_run_id
+          AND p.analysis_allowed = TRUE
+        ORDER BY p.fixture_id
+      '''),
+      parameters: {'scan_run_id': phaseTwoScanRunId},
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  Future<void> upsertFootballMatchFromPayload({
+    required String fixtureId,
+    required Map<String, Object?> payload,
+  }) async {
+    final db = await connection();
+    final kickoff = DateTime.tryParse(payload['kickoff']?.toString() ?? '') ??
+        DateTime.now().toUtc();
+    await db.execute(
+      Sql.named('''
+        INSERT INTO football_matches (
+          id, kickoff_utc, status, league_id, league_name, country,
+          home_team_id, home_team_name, home_logo,
+          away_team_id, away_team_name, away_logo, raw_json
+        ) VALUES (
+          @id, @kickoff, @status, @league_id, @league_name, @country,
+          @home_team_id, @home_team_name, @home_logo,
+          @away_team_id, @away_team_name, @away_logo, CAST(@raw_json AS JSONB)
+        )
+        ON CONFLICT (id) DO UPDATE SET
+          kickoff_utc = EXCLUDED.kickoff_utc,
+          status = EXCLUDED.status,
+          league_id = EXCLUDED.league_id,
+          league_name = EXCLUDED.league_name,
+          country = EXCLUDED.country,
+          home_team_id = EXCLUDED.home_team_id,
+          home_team_name = EXCLUDED.home_team_name,
+          home_logo = EXCLUDED.home_logo,
+          away_team_id = EXCLUDED.away_team_id,
+          away_team_name = EXCLUDED.away_team_name,
+          away_logo = EXCLUDED.away_logo,
+          raw_json = EXCLUDED.raw_json,
+          updated_at = NOW()
+      '''),
+      parameters: {
+        'id': fixtureId,
+        'kickoff': kickoff.toUtc(),
+        'status': payload['status']?.toString() ?? 'NS',
+        'league_id': payload['leagueId']?.toString() ?? '',
+        'league_name': payload['league']?.toString() ?? '',
+        'country': payload['country']?.toString() ?? '',
+        'home_team_id': payload['homeTeamId']?.toString() ?? '',
+        'home_team_name': payload['homeTeam']?.toString() ?? '',
+        'home_logo': payload['homeLogo']?.toString() ?? '',
+        'away_team_id': payload['awayTeamId']?.toString() ?? '',
+        'away_team_name': payload['awayTeam']?.toString() ?? '',
+        'away_logo': payload['awayLogo']?.toString() ?? '',
+        'raw_json': jsonEncode(payload),
+      },
+    );
+  }
+
+  Future<void> saveFinalFootballAnalysis({
+    required String fixtureId,
+    required String modelVersion,
+    required int dataQuality,
+    required int confidence,
+    String? recommendation,
+    required Map<String, Object?> payload,
+  }) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        INSERT INTO analyses (
+          sport, match_id, model_version, data_quality,
+          confidence, recommendation, payload
+        ) VALUES (
+          'football', @match_id, @model_version, @data_quality,
+          @confidence, @recommendation, CAST(@payload AS JSONB)
+        )
+        ON CONFLICT (sport, match_id, model_version) DO UPDATE SET
+          data_quality = EXCLUDED.data_quality,
+          confidence = EXCLUDED.confidence,
+          recommendation = EXCLUDED.recommendation,
+          payload = EXCLUDED.payload,
+          analyzed_at = NOW()
+      '''),
+      parameters: {
+        'match_id': fixtureId,
+        'model_version': modelVersion,
+        'data_quality': dataQuality,
+        'confidence': confidence,
+        'recommendation': recommendation,
+        'payload': jsonEncode(payload),
+      },
+    );
+  }
+
+  Future<int> createFootballDailyPipelineJob({
+    required DateTime date,
+    required int limit,
+    required int minimumDataQuality,
+    required int simulations,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        INSERT INTO football_daily_pipeline_jobs (
+          scan_date, requested_limit, minimum_data_quality, simulations
+        ) VALUES (@date, @limit, @quality, @simulations)
+        RETURNING id
+      '''),
+      parameters: {
+        'date': _dateOnly(date),
+        'limit': limit,
+        'quality': minimumDataQuality,
+        'simulations': simulations,
+      },
+    );
+    return result.first[0] as int;
+  }
+
+  Future<void> updateFootballDailyPipelineJob({
+    required int jobId,
+    required String status,
+    required String currentStep,
+    int? phaseOneScanRunId,
+    int? phaseTwoScanRunId,
+    int? processed,
+    int? published,
+    Object? error,
+    bool completed = false,
+  }) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        UPDATE football_daily_pipeline_jobs SET
+          status = @status,
+          current_step = @current_step,
+          phase_one_scan_run_id =
+            COALESCE(@phase_one_scan_run_id, phase_one_scan_run_id),
+          phase_two_scan_run_id =
+            COALESCE(@phase_two_scan_run_id, phase_two_scan_run_id),
+          processed = COALESCE(@processed, processed),
+          published = COALESCE(@published, published),
+          error = @error,
+          completed_at = CASE WHEN @completed THEN NOW() ELSE completed_at END
+        WHERE id = @job_id
+      '''),
+      parameters: {
+        'job_id': jobId,
+        'status': status,
+        'current_step': currentStep,
+        'phase_one_scan_run_id': phaseOneScanRunId,
+        'phase_two_scan_run_id': phaseTwoScanRunId,
+        'processed': processed,
+        'published': published,
+        'error': error?.toString(),
+        'completed': completed,
+      },
+    );
+  }
+
+  Future<Map<String, Object?>?> footballDailyPipelineJob(int id) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT * FROM football_daily_pipeline_jobs WHERE id = @id LIMIT 1
+      '''),
+      parameters: {'id': id},
+    );
+    if (result.isEmpty) return null;
+    return Map<String, Object?>.from(result.first.toColumnMap());
   }
 
   Future<void> close() async {
