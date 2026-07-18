@@ -21,112 +21,34 @@ class GeminiContextService {
           ? Platform.environment['GEMINI_MODEL']!.trim()
           : 'gemini-3.1-flash-lite';
 
-  Future<void> runBackground({
-    required int jobId,
+  Future<Map<String, Object?>> verifyPhaseTwoMatches({
     required int phaseTwoScanRunId,
     int limit = 20,
-  }) async {
-    try {
-      final result = await verifyAllEligibleTips(
-        phaseTwoScanRunId: phaseTwoScanRunId,
-        candidateLimit: limit,
-      );
-
-      await database.completeFootballAiContextJob(
-        jobId: jobId,
-        processed: _integer(result['processed']),
-      );
-    } catch (error) {
-      await database.failFootballAiContextJob(
-        jobId: jobId,
-        error: error,
-      );
-    }
-  }
-
-  Future<Map<String, Object?>> verifyAllEligibleTips({
-    required int phaseTwoScanRunId,
-    int candidateLimit = 20,
   }) async {
     if (apiKey.isEmpty) {
       throw StateError('GEMINI_API_KEY fehlt.');
     }
 
-    final candidates = await database.contextCandidates(
+    final candidates = await database.geminiPhaseTwoCandidates(
       phaseTwoScanRunId: phaseTwoScanRunId,
-      limit: candidateLimit.clamp(1, 20),
+      limit: limit.clamp(1, 20),
     );
 
-    final eligible = candidates.where(_isEligiblePhoenixTip).toList()
-      ..sort((a, b) => _candidateScore(b).compareTo(_candidateScore(a)));
-
-    if (eligible.isEmpty) {
-      return {
-        'status': 'completed',
-        'provider': 'gemini',
-        'processed': 0,
-        'reason': 'Keine geeigneten PHÖNIX-Tipps für die Gemini-Kontextprüfung.',
-      };
-    }
-
     final results = <Map<String, Object?>>[];
-
-    for (final candidate in eligible) {
-      final result = await _verifyCandidate(
+    for (final candidate in candidates) {
+      results.add(await _verifyCandidate(
         phaseTwoScanRunId: phaseTwoScanRunId,
         candidate: candidate,
-      );
-      results.add(result);
+      ));
     }
 
     return {
       'status': 'completed',
+      'phase': 3,
       'provider': 'gemini',
       'processed': results.length,
       'results': results,
     };
-  }
-
-  bool _isEligiblePhoenixTip(Map<String, Object?> candidate) {
-    final selection = _map(candidate['selection']);
-    final phoenixTip = _map(selection['phoenixTip']);
-    final trust = _map(selection['trust']);
-
-    final qualifies =
-        selection['qualifiesForTip'] == true || phoenixTip.isNotEmpty;
-    final probability = _probabilityPercent(
-      phoenixTip['probability'] ??
-          phoenixTip['modelProbability'] ??
-          selection['modelProbability'],
-    );
-    final trustScore = _integer(
-      trust['score'] ?? selection['trustScore'] ?? selection['baseTrust'],
-    );
-
-    // Gemini unterstützt alle veröffentlichten PHÖNIX-Tipps,
-    // unabhängig davon, ob sie Value besitzen.
-    return qualifies && probability >= 50 && trustScore >= 50;
-  }
-
-  double _candidateScore(Map<String, Object?> candidate) {
-    final selection = _map(candidate['selection']);
-    final value = _map(selection['value']);
-    final trust = _map(selection['trust']);
-    final phoenixTip = _map(selection['phoenixTip']);
-
-    final valuePercent =
-        _number(value['valuePercent'] ?? selection['valuePercent']) ?? 0;
-    final trustScore = _integer(
-      trust['score'] ?? selection['trustScore'] ?? selection['baseTrust'],
-    );
-    final probability = _probabilityPercent(
-      phoenixTip['probability'] ??
-          phoenixTip['modelProbability'] ??
-          selection['modelProbability'],
-    );
-
-    // Value-Tipps zuerst, danach Trust und Modellwahrscheinlichkeit.
-    return valuePercent * 0.35 + trustScore * 0.40 + probability * 0.25;
   }
 
   Future<Map<String, Object?>> _verifyCandidate({
@@ -134,36 +56,30 @@ class GeminiContextService {
     required Map<String, Object?> candidate,
   }) async {
     final fixtureId = candidate['fixture_id']?.toString() ?? '';
-    final selection = _map(candidate['selection']);
-    final availability = _map(candidate['availability']);
     final payload = _map(candidate['payload']);
-    final phoenixTip = _map(selection['phoenixTip']);
-    final value = _map(selection['value']);
+    final availability = _map(candidate['availability']);
 
     final prompt = '''
-Du unterstützt PHÖNIX ausschließlich bei der aktuellen Kontextprüfung eines bereits berechneten PHÖNIX-Tipps.
+Du prüfst aktuelle Nachrichten und Kontextfakten für die PHÖNIX-Fußballanalyse.
 
-WICHTIGE GRENZEN:
-- Berechne keine Wahrscheinlichkeit, keine faire Quote, kein Value und keine Units.
-- Ändere nicht den Wettmarkt.
+WICHTIG:
+- Berechne keine Wettwahrscheinlichkeit, keine faire Quote und kein Value.
 - Erfinde keine Verletzungen, Sperren, Aufstellungen oder Quellen.
-- Bevorzuge offizielle Vereins-, Liga- und Wettbewerbsquellen.
-- Die Trust-Anpassung darf nur zwischen -5 und +5 liegen.
-- Halte die Antwort kurz und sachlich.
+- Nutze bevorzugt offizielle Vereins-, Liga- und Wettbewerbsquellen.
+- Prüfe nur neue Informationen, die nicht bereits sicher in den strukturierten API-Daten enthalten sind.
+- Markiere mögliche Doppelzählungen.
+- Die Torerwartungs-Anpassung je Team darf nur zwischen -0.20 und +0.20 liegen.
+- Der Confidence-Einfluss darf nur zwischen -10 und +5 liegen.
 
 Spiel: ${payload['homeTeam']} gegen ${payload['awayTeam']}
 Liga: ${payload['league']}
 Anstoß: ${payload['kickoff']}
-PHÖNIX-Tipp: ${phoenixTip['market'] ?? phoenixTip['label']}
-Value-Status: ${value['isValueTip'] == true ? 'Value-Tipp' : 'kein Value-Tipp'}
-Berechnetes Value: ${value['valuePercent']} %
-Marktquote: ${value['marketOdds']}
-API-Verletzungsdatensätze: ${availability['injuriesCount']}
+Vorhandene Verletzungsdatensätze: ${availability['injuriesCount']}
+Aufstellungen verfügbar: ${availability['lineups']}
+Datenqualität: ${candidate['data_quality']}
 
-Prüfe nur aktuelle Ausfälle, Sperren, Rückkehrer, Rotation, Belastung,
-Motivation, Reise und Aufstellungsstatus. Bewerte anschließend, ob der
-aktuelle Kontext den vorhandenen PHÖNIX-Tipp unterstützt, neutral ist oder
-schwächt.
+Prüfe aktuelle Ausfälle, Sperren, Rückkehrer, Rotation, Belastung, Motivation,
+Reise, Taktikhinweise, Trainerwechsel, Wetter/Platz und Aufstellungsstatus.
 ''';
 
     final schema = {
@@ -174,53 +90,62 @@ schwächt.
           'type': 'string',
           'enum': ['verified', 'partial', 'unclear'],
         },
-        'contextEffect': {
-          'type': 'string',
-          'enum': ['supports_tip', 'neutral', 'weakens_tip'],
-        },
-        'suggestedTrustAdjustment': {
-          'type': 'integer',
-          'minimum': -5,
-          'maximum': 5,
-        },
+        'reliability': {'type': 'integer', 'minimum': 0, 'maximum': 100},
+        'homeContextScore': {'type': 'integer', 'minimum': -100, 'maximum': 100},
+        'awayContextScore': {'type': 'integer', 'minimum': -100, 'maximum': 100},
+        'homeGoalDelta': {'type': 'number', 'minimum': -0.20, 'maximum': 0.20},
+        'awayGoalDelta': {'type': 'number', 'minimum': -0.20, 'maximum': 0.20},
+        'confidenceDelta': {'type': 'integer', 'minimum': -10, 'maximum': 5},
         'lineupStatus': {
           'type': 'string',
           'enum': ['confirmed', 'expected_only', 'not_available'],
         },
-        'injuries': {
+        'critical': {'type': 'boolean'},
+        'requiresReanalysis': {'type': 'boolean'},
+        'facts': {
           'type': 'array',
-          'maxItems': 6,
+          'maxItems': 8,
           'items': {
             'type': 'object',
             'additionalProperties': false,
             'properties': {
-              'player': {'type': 'string'},
-              'team': {'type': 'string'},
-              'status': {
+              'category': {
                 'type': 'string',
-                'enum': ['out', 'doubtful', 'available', 'unclear'],
+                'enum': [
+                  'injury',
+                  'suspension',
+                  'return',
+                  'rotation',
+                  'fatigue',
+                  'motivation',
+                  'travel',
+                  'tactics',
+                  'weather',
+                  'coach',
+                  'lineup',
+                  'other'
+                ],
               },
+              'team': {'type': 'string'},
+              'summary': {'type': 'string', 'maxLength': 240},
               'importance': {
                 'type': 'string',
                 'enum': ['high', 'medium', 'low', 'unknown'],
               },
-              'evidence': {'type': 'string', 'maxLength': 220},
+              'alreadyCoveredByStructuredData': {'type': 'boolean'},
+              'sourceUrl': {'type': 'string'},
             },
             'required': [
-              'player',
+              'category',
               'team',
-              'status',
+              'summary',
               'importance',
-              'evidence',
+              'alreadyCoveredByStructuredData',
+              'sourceUrl'
             ],
           },
         },
-        'contextPoints': {
-          'type': 'array',
-          'maxItems': 5,
-          'items': {'type': 'string', 'maxLength': 220},
-        },
-        'summary': {'type': 'string', 'maxLength': 600},
+        'summary': {'type': 'string', 'maxLength': 700},
         'sourceUrls': {
           'type': 'array',
           'maxItems': 10,
@@ -229,13 +154,18 @@ schwächt.
       },
       'required': [
         'verificationStatus',
-        'contextEffect',
-        'suggestedTrustAdjustment',
+        'reliability',
+        'homeContextScore',
+        'awayContextScore',
+        'homeGoalDelta',
+        'awayGoalDelta',
+        'confidenceDelta',
         'lineupStatus',
-        'injuries',
-        'contextPoints',
+        'critical',
+        'requiresReanalysis',
+        'facts',
         'summary',
-        'sourceUrls',
+        'sourceUrls'
       ],
     };
 
@@ -285,22 +215,23 @@ schwächt.
     }
 
     final context = Map<String, Object?>.from(parsed);
-    context['suggestedTrustAdjustment'] =
-        _integer(context['suggestedTrustAdjustment']).clamp(-5, 5);
+    final reliability = _integer(context['reliability']).clamp(0, 100);
+    final reliableEnough =
+        reliability >= 60 && context['verificationStatus'] != 'unclear';
+
+    context['reliability'] = reliability;
+    context['homeGoalDelta'] = reliableEnough
+        ? (_number(context['homeGoalDelta']) ?? 0).clamp(-0.20, 0.20)
+        : 0.0;
+    context['awayGoalDelta'] = reliableEnough
+        ? (_number(context['awayGoalDelta']) ?? 0).clamp(-0.20, 0.20)
+        : 0.0;
+    context['confidenceDelta'] = reliableEnough
+        ? _integer(context['confidenceDelta']).clamp(-10, 5)
+        : 0;
     context['provider'] = 'gemini';
     context['model'] = model;
-    context['role'] = 'phoenix_tip_context_support';
-
-    final citationUrls = <String>{};
-    _collectUrls(responseMap, citationUrls);
-    final modelUrls = context['sourceUrls'];
-    if (modelUrls is List) {
-      for (final url in modelUrls) {
-        final value = url?.toString().trim() ?? '';
-        if (value.startsWith('http')) citationUrls.add(value);
-      }
-    }
-    context['sourceUrls'] = citationUrls.take(10).toList();
+    context['applied'] = reliableEnough;
 
     await database.saveFootballAiContextCheck(
       phaseTwoScanRunId: phaseTwoScanRunId,
@@ -316,10 +247,7 @@ schwächt.
       },
     );
 
-    return {
-      'fixtureId': fixtureId,
-      'context': context,
-    };
+    return {'fixtureId': fixtureId, 'context': context};
   }
 
   String _extractOutputText(Map<String, Object?> response) {
@@ -362,33 +290,12 @@ schwächt.
     return text.trim();
   }
 
-  void _collectUrls(Object? value, Set<String> result) {
-    if (value is Map) {
-      for (final entry in value.entries) {
-        if (entry.key.toString().toLowerCase() == 'url') {
-          final url = entry.value?.toString().trim() ?? '';
-          if (url.startsWith('http')) result.add(url);
-        }
-        _collectUrls(entry.value, result);
-      }
-    } else if (value is List) {
-      for (final item in value) {
-        _collectUrls(item, result);
-      }
-    }
-  }
-
   Map<String, Object?> _map(Object? value) =>
       value is Map ? Map<String, Object?>.from(value) : <String, Object?>{};
 
   double? _number(Object? value) {
     if (value is num) return value.toDouble();
     return double.tryParse(value?.toString().replaceAll(',', '.') ?? '');
-  }
-
-  double _probabilityPercent(Object? value) {
-    final number = _number(value) ?? 0;
-    return number <= 1 ? number * 100 : number;
   }
 
   int _integer(Object? value) {
