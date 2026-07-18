@@ -18,7 +18,7 @@ class FootballDailyPipelineService {
   final FootballService football;
 
   static const publishedModelVersion =
-      'phoenix_daily_pipeline_v5_context_persistence100k';
+      'phoenix_daily_pipeline_v6_top_quality20_context100k';
 
   Future<void> run({
     required int jobId,
@@ -51,9 +51,12 @@ class FootballDailyPipelineService {
         football: football,
       );
 
+      // Phase 2 prüft bis zu 100 heutige Kandidaten auf ihre echte
+      // Datenqualität. Erst danach verarbeiten Gemini, Engine und Simulation
+      // ausschließlich die besten `safeLimit` Spiele.
       final prepared = await phaseTwoService.prepare(
         phaseOneScanRunId: phaseOneId,
-        limit: safeLimit,
+        limit: 100,
         minimumDataQuality: safeQuality,
       );
 
