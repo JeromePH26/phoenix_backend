@@ -7,14 +7,13 @@ class FootballSimulationService {
 
   final PhoenixDatabase database;
 
-  static const modelVersion = 'phoenix_monte_carlo_v2_stability';
+  static const modelVersion = 'poisson_monte_carlo_v1';
 
   Future<Map<String, Object?>> run({
     required int phaseTwoScanRunId,
-    int limit = 20,
-    int simulations = 100000,
+    int limit = 1,
+    int simulations = 10000,
   }) async {
-    final safeSimulations = simulations.clamp(10000, 100000);
     final rows = await database.engineInputsForSimulation(
       phaseTwoScanRunId: phaseTwoScanRunId,
       limit: limit,
@@ -27,42 +26,41 @@ class FootballSimulationService {
       final input = _map(row['normalized_input']);
       final normalized = _map(input['normalized']);
 
-      if (input['engineReady'] != true) {
+      final homeLambda = _number(normalized['goalRateExpectedHome']);
+      final awayLambda = _number(normalized['goalRateExpectedAway']);
+
+      if (homeLambda == null || awayLambda == null) {
         outputs.add({
           'fixtureId': fixtureId,
           'status': 'skipped',
-          'reason': 'engine_not_ready',
+          'reason': 'goal_expectation_missing',
         });
         continue;
       }
 
-      final homeLambda = _number(normalized['goalRateExpectedHome']);
-      final awayLambda = _number(normalized['goalRateExpectedAway']);
-      if (homeLambda == null || awayLambda == null) continue;
-
       final result = _simulate(
         input: input,
-        baseHomeLambda: homeLambda,
-        baseAwayLambda: awayLambda,
-        simulations: safeSimulations,
+        homeLambda: homeLambda.clamp(0.05, 5.0),
+        awayLambda: awayLambda.clamp(0.05, 5.0),
+        simulations: simulations,
       );
 
       await database.saveFootballSimulationResult(
         phaseTwoScanRunId: phaseTwoScanRunId,
         fixtureId: fixtureId,
         modelVersion: modelVersion,
-        simulations: safeSimulations,
+        simulations: simulations,
         result: result,
       );
+
       outputs.add(result);
     }
 
     return {
       'status': 'completed',
-      'phase': 5,
       'phaseTwoScanRunId': phaseTwoScanRunId,
       'modelVersion': modelVersion,
-      'simulationsPerMatch': safeSimulations,
+      'simulationsPerMatch': simulations,
       'processed': outputs.length,
       'results': outputs,
     };
@@ -70,203 +68,159 @@ class FootballSimulationService {
 
   Map<String, Object?> _simulate({
     required Map<String, Object?> input,
-    required double baseHomeLambda,
-    required double baseAwayLambda,
+    required double homeLambda,
+    required double awayLambda,
     required int simulations,
   }) {
-    const blockCount = 10;
-    final blockSize = simulations ~/ blockCount;
-    final random = Random(_stableSeed(_string(input['fixtureId']), simulations));
-    final normalized = _map(input['normalized']);
+    final fixtureId = _string(input['fixtureId']);
+    final random = Random(_stableSeed(fixtureId, simulations));
 
-    final homeVariance =
-        (_number(normalized['homeAttackVariance']) ?? 0.15).clamp(0.05, 0.45);
-    final awayVariance =
-        (_number(normalized['awayAttackVariance']) ?? 0.15).clamp(0.05, 0.45);
-    final tempoVariance =
-        (_number(normalized['tempoVariance']) ?? 0.10).clamp(0.03, 0.35);
+    var homeWins = 0;
+    var draws = 0;
+    var awayWins = 0;
+    var over25 = 0;
+    var under25 = 0;
+    var bttsYes = 0;
+    var bttsNo = 0;
 
-    final total = _Counter();
-    final blocks = <Map<String, double>>[];
     final scoreCounts = <String, int>{};
 
-    for (var block = 0; block < blockCount; block++) {
-      final counter = _Counter();
+    for (var i = 0; i < simulations; i++) {
+      final homeGoals = _samplePoisson(homeLambda, random);
+      final awayGoals = _samplePoisson(awayLambda, random);
 
-      for (var i = 0; i < blockSize; i++) {
-        final commonTempo = _logNormalMultiplier(random, tempoVariance);
-        final homeForm = _logNormalMultiplier(random, homeVariance);
-        final awayForm = _logNormalMultiplier(random, awayVariance);
-
-        final homeLambda =
-            (baseHomeLambda * commonTempo * homeForm).clamp(0.05, 6.0);
-        final awayLambda =
-            (baseAwayLambda * commonTempo * awayForm).clamp(0.05, 6.0);
-
-        final homeGoals = _samplePoisson(homeLambda, random);
-        final awayGoals = _samplePoisson(awayLambda, random);
-
-        counter.add(homeGoals, awayGoals);
-        total.add(homeGoals, awayGoals);
-
-        final score = '$homeGoals:$awayGoals';
-        scoreCounts[score] = (scoreCounts[score] ?? 0) + 1;
+      if (homeGoals > awayGoals) {
+        homeWins++;
+      } else if (homeGoals == awayGoals) {
+        draws++;
+      } else {
+        awayWins++;
       }
 
-      blocks.add(counter.percentages(blockSize));
-    }
+      if (homeGoals + awayGoals >= 3) {
+        over25++;
+      } else {
+        under25++;
+      }
 
-    final probabilities = total.percentages(blockSize * blockCount);
-    final stability = <String, Object?>{};
-    for (final key in probabilities.keys) {
-      final values = blocks.map((block) => block[key] ?? 0).toList();
-      stability[key] = {
-        'minimum': _round(values.reduce(min)),
-        'maximum': _round(values.reduce(max)),
-        'range': _round(values.reduce(max) - values.reduce(min)),
-        'standardDeviation': _round(_stdDev(values)),
-        'label': _stabilityLabel(values.reduce(max) - values.reduce(min)),
-      };
+      if (homeGoals > 0 && awayGoals > 0) {
+        bttsYes++;
+      } else {
+        bttsNo++;
+      }
+
+      final score = '$homeGoals:$awayGoals';
+      scoreCounts[score] = (scoreCounts[score] ?? 0) + 1;
     }
 
     final topScores = scoreCounts.entries.toList()
       ..sort((a, b) => b.value.compareTo(a.value));
 
-    final fairOdds = <String, Object?>{
-      for (final entry in probabilities.entries)
-        entry.key: entry.value <= 0 ? null : _round(100 / entry.value),
-    };
+    final homeWinProbability = homeWins / simulations;
+    final drawProbability = draws / simulations;
+    final awayWinProbability = awayWins / simulations;
+    final over25Probability = over25 / simulations;
+    final under25Probability = under25 / simulations;
+    final bttsYesProbability = bttsYes / simulations;
+    final bttsNoProbability = bttsNo / simulations;
 
     return {
-      'fixtureId': input['fixtureId'],
-      'homeTeam': input['homeTeam'],
-      'awayTeam': input['awayTeam'],
-      'league': input['league'],
-      'kickoff': input['kickoff'],
-      'dataQuality': input['dataQuality'],
+      'fixtureId': fixtureId,
+      'homeTeam': _string(input['homeTeam']),
+      'awayTeam': _string(input['awayTeam']),
+      'league': _string(input['league']),
+      'kickoff': _string(input['kickoff']),
       'modelVersion': modelVersion,
-      'simulations': blockSize * blockCount,
-      'blocks': blockCount,
+      'dataQuality': _int(input['dataQuality']),
+      'simulations': simulations,
       'goalExpectations': {
-        'home': _round(baseHomeLambda),
-        'away': _round(baseAwayLambda),
-        'total': _round(baseHomeLambda + baseAwayLambda),
+        'home': _round(homeLambda),
+        'away': _round(awayLambda),
+        'total': _round(homeLambda + awayLambda),
+        'sourceType': input['sourceType'],
         'realXgAvailable': input['realXgAvailable'] == true,
       },
-      'probabilities': probabilities,
-      'fairOdds': fairOdds,
-      'stability': stability,
-      'topScores': topScores.take(8).map((entry) {
+      'probabilities': {
+        'homeWin': _percent(homeWinProbability),
+        'draw': _percent(drawProbability),
+        'awayWin': _percent(awayWinProbability),
+        'home': _percent(homeWinProbability),
+        'away': _percent(awayWinProbability),
+        'over25': _percent(over25Probability),
+        'under25': _percent(under25Probability),
+        'bttsYes': _percent(bttsYesProbability),
+        'bttsNo': _percent(bttsNoProbability),
+      },
+      'fairOdds': {
+        'homeWin': _fairOdds(homeWinProbability),
+        'draw': _fairOdds(drawProbability),
+        'awayWin': _fairOdds(awayWinProbability),
+        'over25': _fairOdds(over25Probability),
+        'under25': _fairOdds(under25Probability),
+        'bttsYes': _fairOdds(bttsYesProbability),
+        'bttsNo': _fairOdds(bttsNoProbability),
+      },
+      'topScorelines': topScores.take(5).map((entry) {
         return {
           'score': entry.key,
-          'probability':
-              _round(entry.value / (blockSize * blockCount) * 100),
+          'count': entry.value,
+          'probability': _percent(entry.value / simulations),
         };
       }).toList(),
-      'phaseFour': input['phaseFour'],
-      'warnings': input['warnings'],
+      'warnings': [
+        if (input['realXgAvailable'] != true)
+          'Simulation basiert noch auf Torquoten, nicht auf echtem xG/xGA.',
+        'Noch keine finalen Anpassungen für Aufstellung, KI-Kontext oder Gegnerstärke.',
+      ],
     };
   }
 
   int _samplePoisson(double lambda, Random random) {
     final limit = exp(-lambda);
     var product = 1.0;
-    var count = 0;
+    var k = 0;
+
     do {
-      count++;
+      k++;
       product *= random.nextDouble();
-    } while (product > limit && count < 16);
-    return count - 1;
+    } while (product > limit);
+
+    return k - 1;
   }
 
-  double _logNormalMultiplier(Random random, double sigma) {
-    final u1 = max(random.nextDouble(), 1e-12);
-    final u2 = random.nextDouble();
-    final normal = sqrt(-2 * log(u1)) * cos(2 * pi * u2);
-    return exp(normal * sigma - 0.5 * sigma * sigma);
+  int _stableSeed(String fixtureId, int simulations) {
+    var hash = 17;
+    for (final unit in fixtureId.codeUnits) {
+      hash = (hash * 31 + unit) & 0x7fffffff;
+    }
+    return (hash + simulations) & 0x7fffffff;
   }
-
-  double _stdDev(List<double> values) {
-    final mean = values.reduce((a, b) => a + b) / values.length;
-    final variance =
-        values.map((v) => pow(v - mean, 2)).reduce((a, b) => a + b) /
-            values.length;
-    return sqrt(variance);
-  }
-
-  String _stabilityLabel(double range) {
-    if (range <= 1.5) return 'sehr_stabil';
-    if (range <= 3.0) return 'stabil';
-    if (range <= 5.0) return 'mittel';
-    return 'instabil';
-  }
-
-  int _stableSeed(String fixtureId, int simulations) =>
-      '$fixtureId:$simulations:$modelVersion'.codeUnits.fold(
-            17,
-            (value, element) => (value * 31 + element) & 0x7fffffff,
-          );
-
-  Map<String, Object?> _map(Object? value) =>
-      value is Map ? Map<String, Object?>.from(value) : <String, Object?>{};
 
   double? _number(Object? value) {
     if (value is num) return value.toDouble();
     return double.tryParse(value?.toString().replaceAll(',', '.') ?? '');
   }
 
-  String _string(Object? value) => value?.toString().trim() ?? '';
+  double _percent(double value) =>
+      double.parse((value * 100).toStringAsFixed(2));
+
+  double? _fairOdds(double probability) {
+    if (probability <= 0) return null;
+    return double.parse((1 / probability).toStringAsFixed(2));
+  }
 
   double _round(double value) =>
-      double.parse(value.toStringAsFixed(2));
-}
+      double.parse(value.toStringAsFixed(3));
 
-class _Counter {
-  int homeWin = 0;
-  int draw = 0;
-  int awayWin = 0;
-  int over15 = 0;
-  int under15 = 0;
-  int over25 = 0;
-  int under25 = 0;
-  int over35 = 0;
-  int under35 = 0;
-  int bttsYes = 0;
-  int bttsNo = 0;
+  Map<String, Object?> _map(Object? value) =>
+      value is Map ? Map<String, Object?>.from(value) : <String, Object?>{};
 
-  void add(int home, int away) {
-    if (home > away) {
-      homeWin++;
-    } else if (home == away) {
-      draw++;
-    } else {
-      awayWin++;
-    }
+  String _string(Object? value) => value?.toString().trim() ?? '';
 
-    final total = home + away;
-    total >= 2 ? over15++ : under15++;
-    total >= 3 ? over25++ : under25++;
-    total >= 4 ? over35++ : under35++;
-    home > 0 && away > 0 ? bttsYes++ : bttsNo++;
-  }
-
-  Map<String, double> percentages(int count) {
-    double p(int value) => value / count * 100;
-    return {
-      'homeWin': p(homeWin),
-      'draw': p(draw),
-      'awayWin': p(awayWin),
-      'doubleChance1X': p(homeWin + draw),
-      'doubleChanceX2': p(draw + awayWin),
-      'doubleChance12': p(homeWin + awayWin),
-      'over15': p(over15),
-      'under15': p(under15),
-      'over25': p(over25),
-      'under25': p(under25),
-      'over35': p(over35),
-      'under35': p(under35),
-      'bttsYes': p(bttsYes),
-      'bttsNo': p(bttsNo),
-    };
+  int _int(Object? value) {
+    if (value is int) return value;
+    if (value is num) return value.round();
+    return int.tryParse(value?.toString() ?? '') ?? 0;
   }
 }
+
