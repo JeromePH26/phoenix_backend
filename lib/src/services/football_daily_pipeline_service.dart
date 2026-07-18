@@ -23,22 +23,19 @@ class FootballDailyPipelineService {
     required DateTime date,
     int limit = 20,
     int minimumDataQuality = 50,
-    int simulations = 10000,
+    int simulations = 100000,
   }) async {
     try {
-      await _step(jobId, 'phase1');
+      // Phase 1: Ausschluss
+      await _step(jobId, 'phase1_exclusion');
       final phaseOne = await FootballPhaseOneScanService(
         database: database,
         football: football,
       ).run(date);
       final phaseOneId = _integer(phaseOne['scanRunId']);
-      await database.updateFootballDailyPipelineJob(
-        jobId: jobId,
-        status: 'running',
-        currentStep: 'phase2',
-        phaseOneScanRunId: phaseOneId,
-      );
 
+      // Phase 2: strukturierte Basisanalyse
+      await _step(jobId, 'phase2_base_analysis');
       final phaseTwoService = FootballPhaseTwoScanService(
         database: database,
         football: football,
@@ -48,47 +45,61 @@ class FootballDailyPipelineService {
         limit: limit,
         minimumDataQuality: minimumDataQuality,
       );
+
       if (prepared['started'] != true) {
         await database.updateFootballDailyPipelineJob(
           jobId: jobId,
           status: 'completed',
           currentStep: 'no_eligible_matches',
+          phaseOneScanRunId: phaseOneId,
           processed: 0,
           published: 0,
           completed: true,
         );
         return;
       }
+
       final phaseTwoId = _integer(prepared['scanRunId']);
       await database.updateFootballDailyPipelineJob(
         jobId: jobId,
         status: 'running',
         currentStep: 'phase2_processing',
+        phaseOneScanRunId: phaseOneId,
         phaseTwoScanRunId: phaseTwoId,
       );
       await phaseTwoService.processPrepared(prepared);
 
-      await _step(jobId, 'engine_input');
+      // Phase 3: Gemini-Nachrichtenprüfung
+      await _step(jobId, 'phase3_gemini_news');
+      await GeminiContextService(database: database).verifyPhaseTwoMatches(
+        phaseTwoScanRunId: phaseTwoId,
+        limit: limit,
+      );
+
+      // Phase 4: endgültige Analyse aus allen Informationen
+      await _step(jobId, 'phase4_final_engine');
       await FootballEngineInputService(database: database).prepare(
         phaseTwoScanRunId: phaseTwoId,
         limit: limit,
       );
 
-      await _step(jobId, 'simulation');
+      // Phase 5: Monte Carlo + Schwankungsprüfung
+      await _step(jobId, 'phase5_monte_carlo');
       await FootballSimulationService(database: database).run(
         phaseTwoScanRunId: phaseTwoId,
         limit: limit,
         simulations: simulations,
       );
 
-      await _step(jobId, 'market_selection');
+      // Phase 6: Markt, Quoten und Value
+      await _step(jobId, 'phase6_market_selection');
       await FootballMarketSelectionService(database: database).select(
         phaseTwoScanRunId: phaseTwoId,
         limit: limit,
         minimumProbability: 50,
       );
 
-      await _step(jobId, 'value_check');
+      await _step(jobId, 'phase6_odds_value');
       await FootballValueService(
         database: database,
         football: football,
@@ -99,13 +110,7 @@ class FootballDailyPipelineService {
         minimumValuePercent: 5,
       );
 
-      await _step(jobId, 'gemini_context');
-      await GeminiContextService(database: database).verifyAllEligibleTips(
-        phaseTwoScanRunId: phaseTwoId,
-        candidateLimit: limit,
-      );
-
-      await _step(jobId, 'finalization');
+      await _step(jobId, 'publish');
       final finalResult = await FootballFinalizationService(
         database: database,
       ).finalize(phaseTwoScanRunId: phaseTwoId);
