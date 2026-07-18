@@ -5,7 +5,7 @@ class FootballEngineInputService {
 
   final PhoenixDatabase database;
 
-  static const modelVersion = 'goal_rate_normalization_v3_ai_context';
+  static const modelVersion = 'goal_rate_normalization_v4_tactical_context';
 
   Future<Map<String, Object?>> prepare({
     int? phaseTwoScanRunId,
@@ -85,6 +85,10 @@ class FootballEngineInputService {
     final context = contextWrapper.isNotEmpty ? contextWrapper : contextResult;
     final reliability = _int(context['reliability']).clamp(0, 100);
     final contextApplied = context['applied'] == true && reliability >= 60;
+
+    // Diese beiden Deltas enthalten bereits die gesamte zulässige Wirkung
+    // aus Taktik, Pressing, Wichtigkeit, Personal und sonstigem Kontext.
+    // Einzelne taktische Teilwerte werden deshalb nicht erneut addiert.
     final homeGoalDelta = contextApplied
         ? (_number(context['homeGoalDelta']) ?? 0).clamp(-0.20, 0.20).toDouble()
         : 0.0;
@@ -94,6 +98,11 @@ class FootballEngineInputService {
     final confidenceDelta = contextApplied
         ? _int(context['confidenceDelta']).clamp(-10, 5)
         : 0;
+
+    final matchImportance = _map(context['matchImportance']);
+    final homeTactics = _map(context['homeTacticalProfile']);
+    final awayTactics = _map(context['awayTacticalProfile']);
+    final tacticalMatchup = _map(context['tacticalMatchup']);
 
     final baseHome = calculatedHome ?? 1.35;
     final baseAway = calculatedAway ?? 1.10;
@@ -123,6 +132,8 @@ class FootballEngineInputService {
       'realXgAvailable': availability['realXgAvailable'] == true,
       'lineupConfirmed': lineupConfirmed,
       'aiContextApplied': contextApplied,
+      'tacticalContextAvailable':
+          homeTactics.isNotEmpty && awayTactics.isNotEmpty,
       'confidenceDelta': confidenceDelta,
       'aiContext': {
         'applied': contextApplied,
@@ -138,9 +149,36 @@ class FootballEngineInputService {
         'lineupStatus': context['lineupStatus'],
         'critical': context['critical'] == true,
         'requiresReanalysis': context['requiresReanalysis'] == true,
+        'matchImportance': matchImportance,
+        'homeTacticalProfile': homeTactics,
+        'awayTacticalProfile': awayTactics,
+        'tacticalMatchup': tacticalMatchup,
         'summary': context['summary'],
         'facts': context['facts'],
         'sourceUrls': context['sourceUrls'],
+      },
+      'tacticalSummary': {
+        'matchImportanceLevel': _string(matchImportance['level']),
+        'pressureLevel': _int(matchImportance['pressureLevel']).clamp(0, 100),
+        'homeMotivation':
+            _int(matchImportance['homeMotivation']).clamp(-100, 100),
+        'awayMotivation':
+            _int(matchImportance['awayMotivation']).clamp(-100, 100),
+        'homePressingIntensity':
+            _int(homeTactics['pressingIntensity']).clamp(0, 100),
+        'awayPressingIntensity':
+            _int(awayTactics['pressingIntensity']).clamp(0, 100),
+        'homePressResistance':
+            _int(homeTactics['pressResistance']).clamp(0, 100),
+        'awayPressResistance':
+            _int(awayTactics['pressResistance']).clamp(0, 100),
+        'expectedPressingLevel':
+            _int(tacticalMatchup['expectedPressingLevel']).clamp(0, 100),
+        'expectedTempo':
+            _int(tacticalMatchup['expectedTempo']).clamp(0, 100),
+        'fieldTiltHome':
+            _int(tacticalMatchup['fieldTiltHome']).clamp(-100, 100),
+        'likelyGameState': tacticalMatchup['likelyGameState'],
       },
       'raw': {
         'homeGoalsForAverageHome': homeFor,
@@ -170,6 +208,8 @@ class FootballEngineInputService {
           'Keine aktuelle KI-Kontextprüfung gespeichert.',
         if (contextResult.isNotEmpty && !contextApplied)
           'KI-Kontext wurde wegen zu geringer Verlässlichkeit nicht angewendet.',
+        if (homeTactics.isEmpty || awayTactics.isEmpty)
+          'Mindestens ein taktisches Teamprofil fehlt.',
       ],
       'engineReady': true,
     };
