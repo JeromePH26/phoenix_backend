@@ -44,7 +44,7 @@ Future<void> main() async {
 
   try {
     // Zuerst werden offene Tipps des Vortages abgerechnet.
-    // Ein Fehler dabei darf den heutigen Tagesscan NICHT mehr stoppen.
+    // Ein Fehler dabei darf den heutigen Scan nicht stoppen.
     try {
       await _settleDate(
         client: client,
@@ -65,13 +65,14 @@ Future<void> main() async {
       date: today,
     );
 
-    await _waitForCompletion(
-      client: client,
-      config: config,
-      jobId: jobId,
+    // WICHTIG:
+    // Railway beendet lange Cron-Container nach einiger Zeit.
+    // Der eigentliche Job läuft bereits im permanenten Backend-Service weiter.
+    // Deshalb beendet sich der Cron direkt nach erfolgreichem Start als Erfolg.
+    stdout.writeln(
+      '[PHOENIX CRON] Job $jobId läuft serverseitig weiter. '
+      'Cron-Start erfolgreich abgeschlossen.',
     );
-
-    stdout.writeln('[PHOENIX CRON] Tageslauf vollständig abgeschlossen.');
     exitCode = 0;
   } catch (error, stackTrace) {
     stderr.writeln('[PHOENIX CRON] FEHLER: $error');
