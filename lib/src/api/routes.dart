@@ -724,6 +724,15 @@ router.post('/api/admin/football/engine/prepare', (Request request) async {
 
     final result = await db.execute(
       Sql.named(r'''
+        WITH latest_job AS (
+          SELECT phase_two_scan_run_id
+          FROM football_daily_pipeline_jobs
+          WHERE scan_date = CAST(@day AS DATE)
+            AND status = 'completed'
+            AND phase_two_scan_run_id IS NOT NULL
+          ORDER BY id DESC
+          LIMIT 1
+        )
         SELECT DISTINCT ON (a.match_id)
           m.id,
           m.kickoff_utc,
@@ -746,13 +755,16 @@ router.post('/api/admin/football/engine/prepare', (Request request) async {
           a.recommendation,
           a.payload AS analysis_payload,
           a.analyzed_at
-        FROM analyses a
+        FROM latest_job j
+        INNER JOIN football_phase_two_results p
+          ON p.scan_run_id = j.phase_two_scan_run_id
+         AND p.analysis_allowed = TRUE
+        INNER JOIN analyses a
+          ON a.match_id = p.fixture_id
+         AND a.sport = 'football'
         INNER JOIN football_matches m
           ON m.id = a.match_id
-        WHERE a.sport = 'football'
-          AND (m.kickoff_utc AT TIME ZONE 'Europe/Berlin')::date =
-              CAST(@day AS DATE)
-          AND a.data_quality >= @minimum_quality
+        WHERE a.data_quality >= @minimum_quality
           AND a.payload IS NOT NULL
         ORDER BY a.match_id, a.analyzed_at DESC
       '''),
