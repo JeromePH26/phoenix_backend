@@ -7,12 +7,12 @@ class FootballSimulationService {
 
   final PhoenixDatabase database;
 
-  static const modelVersion = 'poisson_monte_carlo_v1';
+  static const modelVersion = 'poisson_monte_carlo_v2_context100k';
 
   Future<Map<String, Object?>> run({
     required int phaseTwoScanRunId,
     int limit = 1,
-    int simulations = 10000,
+    int simulations = 100000,
   }) async {
     final rows = await database.engineInputsForSimulation(
       phaseTwoScanRunId: phaseTwoScanRunId,
@@ -20,6 +20,7 @@ class FootballSimulationService {
     );
 
     final outputs = <Map<String, Object?>>[];
+    final safeSimulations = simulations.clamp(1000, 100000).toInt();
 
     for (final row in rows) {
       final fixtureId = _string(row['fixture_id']);
@@ -42,14 +43,14 @@ class FootballSimulationService {
         input: input,
         homeLambda: homeLambda.clamp(0.05, 5.0),
         awayLambda: awayLambda.clamp(0.05, 5.0),
-        simulations: simulations,
+        simulations: safeSimulations,
       );
 
       await database.saveFootballSimulationResult(
         phaseTwoScanRunId: phaseTwoScanRunId,
         fixtureId: fixtureId,
         modelVersion: modelVersion,
-        simulations: simulations,
+        simulations: safeSimulations,
         result: result,
       );
 
@@ -60,7 +61,7 @@ class FootballSimulationService {
       'status': 'completed',
       'phaseTwoScanRunId': phaseTwoScanRunId,
       'modelVersion': modelVersion,
-      'simulationsPerMatch': simulations,
+      'simulationsPerMatch': safeSimulations,
       'processed': outputs.length,
       'results': outputs,
     };
@@ -139,7 +140,12 @@ class FootballSimulationService {
         'total': _round(homeLambda + awayLambda),
         'sourceType': input['sourceType'],
         'realXgAvailable': input['realXgAvailable'] == true,
+        'aiContextApplied': input['aiContextApplied'] == true,
+        'lineupConfirmed': input['lineupConfirmed'] == true,
       },
+      'aiContext': input['aiContext'],
+      'confidenceDelta': _int(input['confidenceDelta']),
+      'lineupConfirmed': input['lineupConfirmed'] == true,
       'probabilities': {
         'homeWin': _percent(homeWinProbability),
         'draw': _percent(drawProbability),
@@ -170,7 +176,10 @@ class FootballSimulationService {
       'warnings': [
         if (input['realXgAvailable'] != true)
           'Simulation basiert noch auf Torquoten, nicht auf echtem xG/xGA.',
-        'Noch keine finalen Anpassungen für Aufstellung, KI-Kontext oder Gegnerstärke.',
+        if (input['aiContextApplied'] != true)
+          'Keine ausreichend verlässliche KI-Kontextanpassung angewendet.',
+        if (input['lineupConfirmed'] != true)
+          'Die offizielle Startelf ist noch nicht bestätigt.',
       ],
     };
   }
