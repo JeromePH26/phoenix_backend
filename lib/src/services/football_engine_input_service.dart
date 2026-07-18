@@ -1,4 +1,3 @@
-
 import '../database/database.dart';
 
 class FootballEngineInputService {
@@ -6,24 +5,14 @@ class FootballEngineInputService {
 
   final PhoenixDatabase database;
 
-  static const modelVersion = 'goal_rate_normalization_v1';
+  static const modelVersion = 'phoenix_engine_v1_context';
 
   Future<Map<String, Object?>> prepare({
-    int? phaseTwoScanRunId,
-    int limit = 1,
+    required int phaseTwoScanRunId,
+    int limit = 20,
   }) async {
-    final scanRunId =
-        phaseTwoScanRunId ?? await database.latestCompletedPhaseTwoScanRunId();
-
-    if (scanRunId == null) {
-      return {
-        'status': 'no_completed_phase_two_scan',
-        'prepared': 0,
-      };
-    }
-
-    final rows = await database.allowedPhaseTwoRows(
-      scanRunId: scanRunId,
+    final rows = await database.phaseFourCandidates(
+      phaseTwoScanRunId: phaseTwoScanRunId,
       limit: limit,
     );
 
@@ -36,6 +25,8 @@ class FootballEngineInputService {
       final dataQuality = _int(row['data_quality']);
       final availability = _map(row['availability']);
       final payload = _map(row['payload']);
+      final contextResult = _map(row['context_result']);
+      final context = _map(contextResult['context']);
 
       final normalized = _normalize(
         fixtureId: fixtureId,
@@ -44,10 +35,11 @@ class FootballEngineInputService {
         dataQuality: dataQuality,
         availability: availability,
         payload: payload,
+        context: context,
       );
 
       await database.saveFootballEngineInput(
-        phaseTwoScanRunId: scanRunId,
+        phaseTwoScanRunId: phaseTwoScanRunId,
         fixtureId: fixtureId,
         leagueId: leagueId,
         season: season,
@@ -61,7 +53,8 @@ class FootballEngineInputService {
 
     return {
       'status': 'prepared',
-      'phaseTwoScanRunId': scanRunId,
+      'phase': 4,
+      'phaseTwoScanRunId': phaseTwoScanRunId,
       'modelVersion': modelVersion,
       'prepared': results.length,
       'results': results,
@@ -75,35 +68,40 @@ class FootballEngineInputService {
     required int dataQuality,
     required Map<String, Object?> availability,
     required Map<String, Object?> payload,
+    required Map<String, Object?> context,
   }) {
-    final homeGoalsForHome =
-        _number(availability['homeGoalsForAverageHome']);
-    final homeGoalsAgainstHome =
-        _number(availability['homeGoalsAgainstAverageHome']);
-    final awayGoalsForAway =
-        _number(availability['awayGoalsForAverageAway']);
-    final awayGoalsAgainstAway =
-        _number(availability['awayGoalsAgainstAverageAway']);
-
-    final expectedHomeGoals = _averageAvailable(
-      homeGoalsForHome,
-      awayGoalsAgainstAway,
+    final baseHome = _averageAvailable(
+      _number(availability['homeGoalsForAverageHome']),
+      _number(availability['awayGoalsAgainstAverageAway']),
     );
-    final expectedAwayGoals = _averageAvailable(
-      awayGoalsForAway,
-      homeGoalsAgainstHome,
+    final baseAway = _averageAvailable(
+      _number(availability['awayGoalsForAverageAway']),
+      _number(availability['homeGoalsAgainstAverageHome']),
     );
 
-    final homeAttack = _relativeStrength(homeGoalsForHome, 1.35);
-    final homeDefense = _inverseRelativeStrength(
-      homeGoalsAgainstHome,
-      1.35,
-    );
-    final awayAttack = _relativeStrength(awayGoalsForAway, 1.15);
-    final awayDefense = _inverseRelativeStrength(
-      awayGoalsAgainstAway,
-      1.35,
-    );
+    final contextApplied = context['applied'] == true;
+    final homeDelta =
+        contextApplied ? (_number(context['homeGoalDelta']) ?? 0) : 0.0;
+    final awayDelta =
+        contextApplied ? (_number(context['awayGoalDelta']) ?? 0) : 0.0;
+
+    final finalHome = baseHome == null
+        ? null
+        : _round((baseHome + homeDelta).clamp(0.15, 4.50));
+    final finalAway = baseAway == null
+        ? null
+        : _round((baseAway + awayDelta).clamp(0.15, 4.50));
+
+    final lineupConfirmed = context['lineupStatus'] == 'confirmed';
+    final reliability = _int(context['reliability']);
+    final critical = context['critical'] == true;
+
+    final lineupUncertainty = lineupConfirmed ? 0.03 : 0.10;
+    final contextUncertainty = contextApplied
+        ? ((100 - reliability).clamp(0, 100) / 100) * 0.12
+        : 0.12;
+    final dataUncertainty =
+        ((100 - dataQuality).clamp(0, 100) / 100) * 0.18;
 
     return {
       'fixtureId': fixtureId,
@@ -115,36 +113,56 @@ class FootballEngineInputService {
       'kickoff': _string(payload['kickoff']),
       'dataQuality': dataQuality,
       'modelVersion': modelVersion,
-      'sourceType': 'goal_rates_not_xg',
+      'sourceType': 'structured_data_plus_gemini_context',
       'realXgAvailable': availability['realXgAvailable'] == true,
-      'raw': {
-        'homeGoalsForAverageHome': homeGoalsForHome,
-        'homeGoalsAgainstAverageHome': homeGoalsAgainstHome,
-        'awayGoalsForAverageAway': awayGoalsForAway,
-        'awayGoalsAgainstAverageAway': awayGoalsAgainstAway,
-        'homePlayed': availability['homePlayed'],
-        'awayPlayed': availability['awayPlayed'],
+      'phaseFour': {
+        'baseExpectedGoals': {'home': baseHome, 'away': baseAway},
+        'geminiApplied': contextApplied,
+        'geminiReliability': reliability,
+        'geminiGoalDelta': {'home': homeDelta, 'away': awayDelta},
+        'confidenceDelta': _int(context['confidenceDelta']).clamp(-10, 5),
+        'critical': critical,
+        'requiresReanalysis': context['requiresReanalysis'] == true,
+        'lineupStatus': context['lineupStatus'] ?? 'not_available',
+        'contextSummary': context['summary'] ?? '',
+        'contextFacts': context['facts'] ?? const [],
       },
       'normalized': {
-        'homeAttackStrength': homeAttack,
-        'homeDefenseStrength': homeDefense,
-        'awayAttackStrength': awayAttack,
-        'awayDefenseStrength': awayDefense,
-        'goalRateExpectedHome': expectedHomeGoals,
-        'goalRateExpectedAway': expectedAwayGoals,
-        'goalRateExpectedTotal':
-            _sumAvailable(expectedHomeGoals, expectedAwayGoals),
+        'goalRateExpectedHome': finalHome,
+        'goalRateExpectedAway': finalAway,
+        'goalRateExpectedTotal': _sumAvailable(finalHome, finalAway),
+        'homeAttackVariance': _round(
+          (0.08 + lineupUncertainty + contextUncertainty + dataUncertainty)
+              .clamp(0.08, 0.40),
+        ),
+        'awayAttackVariance': _round(
+          (0.08 + lineupUncertainty + contextUncertainty + dataUncertainty)
+              .clamp(0.08, 0.40),
+        ),
+        'gameTempo': 1.0,
+        'tempoVariance': _round(
+          (0.06 + contextUncertainty + dataUncertainty).clamp(0.06, 0.30),
+        ),
+        'drawTendency': 1.0,
+        'lineupReliability': lineupConfirmed ? 1.0 : 0.65,
+        'tacticalUncertainty':
+            _round((0.08 + contextUncertainty).clamp(0.08, 0.30)),
+        'contextUncertainty': _round(contextUncertainty),
       },
       'warnings': [
         if (availability['realXgAvailable'] != true)
-          'Keine echten xG/xGA-Daten: Torquoten-Modell ist nur Vorbereitung.',
-        if (expectedHomeGoals == null || expectedAwayGoals == null)
-          'Mindestens ein benötigter Heim/Auswärts-Torwert fehlt.',
+          'Keine echten xG/xGA-Daten vorhanden.',
+        if (!contextApplied)
+          'Gemini-Kontext wurde wegen zu geringer Verlässlichkeit neutralisiert.',
+        if (!lineupConfirmed)
+          'Aufstellung noch nicht bestätigt.',
+        if (critical)
+          'Kritische Kontextmeldung: Tipp muss besonders streng geprüft werden.',
       ],
-      'engineReady':
-          expectedHomeGoals != null &&
-          expectedAwayGoals != null &&
-          dataQuality >= 50,
+      'engineReady': finalHome != null &&
+          finalAway != null &&
+          dataQuality >= 50 &&
+          !critical,
     };
   }
 
@@ -165,16 +183,6 @@ class FootballEngineInputService {
     return _round(a + b);
   }
 
-  double? _relativeStrength(double? value, double baseline) {
-    if (value == null || baseline <= 0) return null;
-    return _round(value / baseline);
-  }
-
-  double? _inverseRelativeStrength(double? value, double baseline) {
-    if (value == null || value <= 0) return null;
-    return _round(baseline / value);
-  }
-
   double _round(double value) =>
       double.parse(value.toStringAsFixed(3));
 
@@ -185,6 +193,7 @@ class FootballEngineInputService {
 
   int _int(Object? value) {
     if (value is int) return value;
+    if (value is num) return value.round();
     return int.tryParse(value?.toString() ?? '') ?? 0;
   }
 }
