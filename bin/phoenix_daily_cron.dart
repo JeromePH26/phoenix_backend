@@ -44,11 +44,19 @@ Future<void> main() async {
 
   try {
     // Zuerst werden offene Tipps des Vortages abgerechnet.
-    await _settleDate(
-      client: client,
-      config: config,
-      date: yesterday,
-    );
+    // Ein Fehler dabei darf den heutigen Tagesscan NICHT mehr stoppen.
+    try {
+      await _settleDate(
+        client: client,
+        config: config,
+        date: yesterday,
+      );
+    } catch (error, stackTrace) {
+      stderr.writeln(
+        '[PHOENIX CRON] Ergebnisabrechnung übersprungen: $error',
+      );
+      stderr.writeln(stackTrace);
+    }
 
     // Danach wird der komplette heutige PHÖNIX-Lauf gestartet.
     final jobId = await _startDailyScan(
@@ -184,21 +192,13 @@ Future<void> _waitForCompletion({
       return;
     }
 
-    if (status == 'failed' || status == 'error') {
+    if (status == 'failed' ||
+        status == 'error' ||
+        status == 'interrupted') {
       throw StateError(
         'Tagesscan $jobId wurde mit Status "$status" beendet: '
         '${response['error'] ?? response['last_error'] ?? response}',
       );
-    }
-
-    // "interrupted" wird vom Backend auch während einer temporären
-    // API-Schutzpause verwendet. Der Scan soll danach serverseitig
-    // fortgesetzt werden, deshalb darf der Cron hier nicht abbrechen.
-    if (status == 'interrupted' || status == 'paused') {
-      stdout.writeln(
-        '[PHOENIX CRON] Job $jobId wartet wegen einer Schutzpause und wird weiter überwacht.',
-      );
-      continue;
     }
   }
 
