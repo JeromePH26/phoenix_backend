@@ -202,7 +202,7 @@ class PhoenixDatabase {
         phase_two_scan_run_id BIGINT,
         requested_limit INTEGER NOT NULL,
         minimum_data_quality INTEGER NOT NULL,
-        simulations INTEGER NOT NULL,
+        simulations INTEGER NOT NULL DEFAULT 100000,
         processed INTEGER NOT NULL DEFAULT 0,
         published INTEGER NOT NULL DEFAULT 0,
         error TEXT,
@@ -224,7 +224,7 @@ class PhoenixDatabase {
         ADD COLUMN IF NOT EXISTS phase_two_scan_run_id BIGINT,
         ADD COLUMN IF NOT EXISTS requested_limit INTEGER NOT NULL DEFAULT 20,
         ADD COLUMN IF NOT EXISTS minimum_data_quality INTEGER NOT NULL DEFAULT 50,
-        ADD COLUMN IF NOT EXISTS simulations INTEGER NOT NULL DEFAULT 10000,
+        ADD COLUMN IF NOT EXISTS simulations INTEGER NOT NULL DEFAULT 100000,
         ADD COLUMN IF NOT EXISTS processed INTEGER NOT NULL DEFAULT 0,
         ADD COLUMN IF NOT EXISTS published INTEGER NOT NULL DEFAULT 0,
         ADD COLUMN IF NOT EXISTS error TEXT,
@@ -235,6 +235,15 @@ class PhoenixDatabase {
     await db.execute('''
       CREATE INDEX IF NOT EXISTS idx_football_daily_pipeline_jobs_date
       ON football_daily_pipeline_jobs (scan_date, id DESC)
+    ''');
+
+
+    // PHÖNIX-Fußballanalysen laufen verbindlich mit 100.000 Simulationen.
+    // Dadurch erhalten auch bereits bestehende Railway-Datenbanken den
+    // aktuellen Standardwert.
+    await db.execute('''
+      ALTER TABLE football_daily_pipeline_jobs
+      ALTER COLUMN simulations SET DEFAULT 100000
     ''');
 
     await db.execute('''
@@ -740,7 +749,9 @@ class PhoenixDatabase {
     return result.map((row) {
       final values = Map<String, Object?>.from(row.toColumnMap());
       final rawMatch = _jsonMap(values.remove('raw_json'));
-      final analysis = _jsonMap(values.remove('analysis_payload'));
+      final analysis = _normalizePreparedAnalysis(
+        _jsonMap(values.remove('analysis_payload')),
+      );
 
       return <String, Object?>{
         ...rawMatch,
@@ -768,6 +779,77 @@ class PhoenixDatabase {
         },
       };
     }).where((row) => (row['id']?.toString() ?? '').isNotEmpty).toList();
+  }
+
+  Map<String, Object?> _normalizePreparedAnalysis(
+    Map<String, Object?> analysis,
+  ) {
+    if (analysis.isEmpty) return analysis;
+
+    final normalized = Map<String, Object?>.from(analysis);
+    final probabilities = _jsonMap(normalized['probabilities']);
+
+    if (probabilities.isNotEmpty) {
+      final result = <String, Object?>{
+        ...probabilities,
+      };
+
+      for (final key in const <String>[
+        'home',
+        'draw',
+        'away',
+        'homeWin',
+        'awayWin',
+        'over25',
+        'under25',
+        'bttsYes',
+        'bttsNo',
+      ]) {
+        final probability = _probability01(probabilities[key]);
+        if (probability != null) result[key] = probability;
+      }
+
+      result['home'] = _probability01(
+        probabilities['home'] ?? probabilities['homeWin'],
+      );
+      result['draw'] = _probability01(probabilities['draw']);
+      result['away'] = _probability01(
+        probabilities['away'] ?? probabilities['awayWin'],
+      );
+
+      normalized['probabilities'] = result;
+    }
+
+    final fairOdds = _jsonMap(normalized['fairOdds']);
+    if (fairOdds.isNotEmpty) {
+      normalized['fairOdds'] = <String, Object?>{
+        ...fairOdds,
+        'home': fairOdds['home'] ?? fairOdds['homeWin'],
+        'draw': fairOdds['draw'],
+        'away': fairOdds['away'] ?? fairOdds['awayWin'],
+      };
+    }
+
+    final phoenixTip = _jsonMap(normalized['phoenixTip']);
+    if (phoenixTip.isNotEmpty) {
+      normalized['phoenixTip'] = <String, Object?>{
+        ...phoenixTip,
+        if (_probability01(phoenixTip['probability']) != null)
+          'probability': _probability01(phoenixTip['probability']),
+      };
+    }
+
+    return normalized;
+  }
+
+  double? _probability01(Object? value) {
+    final parsed = value is num
+        ? value.toDouble()
+        : double.tryParse(value?.toString().replaceAll(',', '.') ?? '');
+
+    if (parsed == null || !parsed.isFinite || parsed < 0) return null;
+    final normalized = parsed > 1 ? parsed / 100.0 : parsed;
+    return normalized.clamp(0.0, 1.0).toDouble();
   }
 
   Map<String, Object?> _jsonMap(Object? value) {
@@ -1255,7 +1337,9 @@ class PhoenixDatabase {
         'date': _dateOnly(date),
         'limit': limit,
         'quality': minimumDataQuality,
-        'simulations': simulations,
+        'simulations': simulations < 100000
+            ? 100000
+            : simulations.clamp(100000, 100000).toInt(),
       },
     );
     return result.first[0] as int;
