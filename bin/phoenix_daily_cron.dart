@@ -184,13 +184,21 @@ Future<void> _waitForCompletion({
       return;
     }
 
-    if (status == 'failed' ||
-        status == 'error' ||
-        status == 'interrupted') {
+    if (status == 'failed' || status == 'error') {
       throw StateError(
         'Tagesscan $jobId wurde mit Status "$status" beendet: '
         '${response['error'] ?? response['last_error'] ?? response}',
       );
+    }
+
+    // "interrupted" wird vom Backend auch während einer temporären
+    // API-Schutzpause verwendet. Der Scan soll danach serverseitig
+    // fortgesetzt werden, deshalb darf der Cron hier nicht abbrechen.
+    if (status == 'interrupted' || status == 'paused') {
+      stdout.writeln(
+        '[PHOENIX CRON] Job $jobId wartet wegen einer Schutzpause und wird weiter überwacht.',
+      );
+      continue;
     }
   }
 
