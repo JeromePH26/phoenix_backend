@@ -5,7 +5,7 @@ class FootballEngineInputService {
 
   final PhoenixDatabase database;
 
-  static const modelVersion = 'goal_rate_normalization_v2';
+  static const modelVersion = 'goal_rate_normalization_v3_ai_context';
 
   Future<Map<String, Object?>> prepare({
     int? phaseTwoScanRunId,
@@ -38,6 +38,7 @@ class FootballEngineInputService {
         dataQuality: _int(row['data_quality']),
         availability: _map(row['availability']),
         payload: _map(row['payload']),
+        contextResult: _map(row['context_result']),
       );
 
       await database.saveFootballEngineInput(
@@ -69,6 +70,7 @@ class FootballEngineInputService {
     required int dataQuality,
     required Map<String, Object?> availability,
     required Map<String, Object?> payload,
+    required Map<String, Object?> contextResult,
   }) {
     final homeFor = _number(availability['homeGoalsForAverageHome']);
     final homeAgainst = _number(availability['homeGoalsAgainstAverageHome']);
@@ -77,12 +79,27 @@ class FootballEngineInputService {
 
     final calculatedHome = _averageAvailable(homeFor, awayAgainst);
     final calculatedAway = _averageAvailable(awayFor, homeAgainst);
-
-    // Stabiler Minimal-Fallback, damit die Pipeline auch bei dünner
-    // API-Abdeckung vollständig getestet und gespeichert werden kann.
-    final expectedHome = calculatedHome ?? 1.35;
-    final expectedAway = calculatedAway ?? 1.10;
     final usesFallback = calculatedHome == null || calculatedAway == null;
+
+    final contextWrapper = _map(contextResult['context']);
+    final context = contextWrapper.isNotEmpty ? contextWrapper : contextResult;
+    final reliability = _int(context['reliability']).clamp(0, 100);
+    final contextApplied = context['applied'] == true && reliability >= 60;
+    final homeGoalDelta = contextApplied
+        ? (_number(context['homeGoalDelta']) ?? 0).clamp(-0.20, 0.20).toDouble()
+        : 0.0;
+    final awayGoalDelta = contextApplied
+        ? (_number(context['awayGoalDelta']) ?? 0).clamp(-0.20, 0.20).toDouble()
+        : 0.0;
+    final confidenceDelta = contextApplied
+        ? _int(context['confidenceDelta']).clamp(-10, 5)
+        : 0;
+
+    final baseHome = calculatedHome ?? 1.35;
+    final baseAway = calculatedAway ?? 1.10;
+    final expectedHome = _goalRate(baseHome + homeGoalDelta);
+    final expectedAway = _goalRate(baseAway + awayGoalDelta);
+    final lineupConfirmed = context['lineupStatus'] == 'confirmed';
 
     return {
       'fixtureId': fixtureId,
@@ -104,6 +121,27 @@ class FootballEngineInputService {
           ? 'safe_baseline_fallback'
           : 'goal_rates_not_xg',
       'realXgAvailable': availability['realXgAvailable'] == true,
+      'lineupConfirmed': lineupConfirmed,
+      'aiContextApplied': contextApplied,
+      'confidenceDelta': confidenceDelta,
+      'aiContext': {
+        'applied': contextApplied,
+        'provider': context['provider'],
+        'model': context['model'],
+        'verificationStatus': context['verificationStatus'],
+        'reliability': reliability,
+        'homeContextScore': _int(context['homeContextScore']),
+        'awayContextScore': _int(context['awayContextScore']),
+        'homeGoalDelta': homeGoalDelta,
+        'awayGoalDelta': awayGoalDelta,
+        'confidenceDelta': confidenceDelta,
+        'lineupStatus': context['lineupStatus'],
+        'critical': context['critical'] == true,
+        'requiresReanalysis': context['requiresReanalysis'] == true,
+        'summary': context['summary'],
+        'facts': context['facts'],
+        'sourceUrls': context['sourceUrls'],
+      },
       'raw': {
         'homeGoalsForAverageHome': homeFor,
         'homeGoalsAgainstAverageHome': homeAgainst,
@@ -117,6 +155,8 @@ class FootballEngineInputService {
         'awayAttackStrength': _relativeStrength(awayFor, 1.15) ?? 1.0,
         'awayDefenseStrength':
             _inverseRelativeStrength(awayAgainst, 1.35) ?? 1.0,
+        'goalRateBeforeContextHome': _round(baseHome),
+        'goalRateBeforeContextAway': _round(baseAway),
         'goalRateExpectedHome': _round(expectedHome),
         'goalRateExpectedAway': _round(expectedAway),
         'goalRateExpectedTotal': _round(expectedHome + expectedAway),
@@ -126,6 +166,10 @@ class FootballEngineInputService {
           'Torwerte fehlen teilweise; PHÖNIX nutzt vorübergehend eine neutrale Basis.',
         if (availability['realXgAvailable'] != true)
           'Keine echten xG/xGA-Daten vorhanden.',
+        if (contextResult.isEmpty)
+          'Keine aktuelle KI-Kontextprüfung gespeichert.',
+        if (contextResult.isNotEmpty && !contextApplied)
+          'KI-Kontext wurde wegen zu geringer Verlässlichkeit nicht angewendet.',
       ],
       'engineReady': true,
     };
@@ -152,6 +196,8 @@ class FootballEngineInputService {
     if (value == null || value <= 0) return null;
     return _round(baseline / value);
   }
+
+  double _goalRate(double value) => value.clamp(0.20, 3.80).toDouble();
 
   double _round(double value) => double.parse(value.toStringAsFixed(3));
 
