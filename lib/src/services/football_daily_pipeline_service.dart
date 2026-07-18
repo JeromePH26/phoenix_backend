@@ -17,6 +17,9 @@ class FootballDailyPipelineService {
   final PhoenixDatabase database;
   final FootballService football;
 
+  static const publishedModelVersion =
+      'phoenix_daily_pipeline_v5_context_persistence100k';
+
   Future<void> run({
     required int jobId,
     required DateTime date,
@@ -25,12 +28,9 @@ class FootballDailyPipelineService {
     int simulations = 100000,
   }) async {
     try {
-      final safeLimit = limit.clamp(1, 20).toInt();
-      final safeQuality = minimumDataQuality.clamp(0, 100).toInt();
-      // Für Fußball verwendet PHÖNIX verbindlich 100.000 Läufe.
-      final safeSimulations = simulations < 100000
-          ? 100000
-          : simulations.clamp(100000, 100000).toInt();
+      final safeLimit = limit.clamp(1, 20);
+      final safeQuality = minimumDataQuality.clamp(0, 100);
+      final safeSimulations = simulations.clamp(1000, 100000);
 
       await _step(jobId, 'phase1');
       final phaseOne = await FootballPhaseOneScanService(
@@ -50,6 +50,7 @@ class FootballDailyPipelineService {
         database: database,
         football: football,
       );
+
       final prepared = await phaseTwoService.prepare(
         phaseOneScanRunId: phaseOneId,
         limit: safeLimit,
@@ -67,6 +68,7 @@ class FootballDailyPipelineService {
       }
 
       final phaseTwoId = _integer(prepared['scanRunId']);
+
       await database.updateFootballDailyPipelineJob(
         jobId: jobId,
         status: 'running',
@@ -88,18 +90,18 @@ class FootballDailyPipelineService {
         return;
       }
 
+      // Gemini läuft bewusst VOR dem Engine-Input. Dadurch fließen
+      // verifizierte Kontext-Deltas in die Torerwartungen und Simulation ein.
       await _step(jobId, 'gemini_context');
-      final gemini = GeminiContextService(database: database);
+
       try {
-        await gemini.verifyPhaseTwoMatches(
+        await GeminiContextService(database: database).verifyPhaseTwoMatches(
           phaseTwoScanRunId: phaseTwoId,
           limit: safeLimit,
         );
       } catch (_) {
-        // Die strukturierte PHÖNIX-Analyse läuft weiter, wenn Gemini nicht
-        // konfiguriert oder vorübergehend nicht erreichbar ist.
-      } finally {
-        gemini.close();
+        // Die Pipeline bleibt lauffähig. Der Gemini-Service speichert
+        // Kandidatenfehler selbst und versucht einen verifizierten 12h-Fallback.
       }
 
       await _step(jobId, 'engine_input');
@@ -140,9 +142,8 @@ class FootballDailyPipelineService {
         throw StateError('Keine Marktauswahl wurde erzeugt.');
       }
 
-      // Quoten/Value sind hilfreich, dürfen aber die Veröffentlichung
-      // einer vollständigen Modellanalyse nicht verhindern.
       await _step(jobId, 'value_check_optional');
+
       try {
         await FootballValueService(
           database: database,
@@ -154,7 +155,7 @@ class FootballDailyPipelineService {
           minimumValuePercent: 5,
         );
       } catch (_) {
-        // Ohne Quoten bleibt der PHÖNIX-Tipp bestehen, nur Value fehlt.
+        // Ohne Quote bleibt der PHÖNIX-Tipp sichtbar; nur Value fehlt.
       }
 
       await _step(jobId, 'publishing');
@@ -203,41 +204,73 @@ class FootballDailyPipelineService {
         continue;
       }
 
-      final probabilities = _map(simulation['probabilities']);
-      final fairOdds = _map(simulation['fairOdds']);
-      final publicProbabilities = _publicProbabilities(probabilities);
-      final publicFairOdds = <String, Object?>{
-        ...fairOdds,
-        'home': fairOdds['home'] ?? fairOdds['homeWin'],
-        'draw': fairOdds['draw'],
-        'away': fairOdds['away'] ?? fairOdds['awayWin'],
-      };
+      final rawProbabilities = _map(simulation['probabilities']);
+      final rawFairOdds = _map(simulation['fairOdds']);
       final phoenixTip = _map(selection['phoenixTip']);
       final trust = _map(selection['trust']);
-      final confidence = _integer(trust['score']).clamp(0, 100);
+      final aiContext = _map(simulation['aiContext']);
+
+      final baseConfidence = _integer(trust['score']).clamp(0, 100);
+      final contextConfidenceDelta = aiContext['applied'] == true
+          ? _integer(aiContext['confidenceDelta']).clamp(-10, 5)
+          : 0;
+      final confidence =
+          (baseConfidence + contextConfidenceDelta).clamp(0, 100);
+
       final recommendation = _string(phoenixTip['market']);
+
+      final homeProbability = _probability(
+        rawProbabilities['home'] ?? rawProbabilities['homeWin'],
+      );
+      final drawProbability = _probability(rawProbabilities['draw']);
+      final awayProbability = _probability(
+        rawProbabilities['away'] ?? rawProbabilities['awayWin'],
+      );
+
+      final fairOdds = <String, Object?>{
+        'home': rawFairOdds['home'] ?? rawFairOdds['homeWin'],
+        'draw': rawFairOdds['draw'],
+        'away': rawFairOdds['away'] ?? rawFairOdds['awayWin'],
+        'homeWin': rawFairOdds['homeWin'] ?? rawFairOdds['home'],
+        'awayWin': rawFairOdds['awayWin'] ?? rawFairOdds['away'],
+        'over25': rawFairOdds['over25'],
+        'under25': rawFairOdds['under25'],
+        'bttsYes': rawFairOdds['bttsYes'],
+        'bttsNo': rawFairOdds['bttsNo'],
+      };
 
       final analysisPayload = <String, Object?>{
         ...matchPayload,
         'source': 'server_prepared',
-        'modelVersion': 'phoenix_daily_pipeline_v5_context_persistence100k',
+        'modelVersion': publishedModelVersion,
         'dataQuality': dataQuality,
         'confidence': confidence,
+        'baseConfidence': baseConfidence,
+        'contextConfidenceDelta': contextConfidenceDelta,
         'recommendation': recommendation,
-        // Öffentliche App-Schnittstelle: Wahrscheinlichkeiten immer 0–1.
-        'probabilities': publicProbabilities,
-        'fairOdds': publicFairOdds,
+        'probabilities': {
+          'home': homeProbability,
+          'draw': drawProbability,
+          'away': awayProbability,
+          'homeWin': homeProbability,
+          'awayWin': awayProbability,
+          'over25': _probability(rawProbabilities['over25']),
+          'under25': _probability(rawProbabilities['under25']),
+          'bttsYes': _probability(rawProbabilities['bttsYes']),
+          'bttsNo': _probability(rawProbabilities['bttsNo']),
+        },
+        'fairOdds': fairOdds,
         'goalExpectations': simulation['goalExpectations'],
         'topScorelines': simulation['topScorelines'],
-        'phoenixTip': <String, Object?>{
-          ...phoenixTip,
-          if (_probability01(phoenixTip['probability']) != null)
-            'probability': _probability01(phoenixTip['probability']),
-        },
+        'phoenixTip': phoenixTip,
         'selection': selection,
-        'aiContext': simulation['aiContext'],
-        'simulationRuns': simulation['simulations'],
         'simulation': simulation,
+        'simulationCount': simulation['simulations'],
+        'aiContext': aiContext,
+        'contextApplied': aiContext['applied'] == true,
+        'contextSource': aiContext['contextSource'],
+        'contextSourceScanRunId': aiContext['contextSourceScanRunId'],
+        'fallbackUsed': aiContext['fallbackUsed'] == true,
         'publishedAt': DateTime.now().toUtc().toIso8601String(),
       };
 
@@ -248,7 +281,7 @@ class FootballDailyPipelineService {
 
       await database.saveFinalFootballAnalysis(
         fixtureId: fixtureId,
-        modelVersion: 'phoenix_daily_pipeline_v5_context_persistence100k',
+        modelVersion: publishedModelVersion,
         dataQuality: dataQuality,
         confidence: confidence,
         recommendation:
@@ -291,32 +324,17 @@ class FootballDailyPipelineService {
     );
   }
 
-  Map<String, Object?> _publicProbabilities(
-    Map<String, Object?> values,
-  ) {
-    Object? probability(String key, [String? fallback]) =>
-        _probability01(values[key] ?? (fallback == null ? null : values[fallback]));
-
-    return <String, Object?>{
-      'home': probability('home', 'homeWin'),
-      'draw': probability('draw'),
-      'away': probability('away', 'awayWin'),
-      'homeWin': probability('homeWin', 'home'),
-      'awayWin': probability('awayWin', 'away'),
-      'over25': probability('over25'),
-      'under25': probability('under25'),
-      'bttsYes': probability('bttsYes'),
-      'bttsNo': probability('bttsNo'),
-    };
+  double _probability(Object? value) {
+    final number = _number(value) ?? 0;
+    final decimal = number > 1 ? number / 100 : number;
+    return double.parse(
+      decimal.clamp(0.0, 1.0).toStringAsFixed(6),
+    );
   }
 
-  double? _probability01(Object? value) {
-    final parsed = value is num
-        ? value.toDouble()
-        : double.tryParse(value?.toString().replaceAll(',', '.') ?? '');
-    if (parsed == null || !parsed.isFinite || parsed < 0) return null;
-    final normalized = parsed > 1 ? parsed / 100.0 : parsed;
-    return normalized.clamp(0.0, 1.0).toDouble();
+  double? _number(Object? value) {
+    if (value is num) return value.toDouble();
+    return double.tryParse(value?.toString().replaceAll(',', '.') ?? '');
   }
 
   Map<String, Object?> _map(Object? value) =>
