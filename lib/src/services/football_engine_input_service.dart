@@ -5,7 +5,7 @@ class FootballEngineInputService {
 
   final PhoenixDatabase database;
 
-  static const modelVersion = 'goal_rate_normalization_v4_tactical_context';
+  static const modelVersion = 'goal_rate_normalization_v5_context_persistence';
 
   Future<Map<String, Object?>> prepare({
     int? phaseTwoScanRunId,
@@ -39,6 +39,8 @@ class FootballEngineInputService {
         availability: _map(row['availability']),
         payload: _map(row['payload']),
         contextResult: _map(row['context_result']),
+        contextSource: _string(row['context_source']),
+        contextSourceScanRunId: _int(row['context_source_scan_run_id']),
       );
 
       await database.saveFootballEngineInput(
@@ -71,6 +73,8 @@ class FootballEngineInputService {
     required Map<String, Object?> availability,
     required Map<String, Object?> payload,
     required Map<String, Object?> contextResult,
+    required String contextSource,
+    required int contextSourceScanRunId,
   }) {
     final homeFor = _number(availability['homeGoalsForAverageHome']);
     final homeAgainst = _number(availability['homeGoalsAgainstAverageHome']);
@@ -137,6 +141,9 @@ class FootballEngineInputService {
       'confidenceDelta': confidenceDelta,
       'aiContext': {
         'applied': contextApplied,
+        'contextSource': contextSource.isEmpty ? 'missing' : contextSource,
+        'contextSourceScanRunId': contextSourceScanRunId,
+        'fallbackUsed': contextSource == 'fallback',
         'provider': context['provider'],
         'model': context['model'],
         'verificationStatus': context['verificationStatus'],
