@@ -5,7 +5,7 @@ class FootballMarketSelectionService {
 
   final PhoenixDatabase database;
 
-  static const modelVersion = 'market_selection_trust_v1';
+  static const modelVersion = 'market_selection_trust_v2_context100k';
 
   Future<Map<String, Object?>> select({
     required int phaseTwoScanRunId,
@@ -25,7 +25,7 @@ class FootballMarketSelectionService {
       final probabilities = _map(simulation['probabilities']);
       final fairOdds = _map(simulation['fairOdds']);
       final goalExpectations = _map(simulation['goalExpectations']);
-      final stability = _map(simulation['stability']);
+      final aiContext = _map(simulation['aiContext']);
 
       final candidates = <Map<String, Object?>>[
         _candidate(
@@ -70,7 +70,9 @@ class FootballMarketSelectionService {
           probability: probabilities['bttsNo'],
           fairOdds: fairOdds['bttsNo'],
         ),
-      ];
+      ].where((candidate) => candidate['probability'] != null).toList();
+
+      if (candidates.isEmpty) continue;
 
       candidates.sort((a, b) {
         final pA = _number(a['probability']) ?? 0;
@@ -80,25 +82,36 @@ class FootballMarketSelectionService {
 
       final best = candidates.first;
       final second = candidates.length > 1 ? candidates[1] : candidates.first;
-
       final bestProbability = _number(best['probability']) ?? 0;
       final secondProbability = _number(second['probability']) ?? 0;
-      final probabilityGap = (bestProbability - secondProbability).clamp(0, 100);
+      final probabilityGap =
+          (bestProbability - secondProbability).clamp(0, 100).toDouble();
 
-      final dataQuality = _int(simulation['dataQuality'], fallback: 95);
+      final dataQuality = _int(simulation['dataQuality'], fallback: 0);
       final realXgAvailable = goalExpectations['realXgAvailable'] == true;
+      final aiContextVerified = goalExpectations['aiContextApplied'] == true ||
+          aiContext['applied'] == true;
+      final lineupConfirmed = simulation['lineupConfirmed'] == true ||
+          goalExpectations['lineupConfirmed'] == true;
+      final confidenceDelta =
+          _int(simulation['confidenceDelta']).clamp(-10, 5);
+      final simulationCount =
+          _int(simulation['simulations'], fallback: 100000);
 
-      final bestStability = _map(stability[_string(best['key'])]);
-      final stabilityRange = _number(bestStability['range']) ?? 10;
-
-      final trustScore = _trustScore(
+      final baseTrust = _trustScore(
         bestProbability: bestProbability,
-        probabilityGap: probabilityGap.toDouble(),
+        probabilityGap: probabilityGap,
         dataQuality: dataQuality,
-        simulations: _int(simulation['simulations'], fallback: 10000),
+        simulations: simulationCount,
         realXgAvailable: realXgAvailable,
-        stabilityRange: stabilityRange,
+        aiContextVerified: aiContextVerified,
+        lineupConfirmed: lineupConfirmed,
       );
+      final trustScore =
+          (baseTrust + confidenceDelta).clamp(0, 100).toInt();
+
+      final belowRequestedProbability =
+          minimumProbability > 0 && bestProbability < minimumProbability;
 
       final selection = <String, Object?>{
         'fixtureId': fixtureId,
@@ -107,6 +120,7 @@ class FootballMarketSelectionService {
         'league': simulation['league'],
         'kickoff': simulation['kickoff'],
         'modelVersion': modelVersion,
+        'qualifiesForTip': !belowRequestedProbability,
         'phoenixTip': {
           'marketKey': best['key'],
           'market': best['label'],
@@ -115,21 +129,20 @@ class FootballMarketSelectionService {
         },
         'trust': {
           'score': trustScore,
+          'baseScore': baseTrust,
+          'confidenceDelta': confidenceDelta,
           'label': _trustLabel(trustScore),
           'components': {
             'modelProbability': bestProbability,
-            'probabilityGapToSecondMarket': _round(probabilityGap.toDouble()),
+            'probabilityGapToSecondMarket': _round(probabilityGap),
             'dataQuality': dataQuality,
-            'simulationCount': _int(
-              simulation['simulations'],
-              fallback: 10000,
-            ),
+            'simulationCount': simulationCount,
             'realXgAvailable': realXgAvailable,
-            'lineupConfirmed': false,
-            'aiContextVerified': true,
-            'stabilityRange': _round(stabilityRange),
+            'lineupConfirmed': lineupConfirmed,
+            'aiContextVerified': aiContextVerified,
           },
         },
+        'aiContext': aiContext,
         'topMarkets': candidates.take(3).toList(),
         'value': {
           'status': 'not_checked',
@@ -150,9 +163,12 @@ class FootballMarketSelectionService {
         'warnings': [
           if (!realXgAvailable)
             'Noch keine echten xG/xGA-Daten vorhanden.',
-          'Bestätigte Aufstellung ist noch nicht eingerechnet.',
-          if (stabilityRange > 5)
-            'Simulation ist über die Kontrollblöcke instabil.',
+          if (!lineupConfirmed)
+            'Bestätigte Aufstellung ist noch nicht eingerechnet.',
+          if (!aiContextVerified)
+            'Keine ausreichend verlässliche Gemini-Kontextprüfung angewendet.',
+          if (belowRequestedProbability)
+            'Die Tippwahrscheinlichkeit liegt unter der angeforderten Mindestgrenze.',
         ],
       };
 
@@ -181,38 +197,36 @@ class FootballMarketSelectionService {
     required int dataQuality,
     required int simulations,
     required bool realXgAvailable,
-    required double stabilityRange,
+    required bool aiContextVerified,
+    required bool lineupConfirmed,
   }) {
-    // Vertrauen ist nicht identisch mit der Tipp-Wahrscheinlichkeit.
-    // 35 % Modellwahrscheinlichkeit
-    // 20 % Abstand zum zweitbesten Markt
+    // 30 % Modellwahrscheinlichkeit
+    // 15 % Abstand zum zweitbesten Markt
     // 30 % Datenqualität
-    // 10 % Simulationsstabilität
-    // 5 % echte xG/xGA-Verfügbarkeit
+    // 10 % Simulationsumfang
+    // 5 % echte xG/xGA
+    // 5 % verifizierter KI-Kontext
+    // 5 % bestätigte Aufstellung
     final probabilityComponent =
-        (bestProbability.clamp(0, 100) / 100) * 35;
-
-    final gapComponent =
-        (probabilityGap.clamp(0, 25) / 25) * 20;
-
+        (bestProbability.clamp(0, 100) / 100) * 30;
+    final gapComponent = (probabilityGap.clamp(0, 25) / 25) * 15;
     final dataQualityComponent =
         (dataQuality.clamp(0, 100) / 100) * 30;
-
-    final simulationVolume =
-        (simulations.clamp(10000, 100000) / 100000) * 4;
-    final stabilityComponent =
-        (1 - (stabilityRange.clamp(0, 10) / 10)) * 6;
-    final simulationComponent = simulationVolume + stabilityComponent;
-
+    final simulationComponent =
+        (simulations.clamp(1000, 100000) / 100000) * 10;
     final xgComponent = realXgAvailable ? 5.0 : 0.0;
+    final aiComponent = aiContextVerified ? 5.0 : 0.0;
+    final lineupComponent = lineupConfirmed ? 5.0 : 0.0;
 
-    final score = probabilityComponent +
-        gapComponent +
-        dataQualityComponent +
-        simulationComponent +
-        xgComponent;
-
-    return score.round().clamp(0, 100);
+    return (probabilityComponent +
+            gapComponent +
+            dataQualityComponent +
+            simulationComponent +
+            xgComponent +
+            aiComponent +
+            lineupComponent)
+        .round()
+        .clamp(0, 100);
   }
 
   String _trustLabel(int score) {
@@ -243,11 +257,11 @@ class FootballMarketSelectionService {
 
   int _int(Object? value, {int fallback = 0}) {
     if (value is int) return value;
+    if (value is num) return value.round();
     return int.tryParse(value?.toString() ?? '') ?? fallback;
   }
 
-  double _round(double value) =>
-      double.parse(value.toStringAsFixed(2));
+  double _round(double value) => double.parse(value.toStringAsFixed(2));
 
   Map<String, Object?> _map(Object? value) =>
       value is Map ? Map<String, Object?>.from(value) : <String, Object?>{};
