@@ -211,6 +211,32 @@ class PhoenixDatabase {
       )
     ''');
 
+    // Bestehende Railway-Datenbanken können eine ältere Version der
+    // Job-Tabelle besitzen. CREATE TABLE IF NOT EXISTS ergänzt keine
+    // später hinzugekommenen Spalten, deshalb werden sie hier einzeln
+    // nachgezogen.
+    await db.execute('''
+      ALTER TABLE football_daily_pipeline_jobs
+        ADD COLUMN IF NOT EXISTS scan_date DATE,
+        ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'running',
+        ADD COLUMN IF NOT EXISTS current_step TEXT NOT NULL DEFAULT 'created',
+        ADD COLUMN IF NOT EXISTS phase_one_scan_run_id BIGINT,
+        ADD COLUMN IF NOT EXISTS phase_two_scan_run_id BIGINT,
+        ADD COLUMN IF NOT EXISTS requested_limit INTEGER NOT NULL DEFAULT 20,
+        ADD COLUMN IF NOT EXISTS minimum_data_quality INTEGER NOT NULL DEFAULT 50,
+        ADD COLUMN IF NOT EXISTS simulations INTEGER NOT NULL DEFAULT 10000,
+        ADD COLUMN IF NOT EXISTS processed INTEGER NOT NULL DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS published INTEGER NOT NULL DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS error TEXT,
+        ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ
+    ''');
+
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_football_daily_pipeline_jobs_date
+      ON football_daily_pipeline_jobs (scan_date, id DESC)
+    ''');
+
     await db.execute('''
       CREATE TABLE IF NOT EXISTS football_leagues (
         league_id TEXT PRIMARY KEY,
@@ -1280,12 +1306,47 @@ class PhoenixDatabase {
     final db = await connection();
     final result = await db.execute(
       Sql.named('''
-        SELECT * FROM football_daily_pipeline_jobs WHERE id = @id LIMIT 1
+        SELECT
+          id,
+          scan_date::text AS scan_date,
+          status,
+          current_step,
+          phase_one_scan_run_id,
+          phase_two_scan_run_id,
+          requested_limit,
+          minimum_data_quality,
+          simulations,
+          processed,
+          published,
+          error,
+          created_at::text AS created_at,
+          completed_at::text AS completed_at
+        FROM football_daily_pipeline_jobs
+        WHERE id = @id
+        LIMIT 1
       '''),
       parameters: {'id': id},
     );
+
     if (result.isEmpty) return null;
-    return Map<String, Object?>.from(result.first.toColumnMap());
+
+    final row = Map<String, Object?>.from(result.first.toColumnMap());
+    return <String, Object?>{
+      'id': row['id'],
+      'scan_date': row['scan_date']?.toString(),
+      'status': row['status']?.toString() ?? 'unknown',
+      'current_step': row['current_step']?.toString() ?? '',
+      'phase_one_scan_run_id': row['phase_one_scan_run_id'],
+      'phase_two_scan_run_id': row['phase_two_scan_run_id'],
+      'requested_limit': row['requested_limit'],
+      'minimum_data_quality': row['minimum_data_quality'],
+      'simulations': row['simulations'],
+      'processed': row['processed'] ?? 0,
+      'published': row['published'] ?? 0,
+      'error': row['error']?.toString(),
+      'created_at': row['created_at']?.toString(),
+      'completed_at': row['completed_at']?.toString(),
+    };
   }
 
   Future<void> close() async {
