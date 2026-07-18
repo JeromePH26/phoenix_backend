@@ -7,20 +7,21 @@ class FootballSimulationService {
 
   final PhoenixDatabase database;
 
-  static const modelVersion = 'poisson_monte_carlo_v2_context100k';
+  static const modelVersion = 'poisson_monte_carlo_v2_decimal_context';
 
   Future<Map<String, Object?>> run({
     required int phaseTwoScanRunId,
-    int limit = 1,
+    int limit = 20,
     int simulations = 100000,
   }) async {
+    final safeSimulations = simulations.clamp(1000, 100000);
+
     final rows = await database.engineInputsForSimulation(
       phaseTwoScanRunId: phaseTwoScanRunId,
-      limit: limit,
+      limit: limit.clamp(1, 20),
     );
 
     final outputs = <Map<String, Object?>>[];
-    final safeSimulations = simulations.clamp(1000, 100000).toInt();
 
     for (final row in rows) {
       final fixtureId = _string(row['fixture_id']);
@@ -41,8 +42,8 @@ class FootballSimulationService {
 
       final result = _simulate(
         input: input,
-        homeLambda: homeLambda.clamp(0.05, 5.0),
-        awayLambda: awayLambda.clamp(0.05, 5.0),
+        homeLambda: homeLambda.clamp(0.05, 5.0).toDouble(),
+        awayLambda: awayLambda.clamp(0.05, 5.0).toDouble(),
         simulations: safeSimulations,
       );
 
@@ -125,6 +126,9 @@ class FootballSimulationService {
     final bttsYesProbability = bttsYes / simulations;
     final bttsNoProbability = bttsNo / simulations;
 
+    final aiContext = _map(input['aiContext']);
+    final normalized = _map(input['normalized']);
+
     return {
       'fixtureId': fixtureId,
       'homeTeam': _string(input['homeTeam']),
@@ -138,19 +142,26 @@ class FootballSimulationService {
         'home': _round(homeLambda),
         'away': _round(awayLambda),
         'total': _round(homeLambda + awayLambda),
+        'baseHome': normalized['baseGoalRateExpectedHome'],
+        'baseAway': normalized['baseGoalRateExpectedAway'],
+        'contextAdjusted': normalized['contextAdjusted'] == true,
         'sourceType': input['sourceType'],
         'realXgAvailable': input['realXgAvailable'] == true,
-        'aiContextApplied': input['aiContextApplied'] == true,
-        'lineupConfirmed': input['lineupConfirmed'] == true,
       },
-      'aiContext': input['aiContext'],
-      'confidenceDelta': _int(input['confidenceDelta']),
-      'lineupConfirmed': input['lineupConfirmed'] == true,
       'probabilities': {
-        'homeWin': _percent(homeWinProbability),
-        'draw': _percent(drawProbability),
-        'awayWin': _percent(awayWinProbability),
+        'home': _probability(homeWinProbability),
+        'draw': _probability(drawProbability),
+        'away': _probability(awayWinProbability),
+        'homeWin': _probability(homeWinProbability),
+        'awayWin': _probability(awayWinProbability),
+        'over25': _probability(over25Probability),
+        'under25': _probability(under25Probability),
+        'bttsYes': _probability(bttsYesProbability),
+        'bttsNo': _probability(bttsNoProbability),
+      },
+      'probabilitiesPercent': {
         'home': _percent(homeWinProbability),
+        'draw': _percent(drawProbability),
         'away': _percent(awayWinProbability),
         'over25': _percent(over25Probability),
         'under25': _percent(under25Probability),
@@ -158,8 +169,10 @@ class FootballSimulationService {
         'bttsNo': _percent(bttsNoProbability),
       },
       'fairOdds': {
-        'homeWin': _fairOdds(homeWinProbability),
+        'home': _fairOdds(homeWinProbability),
         'draw': _fairOdds(drawProbability),
+        'away': _fairOdds(awayWinProbability),
+        'homeWin': _fairOdds(homeWinProbability),
         'awayWin': _fairOdds(awayWinProbability),
         'over25': _fairOdds(over25Probability),
         'under25': _fairOdds(under25Probability),
@@ -167,19 +180,24 @@ class FootballSimulationService {
         'bttsNo': _fairOdds(bttsNoProbability),
       },
       'topScorelines': topScores.take(5).map((entry) {
+        final probability = entry.value / simulations;
         return {
           'score': entry.key,
           'count': entry.value,
-          'probability': _percent(entry.value / simulations),
+          'probability': _probability(probability),
+          'probabilityPercent': _percent(probability),
         };
       }).toList(),
+      'aiContext': aiContext,
       'warnings': [
         if (input['realXgAvailable'] != true)
           'Simulation basiert noch auf Torquoten, nicht auf echtem xG/xGA.',
-        if (input['aiContextApplied'] != true)
-          'Keine ausreichend verlässliche KI-Kontextanpassung angewendet.',
-        if (input['lineupConfirmed'] != true)
-          'Die offizielle Startelf ist noch nicht bestätigt.',
+        if (aiContext['applied'] == true)
+          'Verifizierter Gemini-Kontext ist in den Torerwartungen enthalten.',
+        if (aiContext['applied'] != true)
+          'Kein verifizierter Gemini-Kontext in dieser Simulation.',
+        if (aiContext['fallbackUsed'] == true)
+          'Kontext-Fallback aus einem vorherigen verifizierten Lauf verwendet.',
       ],
     };
   }
@@ -192,7 +210,7 @@ class FootballSimulationService {
     do {
       k++;
       product *= random.nextDouble();
-    } while (product > limit);
+    } while (product > limit && k < 20);
 
     return k - 1;
   }
@@ -210,8 +228,11 @@ class FootballSimulationService {
     return double.tryParse(value?.toString().replaceAll(',', '.') ?? '');
   }
 
+  double _probability(double value) =>
+      double.parse(value.clamp(0.0, 1.0).toStringAsFixed(6));
+
   double _percent(double value) =>
-      double.parse((value * 100).toStringAsFixed(2));
+      double.parse((value.clamp(0.0, 1.0) * 100).toStringAsFixed(2));
 
   double? _fairOdds(double probability) {
     if (probability <= 0) return null;
@@ -232,4 +253,3 @@ class FootballSimulationService {
     return int.tryParse(value?.toString() ?? '') ?? 0;
   }
 }
-
