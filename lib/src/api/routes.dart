@@ -275,60 +275,6 @@ class ApiRoutes {
       }
     });
 
-    router.get('/api/admin/football/scan/phase2/<scanRunId|[0-9]+>',
-      (Request request, String scanRunId) async {
-        if (!_isAdmin(request)) return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
-        final id = int.tryParse(scanRunId);
-        if (id == null) return jsonResponse({'error': 'Ungültige Scan-ID.'}, statusCode: 400);
-        final status = await database.footballScanRunStatus(id);
-        if (status == null) return jsonResponse({'error': 'Scan nicht gefunden.'}, statusCode: 404);
-        return jsonResponse(status);
-      },
-    );
-
-
-    router.get(
-      '/api/admin/football/scan/phase2/<scanRunId|[0-9]+>/results',
-      (Request request, String scanRunId) async {
-        if (!_isAdmin(request)) {
-          return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
-        }
-
-        final id = int.tryParse(scanRunId);
-        if (id == null) {
-          return jsonResponse(
-            {'error': 'Ungültige Scan-ID.'},
-            statusCode: 400,
-          );
-        }
-
-        try {
-          final status = await database.footballScanRunStatus(id);
-          if (status == null) {
-            return jsonResponse(
-              {'error': 'Scan nicht gefunden.'},
-              statusCode: 404,
-            );
-          }
-
-          final results = await database.footballPhaseTwoResults(id);
-
-          return jsonResponse({
-            'scanRunId': id,
-            'status': status['status'],
-            'checked': status['checked'] ?? 0,
-            'analysisAllowed': status['analysis_allowed'] ?? 0,
-            'belowThreshold': status['below_threshold'] ?? 0,
-            'count': results.length,
-            'results': results,
-          });
-        } catch (error) {
-          return jsonResponse({'error': error.toString()}, statusCode: 500);
-        }
-      },
-    );
-
-
 router.post('/api/admin/football/engine/prepare', (Request request) async {
   if (!_isAdmin(request)) {
     return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
@@ -360,28 +306,6 @@ router.post('/api/admin/football/engine/prepare', (Request request) async {
     return jsonResponse({'error': error.toString()}, statusCode: 500);
   }
 });
-
-router.get(
-  '/api/admin/football/engine/inputs/<scanRunId|[0-9]+>',
-  (Request request, String scanRunId) async {
-    if (!_isAdmin(request)) {
-      return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
-    }
-
-    final id = int.tryParse(scanRunId);
-    if (id == null) {
-      return jsonResponse({'error': 'Ungültige Scan-ID.'}, statusCode: 400);
-    }
-
-    final inputs = await database.footballEngineInputs(id);
-    return jsonResponse({
-      'phaseTwoScanRunId': id,
-      'count': inputs.length,
-      'inputs': inputs,
-    });
-  },
-);
-
 
     router.post('/api/admin/football/engine/simulate', (Request request) async {
       if (!_isAdmin(request)) {
@@ -433,28 +357,6 @@ router.get(
         return jsonResponse({'error': error.toString()}, statusCode: 500);
       }
     });
-
-    router.get(
-      '/api/admin/football/engine/simulations/<scanRunId|[0-9]+>',
-      (Request request, String scanRunId) async {
-        if (!_isAdmin(request)) {
-          return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
-        }
-
-        final id = int.tryParse(scanRunId);
-        if (id == null) {
-          return jsonResponse({'error': 'Ungültige Scan-ID.'}, statusCode: 400);
-        }
-
-        final results = await database.footballSimulationResults(id);
-        return jsonResponse({
-          'phaseTwoScanRunId': id,
-          'count': results.length,
-          'results': results,
-        });
-      },
-    );
-
 
     router.post(
       '/api/admin/football/engine/select-market',
@@ -509,28 +411,6 @@ router.get(
         }
       },
     );
-
-    router.get(
-      '/api/admin/football/engine/selections/<scanRunId|[0-9]+>',
-      (Request request, String scanRunId) async {
-        if (!_isAdmin(request)) {
-          return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
-        }
-
-        final id = int.tryParse(scanRunId);
-        if (id == null) {
-          return jsonResponse({'error': 'Ungültige Scan-ID.'}, statusCode: 400);
-        }
-
-        final selections = await database.footballMarketSelections(id);
-        return jsonResponse({
-          'phaseTwoScanRunId': id,
-          'count': selections.length,
-          'selections': selections,
-        });
-      },
-    );
-
 
     router.post('/api/admin/football/engine/check-value', (Request request) async {
       if (!_isAdmin(request)) {
