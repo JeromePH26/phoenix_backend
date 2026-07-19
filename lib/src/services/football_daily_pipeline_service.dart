@@ -24,7 +24,7 @@ class FootballDailyPipelineService {
     required int jobId,
     required DateTime date,
     int limit = 20,
-    int minimumDataQuality = 50,
+    int minimumDataQuality = 60,
     int simulations = 100000,
   }) async {
     try {
