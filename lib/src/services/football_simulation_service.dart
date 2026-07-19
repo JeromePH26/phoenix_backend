@@ -7,7 +7,7 @@ class FootballSimulationService {
 
   final PhoenixDatabase database;
 
-  static const modelVersion = 'poisson_monte_carlo_v2_decimal_context';
+  static const modelVersion = 'poisson_monte_carlo_v3_structured_only';
 
   Future<Map<String, Object?>> run({
     required int phaseTwoScanRunId,
@@ -192,12 +192,8 @@ class FootballSimulationService {
       'warnings': [
         if (input['realXgAvailable'] != true)
           'Simulation basiert noch auf Torquoten, nicht auf echtem xG/xGA.',
-        if (aiContext['applied'] == true)
-          'Verifizierter Gemini-Kontext ist in den Torerwartungen enthalten.',
-        if (aiContext['applied'] != true)
-          'Kein verifizierter Gemini-Kontext in dieser Simulation.',
-        if (aiContext['fallbackUsed'] == true)
-          'Kontext-Fallback aus einem vorherigen verifizierten Lauf verwendet.',
+        'Externe KI-Kontextprüfung ist deaktiviert; verwendet werden nur '
+            'strukturierte API- und Datenbankdaten.',
       ],
     };
   }
