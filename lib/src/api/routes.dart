@@ -101,7 +101,7 @@ class ApiRoutes {
       final quality = int.tryParse(
             request.url.queryParameters['minimumQuality'] ?? '',
           ) ??
-          50;
+          60;
       final date = DateTime.now();
 
       try {
@@ -257,7 +257,7 @@ class ApiRoutes {
       if (!_isAdmin(request)) return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
       final phaseOneScanRunId = int.tryParse(request.url.queryParameters['scanRunId'] ?? '');
       final limit = int.tryParse(request.url.queryParameters['limit'] ?? '') ?? 1;
-      final minimumDataQuality = int.tryParse(request.url.queryParameters['minimumDataQuality'] ?? '') ?? 50;
+      final minimumDataQuality = int.tryParse(request.url.queryParameters['minimumDataQuality'] ?? '') ?? 60;
       if (limit < 1 || limit > 20) return jsonResponse({'error': 'limit muss zwischen 1 und 20 liegen.'}, statusCode: 400);
       try {
         final scanner = FootballPhaseTwoScanService(database: database, football: football);
@@ -329,7 +329,7 @@ router.post('/api/admin/football/engine/prepare', (Request request) async {
       final simulations = int.tryParse(
             request.url.queryParameters['simulations'] ?? '',
           ) ??
-          10000;
+          100000;
 
       if (phaseTwoScanRunId == null) {
         return jsonResponse(
@@ -613,11 +613,11 @@ router.post('/api/admin/football/engine/prepare', (Request request) async {
       final minimumDataQuality = int.tryParse(
             request.url.queryParameters['minimumDataQuality'] ?? '',
           ) ??
-          50;
+          60;
       final simulations = int.tryParse(
             request.url.queryParameters['simulations'] ?? '',
           ) ??
-          10000;
+          100000;
 
       if (date == null) {
         return jsonResponse(
@@ -716,11 +716,29 @@ router.post('/api/admin/football/engine/prepare', (Request request) async {
 
   Future<List<Map<String, Object?>>> _preparedFootballAnalyses({
     required DateTime date,
-    int minimumDataQuality = 50,
+    int minimumDataQuality = 60,
   }) async {
     final db = await database.connection();
     final safeQuality = minimumDataQuality.clamp(0, 100);
     final day = _day(date);
+
+    // Vor der Ausgabe werden Status, Endstand und Logos einmal beim
+    // Datenanbieter aktualisiert. Dadurch bleiben beendete Spiele nicht
+    // fälschlich als LIVE 0:0 in der App stehen.
+    try {
+      final freshMatches = await football.matchesForDate(date);
+      for (final match in freshMatches) {
+        final fixtureId = match['id']?.toString() ?? '';
+        if (fixtureId.isEmpty) continue;
+        await database.upsertFootballMatchFromPayload(
+          fixtureId: fixtureId,
+          payload: match,
+        );
+      }
+    } catch (_) {
+      // Bei einem temporären Providerfehler bleiben die zuletzt gespeicherten
+      // Daten verfügbar; die Analyse-API fällt nicht komplett aus.
+    }
 
     final result = await db.execute(
       Sql.named(r'''
