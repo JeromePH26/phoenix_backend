@@ -29,10 +29,16 @@ class FootballService {
 
   Future<List<Map<String, Object?>>> matchesForDate(DateTime date) async {
     final day = _day(date);
-    final decoded = await _get('/fixtures', {
-      'date': day,
-      'timezone': 'Europe/Berlin',
-    });
+    // Der vollständige Spielplan wird serverseitig kurz gecacht. Dadurch
+    // lösen mehrere App-Starts oder Aktualisierungen nicht jedes Mal einen
+    // neuen API-Football-Request aus.
+    final decoded = await providerRequest(
+      path: '/fixtures',
+      query: <String, String>{
+        'date': day,
+        'timezone': 'Europe/Berlin',
+      },
+    );
     final rows = decoded['response'];
     if (rows is! List) return const [];
     return rows.whereType<Map>().map((raw) {
@@ -519,7 +525,20 @@ class FootballService {
       throw StateError('Ungültige Football-Antwort.');
     }
 
-    return Map<String, dynamic>.from(decoded);
+    final payload = Map<String, dynamic>.from(decoded);
+    final errors = payload['errors'];
+    if (errors is Map && errors.isNotEmpty) {
+      throw StateError(
+        'Football API: ${errors.values.map((value) => value.toString()).join(', ')}',
+      );
+    }
+    if (errors is List && errors.isNotEmpty) {
+      throw StateError(
+        'Football API: ${errors.map((value) => value.toString()).join(', ')}',
+      );
+    }
+
+    return payload;
   }
 
   List<dynamic> _responseRows(Map<String, dynamic> decoded) {
