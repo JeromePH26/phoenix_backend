@@ -6,7 +6,6 @@ import 'football_phase_two_scan_service.dart';
 import 'football_service.dart';
 import 'football_simulation_service.dart';
 import 'football_value_service.dart';
-import 'gemini_context_service.dart';
 
 class FootballDailyPipelineService {
   FootballDailyPipelineService({
@@ -18,7 +17,7 @@ class FootballDailyPipelineService {
   final FootballService football;
 
   static const publishedModelVersion =
-      'phoenix_daily_pipeline_v6_top_quality20_context100k';
+      'phoenix_daily_pipeline_v7_structured_only_100k';
 
   Future<void> run({
     required int jobId,
@@ -52,8 +51,8 @@ class FootballDailyPipelineService {
       );
 
       // Phase 2 prüft bis zu 100 heutige Kandidaten auf ihre echte
-      // Datenqualität. Erst danach verarbeiten Gemini, Engine und Simulation
-      // ausschließlich die besten `safeLimit` Spiele.
+      // Datenqualität. Danach verarbeiten Engine und Simulation ausschließlich
+      // die besten `safeLimit` Spiele. Externe KI ist vollständig deaktiviert.
       final prepared = await phaseTwoService.prepare(
         phaseOneScanRunId: phaseOneId,
         limit: 100,
@@ -93,20 +92,9 @@ class FootballDailyPipelineService {
         return;
       }
 
-      // Gemini läuft bewusst VOR dem Engine-Input. Dadurch fließen
-      // verifizierte Kontext-Deltas in die Torerwartungen und Simulation ein.
-      await _step(jobId, 'gemini_context');
-
-      try {
-        await GeminiContextService(database: database).verifyPhaseTwoMatches(
-          phaseTwoScanRunId: phaseTwoId,
-          limit: safeLimit,
-        );
-      } catch (_) {
-        // Die Pipeline bleibt lauffähig. Der Gemini-Service speichert
-        // Kandidatenfehler selbst und versucht einen verifizierten 12h-Fallback.
-      }
-
+      // WICHTIG: Gemini/OpenAI und alte KI-Fallbacks werden in diesem
+      // Tageslauf nicht aufgerufen. Die Engine arbeitet ausschließlich mit
+      // strukturierten API- und Datenbankdaten.
       await _step(jobId, 'engine_input');
       final engineResult =
           await FootballEngineInputService(database: database).prepare(
@@ -211,14 +199,10 @@ class FootballDailyPipelineService {
       final rawFairOdds = _map(simulation['fairOdds']);
       final phoenixTip = _map(selection['phoenixTip']);
       final trust = _map(selection['trust']);
-      final aiContext = _map(simulation['aiContext']);
 
       final baseConfidence = _integer(trust['score']).clamp(0, 100);
-      final contextConfidenceDelta = aiContext['applied'] == true
-          ? _integer(aiContext['confidenceDelta']).clamp(-10, 5)
-          : 0;
-      final confidence =
-          (baseConfidence + contextConfidenceDelta).clamp(0, 100);
+      const contextConfidenceDelta = 0;
+      final confidence = baseConfidence;
 
       final recommendation = _string(phoenixTip['market']);
 
@@ -269,11 +253,15 @@ class FootballDailyPipelineService {
         'selection': selection,
         'simulation': simulation,
         'simulationCount': simulation['simulations'],
-        'aiContext': aiContext,
-        'contextApplied': aiContext['applied'] == true,
-        'contextSource': aiContext['contextSource'],
-        'contextSourceScanRunId': aiContext['contextSourceScanRunId'],
-        'fallbackUsed': aiContext['fallbackUsed'] == true,
+        'aiContext': const <String, Object?>{
+          'provider': 'disabled',
+          'applied': false,
+          'summary': 'Externe KI-Kontextprüfung ist deaktiviert.',
+        },
+        'contextApplied': false,
+        'contextSource': 'disabled',
+        'contextSourceScanRunId': null,
+        'fallbackUsed': false,
         'publishedAt': DateTime.now().toUtc().toIso8601String(),
       };
 
