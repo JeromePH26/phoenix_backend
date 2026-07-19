@@ -15,7 +15,6 @@ import '../services/football_market_selection_service.dart';
 import '../services/football_value_service.dart';
 import '../services/football_finalization_service.dart';
 import '../services/football_daily_pipeline_service.dart';
-import '../services/gemini_context_service.dart';
 import '../services/football_service.dart';
 import '../services/tennis_service.dart';
 
@@ -535,6 +534,31 @@ router.post('/api/admin/football/engine/prepare', (Request request) async {
       },
     );
 
+    // Zentraler, streng begrenzter Sportradar-Proxy. Der API-Key bleibt
+    // ausschließlich auf Railway; die App übermittelt nur einen freigegebenen
+    // Tennis-Pfad. Dadurch gibt es keinen Sportradar-Key mehr in der APK.
+    router.get('/api/tennis/provider', (Request request) async {
+      final path = request.url.queryParameters['path'];
+      if (path == null || path.trim().isEmpty) {
+        return jsonResponse(
+          {'error': 'Query-Parameter path fehlt.'},
+          statusCode: 400,
+        );
+      }
+
+      try {
+        final payload = await tennis.providerRequest(path: path);
+        return jsonResponse(payload);
+      } on ArgumentError catch (error) {
+        return jsonResponse(
+          {'error': error.message?.toString() ?? error.toString()},
+          statusCode: 400,
+        );
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 502);
+      }
+    });
+
     router.get('/api/tennis/matches/today', (Request request) async {
       try {
         final matches = await tennis.matchesForDate(DateTime.now());
@@ -783,12 +807,14 @@ router.post('/api/admin/football/engine/prepare', (Request request) async {
         INNER JOIN football_matches m
           ON m.id = a.match_id
         WHERE a.data_quality >= @minimum_quality
+          AND a.model_version = @model_version
           AND a.payload IS NOT NULL
         ORDER BY a.match_id, a.analyzed_at DESC
       '''),
       parameters: {
         'day': day,
         'minimum_quality': safeQuality,
+        'model_version': FootballDailyPipelineService.publishedModelVersion,
       },
     );
 
