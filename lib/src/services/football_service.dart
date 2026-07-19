@@ -49,7 +49,7 @@ class FootballService {
         'kickoff': fixture['date']?.toString() ?? '',
         'status': status['short']?.toString() ?? 'NS',
         'leagueId': league['id']?.toString() ?? '',
-        'season': league['season'],
+        'season': _seasonForMatch(league, date),
         'league': league['name']?.toString() ?? '',
         'country': league['country']?.toString() ?? '',
         'leagueLogo': league['logo']?.toString() ?? '',
@@ -585,6 +585,20 @@ class FootballService {
               .trim() ??
           '',
     );
+  }
+
+
+  int _seasonForMatch(Map<String, dynamic> league, DateTime fixtureDate) {
+    final rawSeason = league['season'];
+    if (rawSeason is int && rawSeason > 0) return rawSeason;
+    if (rawSeason is num && rawSeason.toInt() > 0) return rawSeason.toInt();
+
+    final parsed = int.tryParse(rawSeason?.toString() ?? '');
+    if (parsed != null && parsed > 0) return parsed;
+
+    // Sichere Reserve, falls der Anbieter bei einzelnen Spielen keine Saison
+    // mitsendet. Dadurch wird niemals wieder season = 0 gespeichert.
+    return fixtureDate.year;
   }
 
   Map<String, dynamic> _map(Object? value) =>
