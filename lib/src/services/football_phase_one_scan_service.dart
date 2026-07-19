@@ -1,599 +1,443 @@
-import 'dart:convert';
+import '../database/database.dart';
+import 'football_service.dart';
 
-import 'package:http/http.dart' as http;
-
-class _FootballCacheEntry {
-  const _FootballCacheEntry({
-    required this.payload,
-    required this.expiresAt,
+class FootballPhaseOneScanService {
+  FootballPhaseOneScanService({
+    required this.database,
+    required this.football,
   });
 
-  final Map<String, dynamic> payload;
-  final DateTime expiresAt;
-}
+  final PhoenixDatabase database;
+  final FootballService football;
 
-class FootballService {
-  FootballService({required this.apiKey, http.Client? client})
-      : _client = client ?? http.Client();
-
-  static const _baseUrl = 'https://v3.football.api-sports.io';
-  final String apiKey;
-  final http.Client _client;
-
-  final Map<String, _FootballCacheEntry> _providerCache =
-      <String, _FootballCacheEntry>{};
-  final Map<String, Future<Map<String, dynamic>>> _providerFlights =
-      <String, Future<Map<String, dynamic>>>{};
-
-  bool get isConfigured => apiKey.trim().isNotEmpty;
-
-  Future<List<Map<String, Object?>>> matchesForDate(DateTime date) async {
-    final day = _day(date);
-    final decoded = await _get('/fixtures', {
-      'date': day,
-      'timezone': 'Europe/Berlin',
-    });
-    final rows = decoded['response'];
-    if (rows is! List) return const [];
-    return rows.whereType<Map>().map((raw) {
-      final row = Map<String, dynamic>.from(raw);
-      final fixture = _map(row['fixture']);
-      final league = _map(row['league']);
-      final teams = _map(row['teams']);
-      final goals = _map(row['goals']);
-      final home = _map(teams['home']);
-      final away = _map(teams['away']);
-      final status = _map(fixture['status']);
-      return <String, Object?>{
-        'id': fixture['id']?.toString() ?? '',
-        'kickoff': fixture['date']?.toString() ?? '',
-        'status': status['short']?.toString() ?? 'NS',
-        'leagueId': league['id']?.toString() ?? '',
-        'season': league['season'],
-        'league': league['name']?.toString() ?? '',
-        'country': league['country']?.toString() ?? '',
-        'leagueLogo': league['logo']?.toString() ?? '',
-        'homeTeamId': home['id']?.toString() ?? '',
-        'homeTeam': home['name']?.toString() ?? '',
-        'homeLogo': home['logo']?.toString() ?? '',
-        'awayTeamId': away['id']?.toString() ?? '',
-        'awayTeam': away['name']?.toString() ?? '',
-        'awayLogo': away['logo']?.toString() ?? '',
-        'homeGoals': goals['home'],
-        'awayGoals': goals['away'],
-      };
-    }).where((row) => (row['id'] as String).isNotEmpty).toList();
-  }
-
-
-  Future<Map<String, Object?>> coverageForFixture({
-    required String fixtureId,
-    required String leagueId,
-    required int season,
-    required String homeTeamId,
-    required String awayTeamId,
-    Duration pauseBetweenCalls = const Duration(seconds: 4),
+  Future<Map<String, Object?>> run(
+    DateTime date, {
+    bool includeDetails = false,
   }) async {
-    final result = <String, Object?>{};
+    final scanRunId = await database.createFootballScanRun(date);
 
-    Future<void> pause() async {
-      if (pauseBetweenCalls > Duration.zero) {
-        await Future<void>.delayed(pauseBetweenCalls);
-      }
-    }
+    try {
+      final matches = await football.matchesForDate(date);
+      final eligible = <Map<String, Object?>>[];
+      final excluded = <Map<String, Object?>>[];
+      final reasons = <String, int>{};
 
-    Future<void> checkList(
-      String key,
-      String path,
-      Map<String, String> query,
-    ) async {
-      try {
-        final decoded = await _get(path, query);
-        final rows = _responseRows(decoded);
-        result[key] = rows.isNotEmpty;
-        result['${key}Count'] = rows.length;
-      } catch (error) {
-        result[key] = false;
-        result['${key}Error'] = error.toString();
-      }
+      for (final match in matches) {
+        final decision = await _decide(match);
 
-      await pause();
-    }
-
-    Future<void> checkTeamStatistics(
-      String prefix,
-      String teamId,
-    ) async {
-      try {
-        final decoded = await _get(
-          '/teams/statistics',
-          {
-            'league': leagueId,
-            'season': season.toString(),
-            'team': teamId,
+        await database.savePhaseOneDecision(
+          scanRunId: scanRunId,
+          fixtureId: _string(match['id']),
+          leagueId: _string(match['leagueId']),
+          season: _int(match['season']),
+          eligible: decision.eligible,
+          decisionStatus: decision.status,
+          exclusionReason: decision.reason,
+          payload: {
+            ...match,
+            'phaseOne': decision.toJson(),
           },
         );
 
-        final raw = decoded['response'];
-        final statistics = raw is Map
-            ? Map<String, dynamic>.from(raw)
-            : <String, dynamic>{};
+        final enriched = <String, Object?>{
+          ...match,
+          'phaseOne': decision.toJson(),
+        };
 
-        final hasStatistics = statistics.isNotEmpty;
-        result['${prefix}TeamStatistics'] = hasStatistics;
-
-        if (hasStatistics) {
-          final goals = _map(statistics['goals']);
-          final goalsFor = _map(goals['for']);
-          final goalsAgainst = _map(goals['against']);
-          final goalsForAverage = _map(goalsFor['average']);
-          final goalsAgainstAverage = _map(goalsAgainst['average']);
-          final fixtures = _map(statistics['fixtures']);
-
-          result['${prefix}Played'] = fixtures['played'];
-          result['${prefix}GoalsForAverageTotal'] =
-              goalsForAverage['total'];
-          result['${prefix}GoalsForAverageHome'] =
-              goalsForAverage['home'];
-          result['${prefix}GoalsForAverageAway'] =
-              goalsForAverage['away'];
-          result['${prefix}GoalsAgainstAverageTotal'] =
-              goalsAgainstAverage['total'];
-          result['${prefix}GoalsAgainstAverageHome'] =
-              goalsAgainstAverage['home'];
-          result['${prefix}GoalsAgainstAverageAway'] =
-              goalsAgainstAverage['away'];
-          result['${prefix}Form'] = statistics['form'];
+        if (decision.eligible) {
+          eligible.add(enriched);
+        } else {
+          excluded.add(enriched);
+          final reason = decision.reason ?? 'unknown';
+          reasons[reason] = (reasons[reason] ?? 0) + 1;
         }
-      } catch (error) {
-        result['${prefix}TeamStatistics'] = false;
-        result['${prefix}TeamStatisticsError'] = error.toString();
       }
 
-      await pause();
-    }
+      final result = <String, Object?>{
+        'scanRunId': scanRunId,
+        'phase': 1,
+        'date': _day(date),
+        'total': matches.length,
+        'eligibleCount': eligible.length,
+        'excludedCount': excluded.length,
+        'exclusionReasons': reasons,
+        if (includeDetails) 'eligibleMatches': eligible,
+        if (includeDetails) 'excludedMatches': excluded,
+      };
 
-    await checkList(
-      'standings',
-      '/standings',
-      {
-        'league': leagueId,
-        'season': season.toString(),
-      },
-    );
-
-    await checkList(
-      'homeRecent',
-      '/fixtures',
-      {
-        'team': homeTeamId,
-        'season': season.toString(),
-        'last': '5',
-      },
-    );
-
-    await checkList(
-      'awayRecent',
-      '/fixtures',
-      {
-        'team': awayTeamId,
-        'season': season.toString(),
-        'last': '5',
-      },
-    );
-
-    await checkList(
-      'odds',
-      '/odds',
-      {'fixture': fixtureId},
-    );
-
-    await checkList(
-      'injuries',
-      '/injuries',
-      {'fixture': fixtureId},
-    );
-
-    await checkList(
-      'h2h',
-      '/fixtures/headtohead',
-      {
-        'h2h': '$homeTeamId-$awayTeamId',
-        'last': '5',
-      },
-    );
-
-    await checkTeamStatistics('home', homeTeamId);
-    await checkTeamStatistics('away', awayTeamId);
-
-    result['realXgAvailable'] = false;
-    result['xgSource'] = 'not_available_from_api_football';
-
-    return result;
-  }
-
-  Future<List<Map<String, Object?>>> oddsForFixture(
-    String fixtureId,
-  ) async {
-    final decoded = await _get(
-      '/odds',
-      {'fixture': fixtureId},
-    );
-
-    return _responseRows(decoded)
-        .whereType<Map>()
-        .map((row) => Map<String, Object?>.from(row))
-        .toList();
-  }
-
-
-  /// Zentraler, begrenzter API-Football-Zugriff für die PHÖNIX-App.
-  ///
-  /// Der geheime API-Key bleibt ausschließlich auf Railway. Die App sendet
-  /// nur den benötigten Anbieterpfad und dessen Query-Parameter.
-  Future<Map<String, dynamic>> providerRequest({
-    required String path,
-    required Map<String, String> query,
-  }) {
-    final normalizedPath = _normalizeProviderPath(path);
-    _assertAllowedProviderPath(normalizedPath);
-
-    final sortedEntries = query.entries.toList()
-      ..sort((a, b) => a.key.compareTo(b.key));
-    final cacheKey = '$normalizedPath?'
-        '${sortedEntries.map((entry) => '${entry.key}=${entry.value}').join('&')}';
-
-    final cached = _providerCache[cacheKey];
-    final now = DateTime.now();
-    if (cached != null && now.isBefore(cached.expiresAt)) {
-      return Future<Map<String, dynamic>>.value(cached.payload);
-    }
-
-    final running = _providerFlights[cacheKey];
-    if (running != null) return running;
-
-    late final Future<Map<String, dynamic>> tracked;
-    tracked = _get(normalizedPath, query).then((payload) {
-      _providerCache[cacheKey] = _FootballCacheEntry(
-        payload: payload,
-        expiresAt: DateTime.now().add(
-          _providerCacheDuration(normalizedPath, query),
-        ),
+      await database.completeFootballScanRun(
+        scanRunId: scanRunId,
+        totalMatches: matches.length,
+        eligibleMatches: eligible.length,
+        excludedMatches: excluded.length,
+        payload: {'exclusionReasons': reasons},
       );
 
-      if (_providerCache.length > 500) {
-        _providerCache.removeWhere(
-          (_, value) => DateTime.now().isAfter(value.expiresAt),
+      return result;
+    } catch (error) {
+      await database.failFootballScanRun(scanRunId, error);
+      rethrow;
+    }
+  }
+
+  Future<_PhaseOneDecision> _decide(Map<String, Object?> match) async {
+    final fixtureId = _string(match['id']);
+    final homeTeamId = _string(match['homeTeamId']);
+    final awayTeamId = _string(match['awayTeamId']);
+    final homeTeam = _string(match['homeTeam']).isNotEmpty
+        ? _string(match['homeTeam'])
+        : _string(match['homeTeamName']);
+    final awayTeam = _string(match['awayTeam']).isNotEmpty
+        ? _string(match['awayTeam'])
+        : _string(match['awayTeamName']);
+
+    final leagueId = _string(match['leagueId']);
+    final leagueName = _string(match['league']);
+    final country = _string(match['country']);
+    final round = _string(match['round']);
+    final season = _int(match['season']);
+    final status = _string(match['status']).toUpperCase();
+    final kickoff = DateTime.tryParse(_string(match['kickoff']))?.toUtc();
+
+    // Absolutes Minimum:
+    // Nur eine fehlende Spiel-ID oder komplett fehlende Teams schließen aus.
+    // Liga, Saison, Tabelle, Form, xG und Quoten werden erst in späteren
+    // Phasen bewertet und dürfen Phase 1 nicht mehr blockieren.
+    final hasHomeTeam = homeTeamId.isNotEmpty || homeTeam.isNotEmpty;
+    final hasAwayTeam = awayTeamId.isNotEmpty || awayTeam.isNotEmpty;
+
+    if (fixtureId.isEmpty || !hasHomeTeam || !hasAwayTeam) {
+      return const _PhaseOneDecision(
+        eligible: false,
+        status: 'excluded',
+        reason: 'missing_absolute_minimum',
+      );
+    }
+
+    if (_isCancelledOrUnscheduled(status)) {
+      return const _PhaseOneDecision(
+        eligible: false,
+        status: 'excluded',
+        reason: 'invalid_fixture_status',
+      );
+    }
+
+    // PHÖNIX ist ein reines Pre-Match-System.
+    // Nur eindeutig noch nicht gestartete Spiele dürfen weiter analysiert
+    // werden. Laufende, pausierte und bereits beendete Partien werden hier
+    // ausgeschlossen, bevor sie API-, Gemini- oder Simulationskosten erzeugen.
+    if (status != 'NS') {
+      return const _PhaseOneDecision(
+        eligible: false,
+        status: 'excluded',
+        reason: 'not_pre_match',
+      );
+    }
+
+    // Ein NS-Status allein reicht nicht aus: Der Anstoß muss parsebar sein
+    // und tatsächlich noch in der Zukunft liegen. Dadurch werden verspätete
+    // Provider-Updates und alte NS-Datensätze zuverlässig abgefangen.
+    if (kickoff == null) {
+      return const _PhaseOneDecision(
+        eligible: false,
+        status: 'excluded',
+        reason: 'missing_or_invalid_kickoff',
+      );
+    }
+
+    if (!kickoff.isAfter(DateTime.now().toUtc())) {
+      return const _PhaseOneDecision(
+        eligible: false,
+        status: 'excluded',
+        reason: 'kickoff_not_in_future',
+      );
+    }
+
+    if (_isFriendly(leagueName, round)) {
+      return const _PhaseOneDecision(
+        eligible: false,
+        status: 'excluded',
+        reason: 'friendly',
+      );
+    }
+
+    if (_isYouthCompetition(leagueName, round)) {
+      return const _PhaseOneDecision(
+        eligible: false,
+        status: 'excluded',
+        reason: 'youth_competition',
+      );
+    }
+
+    // Fehlen nur Liga-Metadaten, darf das Spiel trotzdem in Phase 2.
+    // Dort entscheidet die tatsächliche Datenqualität über die Nutzung.
+    if (leagueId.isEmpty || leagueName.isEmpty || season <= 0) {
+      return const _PhaseOneDecision(
+        eligible: true,
+        status: 'minimum_data',
+        reason: null,
+      );
+    }
+
+    final gender = _detectGender(leagueName);
+    final level = _detectCompetitionLevel(leagueName);
+
+    if (gender == 'women' &&
+        level != 1 &&
+        !_isWomenInternationalCup(leagueName)) {
+      return const _PhaseOneDecision(
+        eligible: false,
+        status: 'excluded',
+        reason: 'women_below_first_tier',
+      );
+    }
+
+    final knownTopCompetition = _isKnownTopCompetition(leagueName);
+    final profile = await database.leagueProfile(leagueId, season);
+
+    if (profile == null) {
+      await database.upsertLeagueSeen(
+        leagueId: leagueId,
+        leagueName: leagueName,
+        country: country,
+        season: season,
+        gender: gender,
+        competitionLevel: level,
+        initialHistoricalStatus:
+            knownTopCompetition ? 'provisional' : 'observation',
+        initialSeasonStatus:
+            knownTopCompetition ? 'provisional' : 'observation',
+      );
+
+      if (knownTopCompetition) {
+        return const _PhaseOneDecision(
+          eligible: true,
+          status: 'provisional',
+          reason: null,
         );
       }
-      return payload;
-    }).whenComplete(() {
-      if (identical(_providerFlights[cacheKey], tracked)) {
-        _providerFlights.remove(cacheKey);
-      }
-    });
 
-    _providerFlights[cacheKey] = tracked;
-    return tracked;
-  }
-
-  String _normalizeProviderPath(String raw) {
-    final value = raw.trim();
-    if (value.isEmpty) {
-      throw ArgumentError('Provider-Pfad fehlt.');
-    }
-    return value.startsWith('/') ? value : '/$value';
-  }
-
-  void _assertAllowedProviderPath(String path) {
-    const allowed = <String>{
-      '/fixtures',
-      '/fixtures/events',
-      '/fixtures/statistics',
-      '/fixtures/lineups',
-      '/standings',
-      '/odds',
-      '/injuries',
-      '/players',
-      '/players/squads',
-      '/teams',
-      '/teams/statistics',
-      '/leagues',
-      '/coachs',
-      '/transfers',
-      '/trophies',
-      '/sidelined',
-    };
-
-    if (!allowed.contains(path)) {
-      throw ArgumentError('Provider-Pfad ist nicht freigegeben: $path');
-    }
-  }
-
-  Duration _providerCacheDuration(
-    String path,
-    Map<String, String> query,
-  ) {
-    final liveStatus = query['live']?.isNotEmpty == true ||
-        query['status']?.contains('1H') == true ||
-        query['status']?.contains('2H') == true;
-
-    if (liveStatus ||
-        path == '/fixtures/events' ||
-        path == '/fixtures/statistics') {
-      return const Duration(seconds: 15);
+      return const _PhaseOneDecision(
+        eligible: false,
+        status: 'observation',
+        reason: 'unknown_league',
+      );
     }
 
-    if (path == '/fixtures/lineups') {
-      return const Duration(seconds: 45);
-    }
-
-    if (path == '/odds') {
-      return const Duration(minutes: 2);
-    }
-
-    if (path == '/standings' ||
-        path == '/teams/statistics' ||
-        path == '/players' ||
-        path == '/players/squads') {
-      return const Duration(minutes: 10);
-    }
-
-    if (path == '/fixtures' && query.containsKey('date')) {
-      return const Duration(minutes: 1);
-    }
-
-    return const Duration(minutes: 5);
-  }
-
-
-  Future<Map<String, Object?>> liveSnapshot(String fixtureId) async {
-    final normalized = fixtureId.trim();
-    if (normalized.isEmpty) {
-      throw ArgumentError('fixtureId fehlt.');
-    }
-
-    final responses = await Future.wait([
-      _get('/fixtures', {'id': normalized}),
-      _get('/fixtures/events', {'fixture': normalized}),
-      _get('/fixtures/statistics', {'fixture': normalized}),
-    ]);
-
-    final fixtureRows = _responseRows(responses[0]);
-    if (fixtureRows.isEmpty) {
-      throw StateError('Spiel wurde beim Datenanbieter nicht gefunden.');
-    }
-
-    final rawFixture = _map(fixtureRows.first);
-    final fixture = _map(rawFixture['fixture']);
-    final status = _map(fixture['status']);
-    final league = _map(rawFixture['league']);
-    final teams = _map(rawFixture['teams']);
-    final home = _map(teams['home']);
-    final away = _map(teams['away']);
-    final goals = _map(rawFixture['goals']);
-
-    final events = <Map<String, Object?>>[];
-    for (final rawValue in _responseRows(responses[1])) {
-      final raw = _map(rawValue);
-      final time = _map(raw['time']);
-      final team = _map(raw['team']);
-      final player = _map(raw['player']);
-      final assist = _map(raw['assist']);
-      final type = raw['type']?.toString() ?? '';
-      final detail = raw['detail']?.toString() ?? '';
-      final comments = raw['comments']?.toString() ?? '';
-      final minute = _integer(time['elapsed']) ?? 0;
-      final extra = _integer(time['extra']) ?? 0;
-      final teamId = team['id']?.toString() ?? '';
-      final playerName = player['name']?.toString() ?? '';
-      final assistName = assist['name']?.toString() ?? '';
-
-      final eventType = _liveEventType(type, detail);
-      events.add({
-        'id': [
-          minute,
-          extra,
-          teamId,
-          type,
-          detail,
-          playerName,
-        ].join('|'),
-        'minute': minute,
-        'extraMinute': extra,
-        'type': eventType,
-        'side': teamId == home['id']?.toString()
-            ? 'home'
-            : teamId == away['id']?.toString()
-                ? 'away'
-                : 'neutral',
-        'title': _liveEventTitle(eventType, detail),
-        'detail': comments.isNotEmpty
-            ? comments
-            : _liveEventDetail(
-                eventType: eventType,
-                detail: detail,
-                player: playerName,
-                assist: assistName,
-              ),
-        'player': playerName,
-        'assist': assistName,
-        'derived': false,
-      });
-    }
-
-    events.sort((a, b) {
-      final minute = (b['minute'] as int).compareTo(a['minute'] as int);
-      if (minute != 0) return minute;
-      return (b['extraMinute'] as int)
-          .compareTo(a['extraMinute'] as int);
-    });
-
-    final statRows = _responseRows(responses[2]).map(_map).toList();
-
-    Map<String, Object?> parseStats(String teamId) {
-      Map<String, dynamic>? selected;
-      for (final row in statRows) {
-        final team = _map(row['team']);
-        if (team['id']?.toString() == teamId) {
-          selected = row;
-          break;
-        }
-      }
-
-      if (selected == null) return const <String, Object?>{};
-
-      final values = <String, Object?>{};
-      final statistics = selected['statistics'];
-      if (statistics is List) {
-        for (final rawValue in statistics) {
-          final raw = _map(rawValue);
-          final key = raw['type']
-                  ?.toString()
-                  .toLowerCase()
-                  .replaceAll(RegExp(r'[^a-z0-9]+'), ' ')
-                  .trim() ??
-              '';
-          values[key] = raw['value'];
-        }
-      }
-
-      return {
-        'possession': _decimal(values['ball possession']),
-        'totalShots': _integer(values['total shots']),
-        'shotsOnGoal': _integer(values['shots on goal']),
-        'corners': _integer(values['corner kicks']),
-        'yellowCards': _integer(values['yellow cards']),
-        'redCards': _integer(values['red cards']),
-        'dangerousAttacks': _integer(values['dangerous attacks']),
-      };
-    }
-
-    return {
-      'fixtureId': normalized,
-      'league': league['name']?.toString() ?? '',
-      'statusShort': status['short']?.toString() ?? '',
-      'statusLong': status['long']?.toString() ?? '',
-      'elapsed': _integer(status['elapsed']) ?? 0,
-      'extra': _integer(status['extra']) ?? 0,
-      'homeGoals': _integer(goals['home']) ?? 0,
-      'awayGoals': _integer(goals['away']) ?? 0,
-      'homeTeam': {
-        'id': home['id']?.toString() ?? '',
-        'name': home['name']?.toString() ?? '',
-        'logo': home['logo']?.toString() ?? '',
-      },
-      'awayTeam': {
-        'id': away['id']?.toString() ?? '',
-        'name': away['name']?.toString() ?? '',
-        'logo': away['logo']?.toString() ?? '',
-      },
-      'homeStats': parseStats(home['id']?.toString() ?? ''),
-      'awayStats': parseStats(away['id']?.toString() ?? ''),
-      'events': events,
-      'updatedAt': DateTime.now().toUtc().toIso8601String(),
-      'cacheSeconds': 15,
-    };
-  }
-
-  Future<Map<String, dynamic>> _get(
-    String path,
-    Map<String, String> query,
-  ) async {
-    if (!isConfigured) throw StateError('API_FOOTBALL_KEY fehlt.');
-
-    final uri = Uri.parse('$_baseUrl$path').replace(
-      queryParameters: query,
+    await database.upsertLeagueSeen(
+      leagueId: leagueId,
+      leagueName: leagueName,
+      country: country,
+      season: season,
+      gender: gender,
+      competitionLevel: level,
+      initialHistoricalStatus:
+          _string(profile['historical_status']).isEmpty
+              ? 'observation'
+              : _string(profile['historical_status']),
+      initialSeasonStatus:
+          _string(profile['season_status']).isEmpty
+              ? 'observation'
+              : _string(profile['season_status']),
     );
-    final response = await _client.get(uri, headers: {
-      'x-apisports-key': apiKey,
-      'accept': 'application/json',
-    });
 
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw StateError('Football API HTTP ${response.statusCode}');
+    final manualStatus = _string(profile['manual_status']);
+    if (manualStatus == 'blacklist') {
+      return const _PhaseOneDecision(
+        eligible: false,
+        status: 'blacklist',
+        reason: 'manual_blacklist',
+      );
     }
 
-    final decoded = jsonDecode(response.body);
-    if (decoded is! Map) {
-      throw StateError('Ungültige Football-Antwort.');
+    if (manualStatus == 'whitelist') {
+      return const _PhaseOneDecision(
+        eligible: true,
+        status: 'approved',
+        reason: null,
+      );
     }
 
-    return Map<String, dynamic>.from(decoded);
-  }
-
-  List<dynamic> _responseRows(Map<String, dynamic> decoded) {
-    final response = decoded['response'];
-    return response is List ? response : const <dynamic>[];
-  }
-
-  String _liveEventType(String type, String detail) {
-    final normalized = '$type $detail'.toLowerCase();
-    if (normalized.contains('goal')) return 'goal';
-    if (normalized.contains('yellow')) return 'yellowCard';
-    if (normalized.contains('red')) return 'redCard';
-    if (normalized.contains('subst')) return 'substitution';
-    if (normalized.contains('var')) return 'varReview';
-    return 'other';
-  }
-
-  String _liveEventTitle(String eventType, String detail) {
-    return switch (eventType) {
-      'goal' => 'TOR',
-      'yellowCard' => 'Gelbe Karte',
-      'redCard' => 'Rote Karte',
-      'substitution' => 'Wechsel',
-      'varReview' => 'VAR',
-      _ => detail.trim().isEmpty ? 'Spielereignis' : detail,
-    };
-  }
-
-  String _liveEventDetail({
-    required String eventType,
-    required String detail,
-    required String player,
-    required String assist,
-  }) {
-    if (eventType == 'goal') {
-      if (player.isEmpty) return detail;
-      if (assist.isEmpty) return player;
-      return '$player · Assist: $assist';
+    final seasonStatus = _string(profile['season_status']);
+    if (seasonStatus == 'approved' || seasonStatus == 'provisional') {
+      return _PhaseOneDecision(
+        eligible: true,
+        status: seasonStatus,
+        reason: null,
+      );
     }
-    if (player.isNotEmpty) return player;
-    return detail;
+
+    if (seasonStatus == 'restricted') {
+      return const _PhaseOneDecision(
+        eligible: false,
+        status: 'restricted',
+        reason: 'restricted_coverage',
+      );
+    }
+
+    if (seasonStatus == 'blacklist') {
+      return const _PhaseOneDecision(
+        eligible: false,
+        status: 'blacklist',
+        reason: 'automatic_blacklist',
+      );
+    }
+
+    final historicalStatus = _string(profile['historical_status']);
+    if (historicalStatus == 'approved' || knownTopCompetition) {
+      return const _PhaseOneDecision(
+        eligible: true,
+        status: 'provisional',
+        reason: null,
+      );
+    }
+
+    return const _PhaseOneDecision(
+      eligible: false,
+      status: 'observation',
+      reason: 'league_under_observation',
+    );
   }
 
-  int? _integer(Object? value) {
+  bool _isCancelledOrUnscheduled(String status) =>
+      const {'CANC', 'PST', 'ABD', 'AWD', 'WO'}.contains(status);
+
+  bool _isFriendly(String leagueName, String round) {
+    final value = '$leagueName $round'.toLowerCase();
+    return value.contains('friendly') ||
+        value.contains('friendlies') ||
+        value.contains('club friendly') ||
+        value.contains('international friendly') ||
+        value.contains('test match') ||
+        value.contains('testspiel');
+  }
+
+  bool _isYouthCompetition(String leagueName, String round) {
+    final value = '$leagueName $round'.toLowerCase();
+
+    final youthTokens = <RegExp>[
+      RegExp(r'\bu17\b'),
+      RegExp(r'\bu18\b'),
+      RegExp(r'\bu19\b'),
+      RegExp(r'\bu20\b'),
+      RegExp(r'\bu21\b'),
+      RegExp(r'\byouth\b'),
+      RegExp(r'\bjuniors?\b'),
+      RegExp(r'\bjunioren\b'),
+      RegExp(r'\bprimavera\b'),
+      RegExp(r'\bacademy\b'),
+    ];
+
+    return youthTokens.any((pattern) => pattern.hasMatch(value));
+  }
+
+  String _detectGender(String leagueName) {
+    final value = leagueName.toLowerCase();
+    if (value.contains('women') ||
+        value.contains('women\'s') ||
+        value.contains('frauen') ||
+        value.contains('feminine') ||
+        value.contains('féminine') ||
+        value.contains('femenina') ||
+        value.contains('femminile')) {
+      return 'women';
+    }
+    return 'men';
+  }
+
+  int? _detectCompetitionLevel(String leagueName) {
+    final value = leagueName.toLowerCase();
+
+    if (RegExp(r'\b(2nd|second|liga 2|division 2|2\. liga|2\. bundesliga)\b')
+        .hasMatch(value)) {
+      return 2;
+    }
+    if (RegExp(r'\b(3rd|third|liga 3|division 3|3\. liga)\b')
+        .hasMatch(value)) {
+      return 3;
+    }
+
+    if (_isKnownTopCompetition(leagueName)) return 1;
+    return null;
+  }
+
+  bool _isWomenInternationalCup(String leagueName) {
+    final value = leagueName.toLowerCase();
+    return value.contains('champions league women') ||
+        value.contains('women champions league') ||
+        value.contains('uefa women') ||
+        value.contains('world cup women') ||
+        value.contains('women world cup') ||
+        value.contains('euro women') ||
+        value.contains('women euro');
+  }
+
+  bool _isKnownTopCompetition(String leagueName) {
+    final value = leagueName.toLowerCase();
+
+    const knownNames = <String>[
+      'premier league',
+      'bundesliga',
+      '2. bundesliga',
+      '3. liga',
+      'la liga',
+      'serie a',
+      'ligue 1',
+      'eredivisie',
+      'primeira liga',
+      'super lig',
+      'süper lig',
+      'jupiler pro league',
+      'austrian bundesliga',
+      'super league',
+      'major league soccer',
+      'champions league',
+      'europa league',
+      'conference league',
+      'dfb pokal',
+      'fa cup',
+      'copa del rey',
+      'coppa italia',
+      'coupe de france',
+      'frauen-bundesliga',
+      'women\'s super league',
+      'division 1 feminine',
+      'division 1 féminine',
+      'liga f',
+      'serie a women',
+      'nwsl',
+    ];
+
+    return knownNames.any(value.contains);
+  }
+
+  String _string(Object? value) => value?.toString().trim() ?? '';
+
+  int _int(Object? value) {
     if (value is int) return value;
-    if (value is num) return value.round();
-    final normalized = value
-        ?.toString()
-        .replaceAll('%', '')
-        .replaceAll(',', '.')
-        .trim();
-    return int.tryParse(normalized ?? '') ??
-        double.tryParse(normalized ?? '')?.round();
+    return int.tryParse(value?.toString() ?? '') ?? 0;
   }
-
-  double? _decimal(Object? value) {
-    if (value is num) return value.toDouble();
-    return double.tryParse(
-      value
-              ?.toString()
-              .replaceAll('%', '')
-              .replaceAll(',', '.')
-              .trim() ??
-          '',
-    );
-  }
-
-  Map<String, dynamic> _map(Object? value) =>
-      value is Map ? Map<String, dynamic>.from(value) : <String, dynamic>{};
 
   String _day(DateTime value) =>
       '${value.year.toString().padLeft(4, '0')}-'
       '${value.month.toString().padLeft(2, '0')}-'
       '${value.day.toString().padLeft(2, '0')}';
+}
 
-  void close() => _client.close();
+class _PhaseOneDecision {
+  const _PhaseOneDecision({
+    required this.eligible,
+    required this.status,
+    required this.reason,
+  });
+
+  final bool eligible;
+  final String status;
+  final String? reason;
+
+  Map<String, Object?> toJson() => {
+        'eligible': eligible,
+        'status': status,
+        if (reason != null) 'reason': reason,
+      };
 }
