@@ -223,7 +223,7 @@ class PhoenixDatabase {
         ADD COLUMN IF NOT EXISTS phase_one_scan_run_id BIGINT,
         ADD COLUMN IF NOT EXISTS phase_two_scan_run_id BIGINT,
         ADD COLUMN IF NOT EXISTS requested_limit INTEGER NOT NULL DEFAULT 20,
-        ADD COLUMN IF NOT EXISTS minimum_data_quality INTEGER NOT NULL DEFAULT 50,
+        ADD COLUMN IF NOT EXISTS minimum_data_quality INTEGER NOT NULL DEFAULT 60,
         ADD COLUMN IF NOT EXISTS simulations INTEGER NOT NULL DEFAULT 100000,
         ADD COLUMN IF NOT EXISTS processed INTEGER NOT NULL DEFAULT 0,
         ADD COLUMN IF NOT EXISTS published INTEGER NOT NULL DEFAULT 0,
@@ -244,6 +244,11 @@ class PhoenixDatabase {
     await db.execute('''
       ALTER TABLE football_daily_pipeline_jobs
       ALTER COLUMN simulations SET DEFAULT 100000
+    ''');
+
+    await db.execute('''
+      ALTER TABLE football_daily_pipeline_jobs
+      ALTER COLUMN minimum_data_quality SET DEFAULT 60
     ''');
 
     await db.execute('''
@@ -1285,11 +1290,13 @@ class PhoenixDatabase {
         INSERT INTO football_matches (
           id, kickoff_utc, status, league_id, league_name, country,
           home_team_id, home_team_name, home_logo,
-          away_team_id, away_team_name, away_logo, raw_json
+          away_team_id, away_team_name, away_logo,
+          home_goals, away_goals, raw_json
         ) VALUES (
           @id, @kickoff, @status, @league_id, @league_name, @country,
           @home_team_id, @home_team_name, @home_logo,
-          @away_team_id, @away_team_name, @away_logo, CAST(@raw_json AS JSONB)
+          @away_team_id, @away_team_name, @away_logo,
+          @home_goals, @away_goals, CAST(@raw_json AS JSONB)
         )
         ON CONFLICT (id) DO UPDATE SET
           kickoff_utc = EXCLUDED.kickoff_utc,
@@ -1303,6 +1310,8 @@ class PhoenixDatabase {
           away_team_id = EXCLUDED.away_team_id,
           away_team_name = EXCLUDED.away_team_name,
           away_logo = EXCLUDED.away_logo,
+          home_goals = EXCLUDED.home_goals,
+          away_goals = EXCLUDED.away_goals,
           raw_json = EXCLUDED.raw_json,
           updated_at = NOW()
       '''),
@@ -1319,6 +1328,8 @@ class PhoenixDatabase {
         'away_team_id': payload['awayTeamId']?.toString() ?? '',
         'away_team_name': payload['awayTeam']?.toString() ?? '',
         'away_logo': payload['awayLogo']?.toString() ?? '',
+        'home_goals': payload['homeGoals'],
+        'away_goals': payload['awayGoals'],
         'raw_json': jsonEncode(payload),
       },
     );
