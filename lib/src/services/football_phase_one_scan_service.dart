@@ -97,6 +97,7 @@ class FootballPhaseOneScanService {
     final round = _string(match['round']);
     final season = _int(match['season']);
     final status = _string(match['status']).toUpperCase();
+    final kickoff = DateTime.tryParse(_string(match['kickoff']))?.toUtc();
 
     // Absolutes Minimum:
     // Nur eine fehlende Spiel-ID oder komplett fehlende Teams schließen aus.
@@ -118,6 +119,37 @@ class FootballPhaseOneScanService {
         eligible: false,
         status: 'excluded',
         reason: 'invalid_fixture_status',
+      );
+    }
+
+    // PHÖNIX ist ein reines Pre-Match-System.
+    // Nur eindeutig noch nicht gestartete Spiele dürfen weiter analysiert
+    // werden. Laufende, pausierte und bereits beendete Partien werden hier
+    // ausgeschlossen, bevor sie API-, Gemini- oder Simulationskosten erzeugen.
+    if (status != 'NS') {
+      return const _PhaseOneDecision(
+        eligible: false,
+        status: 'excluded',
+        reason: 'not_pre_match',
+      );
+    }
+
+    // Ein NS-Status allein reicht nicht aus: Der Anstoß muss parsebar sein
+    // und tatsächlich noch in der Zukunft liegen. Dadurch werden verspätete
+    // Provider-Updates und alte NS-Datensätze zuverlässig abgefangen.
+    if (kickoff == null) {
+      return const _PhaseOneDecision(
+        eligible: false,
+        status: 'excluded',
+        reason: 'missing_or_invalid_kickoff',
+      );
+    }
+
+    if (!kickoff.isAfter(DateTime.now().toUtc())) {
+      return const _PhaseOneDecision(
+        eligible: false,
+        status: 'excluded',
+        reason: 'kickoff_not_in_future',
       );
     }
 
