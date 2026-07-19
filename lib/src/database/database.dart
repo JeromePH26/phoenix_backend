@@ -1007,6 +1007,9 @@ class PhoenixDatabase {
     );
   }
 
+  /// Liefert Engine-Kandidaten ausschließlich aus den strukturierten
+  /// Phase-2-Daten. Alte Gemini/OpenAI-Kontexte bleiben zwar zu historischen
+  /// Zwecken in der Datenbank, werden aber nicht mehr gelesen oder angewendet.
   Future<List<Map<String, Object?>>> phaseFourCandidates({
     required int phaseTwoScanRunId,
     int limit = 20,
@@ -1021,52 +1024,10 @@ class PhoenixDatabase {
           p.data_quality,
           p.availability,
           p.payload,
-          COALESCE(
-            current_context.context_result,
-            fallback_context.context_result,
-            '{}'::jsonb
-          ) AS context_result,
-          CASE
-            WHEN current_context.context_result IS NOT NULL THEN 'current'
-            WHEN fallback_context.context_result IS NOT NULL THEN 'fallback'
-            ELSE 'missing'
-          END AS context_source,
-          COALESCE(
-            current_context.phase_two_scan_run_id,
-            fallback_context.phase_two_scan_run_id
-          ) AS context_source_scan_run_id
+          '{}'::jsonb AS context_result,
+          'disabled'::text AS context_source,
+          NULL::bigint AS context_source_scan_run_id
         FROM football_phase_two_results p
-        LEFT JOIN LATERAL (
-          SELECT
-            c.phase_two_scan_run_id,
-            c.context_result
-          FROM football_ai_context_checks c
-          WHERE c.phase_two_scan_run_id = p.scan_run_id
-            AND c.fixture_id = p.fixture_id
-            AND c.status = 'completed'
-          ORDER BY c.created_at DESC
-          LIMIT 1
-        ) current_context ON TRUE
-        LEFT JOIN LATERAL (
-          SELECT
-            c.phase_two_scan_run_id,
-            c.context_result
-          FROM football_ai_context_checks c
-          WHERE c.fixture_id = p.fixture_id
-            AND c.phase_two_scan_run_id <> p.scan_run_id
-            AND c.status = 'completed'
-            AND c.created_at >= NOW() - INTERVAL '12 hours'
-            AND COALESCE(
-              NULLIF(
-                c.context_result #>> '{context,applied}',
-                ''
-              )::boolean,
-              FALSE
-            ) = TRUE
-          ORDER BY c.created_at DESC
-          LIMIT 1
-        ) fallback_context
-          ON current_context.context_result IS NULL
         WHERE p.scan_run_id = @scan_run_id
           AND p.analysis_allowed = TRUE
         ORDER BY p.data_quality DESC, p.fixture_id
