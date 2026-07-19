@@ -49,6 +49,7 @@ class FootballService {
         'kickoff': fixture['date']?.toString() ?? '',
         'status': status['short']?.toString() ?? 'NS',
         'leagueId': league['id']?.toString() ?? '',
+        'season': league['season'],
         'league': league['name']?.toString() ?? '',
         'country': league['country']?.toString() ?? '',
         'leagueLogo': league['logo']?.toString() ?? '',
@@ -596,3 +597,4 @@ class FootballService {
 
   void close() => _client.close();
 }
+
