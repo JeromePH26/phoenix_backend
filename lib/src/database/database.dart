@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:postgres/postgres.dart';
 
@@ -45,6 +46,20 @@ class PhoenixDatabase {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS football_assets (
+        entity_type TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        source_url TEXT NOT NULL DEFAULT '',
+        mime_type TEXT NOT NULL,
+        image_bytes BYTEA NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (entity_type, entity_id)
       )
     ''');
 
@@ -1444,6 +1459,25 @@ class PhoenixDatabase {
       'created_at': row['created_at']?.toString(),
       'completed_at': row['completed_at']?.toString(),
     };
+  }
+
+  Future<Map<String, Object?>?> footballAsset({required String entityType, required String entityId}) async {
+    final db = await connection();
+    final result = await db.execute(Sql.named('''
+      SELECT entity_type, entity_id, source_url, mime_type, image_bytes, size_bytes, updated_at
+      FROM football_assets WHERE entity_type=@entity_type AND entity_id=@entity_id LIMIT 1
+    '''), parameters: {'entity_type':entityType,'entity_id':entityId});
+    if(result.isEmpty) return null;
+    return Map<String,Object?>.from(result.first.toColumnMap());
+  }
+
+  Future<void> saveFootballAsset({required String entityType, required String entityId, required String sourceUrl, required String mimeType, required Uint8List imageBytes}) async {
+    final db = await connection();
+    await db.execute(Sql.named('''
+      INSERT INTO football_assets(entity_type,entity_id,source_url,mime_type,image_bytes,size_bytes,updated_at)
+      VALUES(@entity_type,@entity_id,@source_url,@mime_type,@image_bytes,@size_bytes,NOW())
+      ON CONFLICT(entity_type,entity_id) DO UPDATE SET source_url=EXCLUDED.source_url,mime_type=EXCLUDED.mime_type,image_bytes=EXCLUDED.image_bytes,size_bytes=EXCLUDED.size_bytes,updated_at=NOW()
+    '''), parameters:{'entity_type':entityType,'entity_id':entityId,'source_url':sourceUrl,'mime_type':mimeType,'image_bytes':imageBytes,'size_bytes':imageBytes.length});
   }
 
   Future<void> close() async {
