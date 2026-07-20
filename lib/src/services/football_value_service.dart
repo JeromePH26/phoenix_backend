@@ -1,3 +1,4 @@
+
 import '../database/database.dart';
 import 'football_service.dart';
 
@@ -10,13 +11,15 @@ class FootballValueService {
   final PhoenixDatabase database;
   final FootballService football;
 
-  static const modelVersion = 'value_check_v1';
+  static const modelVersion = 'value_check_v2_market_guard';
 
   Future<Map<String, Object?>> check({
     required int phaseTwoScanRunId,
     int limit = 1,
     double minimumMarketOdds = 1.40,
     double minimumValuePercent = 5.0,
+    double maximumAutomaticValuePercent = 25.0,
+    double maximumFairMarketDeviationPercent = 25.0,
   }) async {
     final rows = await database.marketSelectionsForValue(
       phaseTwoScanRunId: phaseTwoScanRunId,
@@ -32,27 +35,83 @@ class FootballValueService {
       final marketKey = _string(phoenixTip['marketKey']);
       final fairOdds = _number(phoenixTip['fairOdds']);
 
+      if (selection['qualifiesForTip'] != true || marketKey.isEmpty) {
+        final updated = <String, Object?>{
+          ...selection,
+          'modelVersion': modelVersion,
+          'value': {
+            'status': 'no_estimate',
+            'marketOdds': null,
+            'marketReferenceOdds': null,
+            'fairOdds': fairOdds,
+            'minimumMarketOdds': minimumMarketOdds,
+            'minimumValuePercent': minimumValuePercent,
+            'maximumAutomaticValuePercent': maximumAutomaticValuePercent,
+            'maximumFairMarketDeviationPercent':
+                maximumFairMarketDeviationPercent,
+            'valuePercent': null,
+            'isValueTip': false,
+            'reason': 'Keine PHÖNIX-Einschätzung über 60 % vorhanden.',
+          },
+          'display': {
+            ..._map(selection['display']),
+            'showPhoenixTip': false,
+            'showValueTip': false,
+          },
+        };
+
+        await _save(
+          phaseTwoScanRunId: phaseTwoScanRunId,
+          fixtureId: fixtureId,
+          selection: updated,
+        );
+        outputs.add(updated);
+        continue;
+      }
+
       final rawOdds = await football.oddsForFixture(fixtureId);
-      final marketOdds = _bestOddsForMarket(
+      final oddsSummary = _oddsForMarket(
         rawOdds,
         marketKey,
       );
 
-      final hasRequiredData =
-          fairOdds != null &&
-          fairOdds > 0 &&
+      final marketOdds = oddsSummary.best;
+      final marketReferenceOdds = oddsSummary.median;
+
+      final hasRequiredData = fairOdds != null &&
+          fairOdds > 1 &&
           marketOdds != null &&
-          marketOdds > 0;
+          marketOdds > 1 &&
+          marketReferenceOdds != null &&
+          marketReferenceOdds > 1;
 
       final valuePercent = hasRequiredData
           ? _round(((marketOdds! / fairOdds!) - 1) * 100)
+          : null;
+
+      final fairMarketDeviationPercent = hasRequiredData
+          ? _round(
+              ((marketReferenceOdds! - fairOdds!).abs() /
+                      marketReferenceOdds) *
+                  100,
+            )
           : null;
 
       final minimumOddsPassed =
           marketOdds != null && marketOdds >= minimumMarketOdds;
       final minimumValuePassed =
           valuePercent != null && valuePercent >= minimumValuePercent;
-      final isValueTip = minimumOddsPassed && minimumValuePassed;
+      final maximumValuePassed = valuePercent != null &&
+          valuePercent <= maximumAutomaticValuePercent;
+      final marketGuardPassed = fairMarketDeviationPercent != null &&
+          fairMarketDeviationPercent <=
+              maximumFairMarketDeviationPercent;
+
+      final isValueTip = hasRequiredData &&
+          minimumOddsPassed &&
+          minimumValuePassed &&
+          maximumValuePassed &&
+          marketGuardPassed;
 
       final updated = <String, Object?>{
         ...selection,
@@ -60,17 +119,27 @@ class FootballValueService {
         'value': {
           'status': hasRequiredData ? 'checked' : 'odds_unavailable',
           'marketOdds': marketOdds,
+          'marketReferenceOdds': marketReferenceOdds,
+          'bookmakerQuotesFound': oddsSummary.count,
           'fairOdds': fairOdds,
           'minimumMarketOdds': minimumMarketOdds,
           'minimumValuePercent': minimumValuePercent,
+          'maximumAutomaticValuePercent': maximumAutomaticValuePercent,
+          'maximumFairMarketDeviationPercent':
+              maximumFairMarketDeviationPercent,
           'valuePercent': valuePercent,
+          'fairMarketDeviationPercent': fairMarketDeviationPercent,
           'minimumOddsPassed': minimumOddsPassed,
           'minimumValuePassed': minimumValuePassed,
+          'maximumValuePassed': maximumValuePassed,
+          'marketGuardPassed': marketGuardPassed,
           'isValueTip': isValueTip,
           'reason': _reason(
             hasRequiredData: hasRequiredData,
             minimumOddsPassed: minimumOddsPassed,
             minimumValuePassed: minimumValuePassed,
+            maximumValuePassed: maximumValuePassed,
+            marketGuardPassed: marketGuardPassed,
           ),
         },
         'display': {
@@ -80,13 +149,11 @@ class FootballValueService {
         },
       };
 
-      await database.saveFootballMarketSelection(
+      await _save(
         phaseTwoScanRunId: phaseTwoScanRunId,
         fixtureId: fixtureId,
-        modelVersion: modelVersion,
         selection: updated,
       );
-
       outputs.add(updated);
     }
 
@@ -95,15 +162,31 @@ class FootballValueService {
       'phaseTwoScanRunId': phaseTwoScanRunId,
       'modelVersion': modelVersion,
       'processed': outputs.length,
+      'valueTips': outputs
+          .where((row) => _map(row['value'])['isValueTip'] == true)
+          .length,
       'results': outputs,
     };
   }
 
-  double? _bestOddsForMarket(
+  Future<void> _save({
+    required int phaseTwoScanRunId,
+    required String fixtureId,
+    required Map<String, Object?> selection,
+  }) {
+    return database.saveFootballMarketSelection(
+      phaseTwoScanRunId: phaseTwoScanRunId,
+      fixtureId: fixtureId,
+      modelVersion: modelVersion,
+      selection: selection,
+    );
+  }
+
+  _OddsSummary _oddsForMarket(
     List<Map<String, Object?>> rows,
     String marketKey,
   ) {
-    double? best;
+    final found = <double>[];
 
     for (final row in rows) {
       final bookmakers = row['bookmakers'];
@@ -140,17 +223,27 @@ class FootballValueService {
               )) {
                 continue;
               }
-
-              if (best == null || odd > best) {
-                best = odd;
-              }
+              found.add(odd);
             }
           }
         }
       }
     }
 
-    return best == null ? null : _round(best);
+    if (found.isEmpty) return const _OddsSummary();
+    found.sort();
+
+    final best = found.last;
+    final middle = found.length ~/ 2;
+    final median = found.length.isOdd
+        ? found[middle]
+        : (found[middle - 1] + found[middle]) / 2;
+
+    return _OddsSummary(
+      best: _round(best),
+      median: _round(median),
+      count: found.length,
+    );
   }
 
   bool _matches({
@@ -164,20 +257,45 @@ class FootballValueService {
       case 'homeWin':
         return fullTimeMarket &&
             _isMatchWinner(betName) &&
-            (valueLabel == 'home' ||
-                valueLabel == '1' ||
-                valueLabel == 'home win');
+            _containsAny(valueLabel, ['home', '1', 'home win']);
       case 'draw':
         return fullTimeMarket &&
             _isMatchWinner(betName) &&
-            (valueLabel == 'draw' ||
-                valueLabel == 'x');
+            _containsAny(valueLabel, ['draw', 'x']);
       case 'awayWin':
         return fullTimeMarket &&
             _isMatchWinner(betName) &&
-            (valueLabel == 'away' ||
-                valueLabel == '2' ||
-                valueLabel == 'away win');
+            _containsAny(valueLabel, ['away', '2', 'away win']);
+      case 'homeOrDraw':
+        return fullTimeMarket &&
+            _isDoubleChanceMarket(betName) &&
+            _containsAny(valueLabel, [
+              '1x',
+              'home or draw',
+              'home/draw',
+              'heim oder unentschieden',
+            ]);
+      case 'drawOrAway':
+        return fullTimeMarket &&
+            _isDoubleChanceMarket(betName) &&
+            _containsAny(valueLabel, [
+              'x2',
+              'draw or away',
+              'draw/away',
+              'unentschieden oder auswarts',
+            ]);
+      case 'homeOrAway':
+        return fullTimeMarket &&
+            _isDoubleChanceMarket(betName) &&
+            _containsAny(valueLabel, [
+              '12',
+              'home or away',
+              'home/away',
+            ]);
+      case 'over15':
+        return fullTimeMarket &&
+            _isExactGoalsOverUnderMarket(betName) &&
+            _isExactLine(valueLabel, over: true, line: 1.5);
       case 'over25':
         return fullTimeMarket &&
             _isExactGoalsOverUnderMarket(betName) &&
@@ -186,14 +304,18 @@ class FootballValueService {
         return fullTimeMarket &&
             _isExactGoalsOverUnderMarket(betName) &&
             _isExactLine(valueLabel, over: false, line: 2.5);
+      case 'under35':
+        return fullTimeMarket &&
+            _isExactGoalsOverUnderMarket(betName) &&
+            _isExactLine(valueLabel, over: false, line: 3.5);
       case 'bttsYes':
         return fullTimeMarket &&
             _isBttsMarket(betName) &&
-            (valueLabel == 'yes' || valueLabel == 'ja');
+            _containsAny(valueLabel, ['yes', 'ja']);
       case 'bttsNo':
         return fullTimeMarket &&
             _isBttsMarket(betName) &&
-            (valueLabel == 'no' || valueLabel == 'nein');
+            _containsAny(valueLabel, ['no', 'nein']);
       default:
         return false;
     }
@@ -222,6 +344,7 @@ class FootballValueService {
 
     return betName.contains('full time') ||
         betName.contains('match') ||
+        betName.contains('double chance') ||
         betName == 'goals over/under' ||
         betName == 'over/under' ||
         betName == 'both teams score' ||
@@ -237,6 +360,9 @@ class FootballValueService {
       value == '1x2' ||
       value == 'full time result' ||
       value == 'match result';
+
+  bool _isDoubleChanceMarket(String value) =>
+      value.contains('double chance');
 
   bool _isExactGoalsOverUnderMarket(String value) =>
       value == 'goals over/under' ||
@@ -256,9 +382,7 @@ class FootballValueService {
         .trim();
 
     final prefix = over ? 'over' : 'under';
-    final exact = '$prefix ${line.toStringAsFixed(1)}';
-
-    return normalized == exact;
+    return normalized == '$prefix ${line.toStringAsFixed(1)}';
   }
 
   bool _isBttsMarket(String value) =>
@@ -270,12 +394,18 @@ class FootballValueService {
     required String marketKey,
     required double odds,
   }) {
-    if (marketKey == 'over25' || marketKey == 'under25') {
-      return odds > 4.00;
-    }
-
-    if (marketKey == 'bttsYes' || marketKey == 'bttsNo') {
-      return odds > 4.00;
+    if (const {
+      'over15',
+      'over25',
+      'under25',
+      'under35',
+      'bttsYes',
+      'bttsNo',
+      'homeOrDraw',
+      'drawOrAway',
+      'homeOrAway',
+    }.contains(marketKey)) {
+      return odds > 5.00;
     }
 
     return odds > 20.00;
@@ -285,6 +415,8 @@ class FootballValueService {
     required bool hasRequiredData,
     required bool minimumOddsPassed,
     required bool minimumValuePassed,
+    required bool maximumValuePassed,
+    required bool marketGuardPassed,
   }) {
     if (!hasRequiredData) {
       return 'Keine passende Buchmacherquote für diesen Markt gefunden.';
@@ -293,10 +425,19 @@ class FootballValueService {
       return 'Die Buchmacherquote liegt unter der Mindestquote.';
     }
     if (!minimumValuePassed) {
-      return 'Der Quotenvorteil liegt unter dem Mindestvalue.';
+      return 'Der Quotenvorteil liegt unter 5 % Value.';
     }
-    return 'Mindestquote und Mindestvalue sind erfüllt.';
+    if (!maximumValuePassed) {
+      return 'Value über 25 % ist auffällig und wird nicht automatisch freigegeben.';
+    }
+    if (!marketGuardPassed) {
+      return 'Die faire Quote weicht zu stark vom Marktmittel ab.';
+    }
+    return 'Mindestens 5 % Value und Markt-Plausibilitätsprüfung erfüllt.';
   }
+
+  bool _containsAny(String value, List<String> needles) =>
+      needles.any((needle) => value == needle || value.contains(needle));
 
   String _normalize(String value) =>
       value.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
@@ -313,4 +454,16 @@ class FootballValueService {
       value is Map ? Map<String, Object?>.from(value) : <String, Object?>{};
 
   String _string(Object? value) => value?.toString().trim() ?? '';
+}
+
+class _OddsSummary {
+  const _OddsSummary({
+    this.best,
+    this.median,
+    this.count = 0,
+  });
+
+  final double? best;
+  final double? median;
+  final int count;
 }
