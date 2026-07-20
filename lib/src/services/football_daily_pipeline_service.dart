@@ -17,7 +17,7 @@ class FootballDailyPipelineService {
   final FootballService football;
 
   static const publishedModelVersion =
-      'phoenix_daily_pipeline_v7_structured_only_100k';
+      'phoenix_daily_pipeline_v8_tip_selector_100k';
 
   Future<void> run({
     required int jobId,
@@ -125,7 +125,7 @@ class FootballDailyPipelineService {
           await FootballMarketSelectionService(database: database).select(
         phaseTwoScanRunId: phaseTwoId,
         limit: safeLimit,
-        minimumProbability: 0,
+        minimumProbability: 60,
       );
 
       final selected = _integer(marketResult['processed']);
@@ -220,8 +220,13 @@ class FootballDailyPipelineService {
         'away': rawFairOdds['away'] ?? rawFairOdds['awayWin'],
         'homeWin': rawFairOdds['homeWin'] ?? rawFairOdds['home'],
         'awayWin': rawFairOdds['awayWin'] ?? rawFairOdds['away'],
+        'homeOrDraw': rawFairOdds['homeOrDraw'],
+        'drawOrAway': rawFairOdds['drawOrAway'],
+        'homeOrAway': rawFairOdds['homeOrAway'],
+        'over15': rawFairOdds['over15'],
         'over25': rawFairOdds['over25'],
         'under25': rawFairOdds['under25'],
+        'under35': rawFairOdds['under35'],
         'bttsYes': rawFairOdds['bttsYes'],
         'bttsNo': rawFairOdds['bttsNo'],
       };
@@ -241,8 +246,13 @@ class FootballDailyPipelineService {
           'away': awayProbability,
           'homeWin': homeProbability,
           'awayWin': awayProbability,
+          'homeOrDraw': _probability(rawProbabilities['homeOrDraw']),
+          'drawOrAway': _probability(rawProbabilities['drawOrAway']),
+          'homeOrAway': _probability(rawProbabilities['homeOrAway']),
+          'over15': _probability(rawProbabilities['over15']),
           'over25': _probability(rawProbabilities['over25']),
           'under25': _probability(rawProbabilities['under25']),
+          'under35': _probability(rawProbabilities['under35']),
           'bttsYes': _probability(rawProbabilities['bttsYes']),
           'bttsNo': _probability(rawProbabilities['bttsNo']),
         },
