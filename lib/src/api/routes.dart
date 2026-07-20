@@ -16,6 +16,7 @@ import '../services/football_value_service.dart';
 import '../services/football_finalization_service.dart';
 import '../services/football_daily_pipeline_service.dart';
 import '../services/football_service.dart';
+import '../services/football_asset_service.dart';
 import '../services/tennis_service.dart';
 
 class ApiRoutes {
@@ -62,6 +63,14 @@ class ApiRoutes {
       });
     });
 
+
+    router.get('/api/assets/<type>/<id>', (Request request, String type, String id) async {
+      try {
+        return FootballAssetService(database: database).serve(type:type,id:id,sourceUrl:request.url.queryParameters['source']);
+      } catch (error) {
+        return Response.internalServerError(body:error.toString());
+      }
+    });
 
     router.get('/api/football/provider', (Request request) async {
       final path = request.url.queryParameters['path'];
@@ -381,7 +390,7 @@ router.post('/api/admin/football/engine/prepare', (Request request) async {
         final minimumProbability = double.tryParse(
               request.url.queryParameters['minimumProbability'] ?? '',
             ) ??
-            60.0;
+            55.0;
 
         if (phaseTwoScanRunId == null) {
           return jsonResponse(
