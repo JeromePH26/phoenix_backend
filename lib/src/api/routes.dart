@@ -381,7 +381,7 @@ router.post('/api/admin/football/engine/prepare', (Request request) async {
         final minimumProbability = double.tryParse(
               request.url.queryParameters['minimumProbability'] ?? '',
             ) ??
-            55.0;
+            60.0;
 
         if (phaseTwoScanRunId == null) {
           return jsonResponse(
