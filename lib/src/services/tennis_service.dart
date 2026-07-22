@@ -219,11 +219,14 @@ class TennisService {
   Future<Map<String, dynamic>> _providerGet(String path) async {
     final uri = Uri.parse(
       '$_baseUrl/$accessLevel/v3/$language$path',
-    ).replace(queryParameters: <String, String>{'api_key': apiKey});
+    );
 
     final response = await _client.get(
       uri,
-      headers: const <String, String>{'accept': 'application/json'},
+      headers: <String, String>{
+        'accept': 'application/json',
+        'x-api-key': apiKey,
+      },
     ).timeout(const Duration(seconds: 35));
     _lastRequestAt = DateTime.now();
 
