@@ -1,5 +1,3 @@
-import 'dart:typed_data';
-
 import 'package:http/http.dart' as http;
 import 'package:shelf/shelf.dart';
 
@@ -22,7 +20,7 @@ class FootballAssetService {
     'venue',
   };
 
-  static const maximumBytes = 3145728;
+  static const maximumBytes = 3 * 1024 * 1024;
 
   Future<Response> serve({
     required String type,
@@ -36,79 +34,69 @@ class FootballAssetService {
       return Response.badRequest(body: 'Ungültige Bild-ID.');
     }
 
-    // Bereits gespeicherte Bilder können weiterhin aus der Datenbank gelesen
-    // werden. Das Speichern neuer Bilder ist vorübergehend deaktiviert, weil
-    // PhoenixDatabase aktuell keine saveFootballAsset-Methode bereitstellt.
-    final cached = await database.footballAsset(
-      entityType: normalizedType,
-      entityId: normalizedId,
-    );
-    final cachedBytes = cached?['image_bytes'];
-    if (cachedBytes is Uint8List && cachedBytes.isNotEmpty) {
-      return _response(
-        cachedBytes,
-        cached?['mime_type']?.toString() ?? 'image/png',
-      );
-    }
-
     final source = sourceUrl?.trim() ?? '';
     final uri = Uri.tryParse(source);
-    if (source.isEmpty ||
-        uri == null ||
+    if (uri == null ||
         uri.scheme != 'https' ||
-        !_allowedHost(uri.host)) {
+        !_isAllowedHost(uri.host)) {
       return Response.badRequest(body: 'Bildquelle ist nicht freigegeben.');
     }
 
-    final response = await _client
+    final upstream = await _client
         .get(uri, headers: const {'accept': 'image/*'})
         .timeout(const Duration(seconds: 20));
 
-    if (response.statusCode < 200 || response.statusCode >= 300) {
+    if (upstream.statusCode < 200 || upstream.statusCode >= 300) {
       return Response(
-        response.statusCode,
+        upstream.statusCode,
         body: 'Bildquelle nicht erreichbar.',
       );
     }
 
-    final bytes = response.bodyBytes;
-    final mime = _mime(response.headers['content-type'], uri.path);
+    final bytes = upstream.bodyBytes;
+    final mimeType = _mimeType(upstream.headers['content-type'], uri.path);
     if (bytes.isEmpty ||
         bytes.length > maximumBytes ||
-        !mime.startsWith('image/')) {
+        !mimeType.startsWith('image/')) {
       return Response.badRequest(body: 'Ungültige oder zu große Bilddatei.');
     }
 
-    // Kein Datenbank-Write: verhindert den aktuellen Compilerfehler.
-    return _response(bytes, mime);
+    // PhoenixDatabase besitzt aktuell keine Methoden zum Lesen oder Speichern
+    // von Football-Assets. Das Bild wird deshalb direkt ausgeliefert.
+    return _imageResponse(bytes, mimeType);
   }
 
-  Response _response(Uint8List bytes, String mime) => Response.ok(
-        bytes,
-        headers: {
-          'content-type': mime,
-          'cache-control': 'public, max-age=2592000, immutable',
-          'content-length': '${bytes.length}',
-        },
-      );
-
-  bool _allowedHost(String host) {
-    final value = host.toLowerCase();
-    return value == 'media.api-sports.io' ||
-        value.endsWith('.api-sports.io') ||
-        value == 'api-sports.io';
+  Response _imageResponse(List<int> bytes, String mimeType) {
+    return Response.ok(
+      bytes,
+      headers: {
+        'content-type': mimeType,
+        'cache-control': 'public, max-age=2592000, immutable',
+        'content-length': '${bytes.length}',
+      },
+    );
   }
 
-  String _mime(String? header, String path) {
-    final value = header?.split(';').first.trim().toLowerCase();
-    if (value != null && value.startsWith('image/')) return value;
+  bool _isAllowedHost(String host) {
+    final normalizedHost = host.toLowerCase();
+    return normalizedHost == 'media.api-sports.io' ||
+        normalizedHost == 'api-sports.io' ||
+        normalizedHost.endsWith('.api-sports.io');
+  }
 
-    final lowerPath = path.toLowerCase();
-    if (lowerPath.endsWith('.jpg') || lowerPath.endsWith('.jpeg')) {
+  String _mimeType(String? header, String path) {
+    final headerMimeType = header?.split(';').first.trim().toLowerCase();
+    if (headerMimeType != null && headerMimeType.startsWith('image/')) {
+      return headerMimeType;
+    }
+
+    final normalizedPath = path.toLowerCase();
+    if (normalizedPath.endsWith('.jpg') ||
+        normalizedPath.endsWith('.jpeg')) {
       return 'image/jpeg';
     }
-    if (lowerPath.endsWith('.webp')) return 'image/webp';
-    if (lowerPath.endsWith('.svg')) return 'image/svg+xml';
+    if (normalizedPath.endsWith('.webp')) return 'image/webp';
+    if (normalizedPath.endsWith('.svg')) return 'image/svg+xml';
     return 'image/png';
   }
 
