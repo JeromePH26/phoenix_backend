@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:shelf/shelf.dart';
 
@@ -7,12 +8,14 @@ import '../services/football_service.dart';
 import '../services/tennis_service.dart';
 import 'json_response.dart';
 
-/// Ergänzt die bestehenden API-Routen um:
-/// - einen kompatiblen `/api/tips/today`-Endpunkt,
-/// - eine strikte Fußball-Liga-Whitelist,
-/// - ein korrektes Berliner Datum für den Tennis-Spielplan.
+/// Zentrale Schutz- und Filterebene für die App-Endpunkte.
 ///
-/// Die normale Routenklasse kann dadurch unverändert bleiben.
+/// Funktionen:
+/// - Fußball nur aus manuell gewhitelisteten Ligen.
+/// - Kompatibler `/api/tips/today`-Endpunkt.
+/// - Berliner Tagesdatum.
+/// - Tennis-Jugendturniere, uninteressante Wettbewerbe und unvollständige
+///   Datensätze werden vor der Ausgabe entfernt.
 class PhoenixApiGuard {
   PhoenixApiGuard({
     required this.database,
@@ -32,9 +35,9 @@ class PhoenixApiGuard {
             return _tipsToday(request, inner);
           }
 
-          if (request.method == 'GET' &&
-              path == 'api/tennis/matches/today') {
-            return _tennisToday();
+          final tennisDate = _tennisMatchDate(path);
+          if (request.method == 'GET' && tennisDate != null) {
+            return _tennisMatches(tennisDate);
           }
 
           final footballDate = _footballMatchDate(path);
@@ -46,19 +49,129 @@ class PhoenixApiGuard {
         };
       };
 
-  Future<Response> _tennisToday() async {
+  Future<Response> _tennisMatches(DateTime date) async {
     try {
-      final date = _berlinNow();
-      final matches = await tennis.matchesForDate(date);
+      final rawMatches = await tennis.matchesForDate(date);
+      final matches = rawMatches.where(_isInterestingTennisMatch).toList();
+
       return jsonResponse({
         'sport': 'tennis',
         'date': _day(date),
+        'filtered': true,
+        'rawCount': rawMatches.length,
         'count': matches.length,
+        'excludedCount': rawMatches.length - matches.length,
         'matches': matches,
       });
     } catch (error) {
       return jsonResponse({'error': error.toString()}, statusCode: 502);
     }
+  }
+
+  /// Tennis-Mindeststandard:
+  /// Ein Match wird nur ausgegeben, wenn Wettbewerb, Startzeit, beide Spieler
+  /// und eindeutige Spieler-/Match-IDs vorhanden sind.
+  bool _hasMinimumTennisData(Map<String, Object?> match) {
+    final id = _text(match['id']);
+    final startTime = _text(match['startTime']);
+    final tournament = _text(match['tournament']);
+    final playerOne = _text(match['playerOne']);
+    final playerTwo = _text(match['playerTwo']);
+    final playerOneId = _text(match['playerOneId']);
+    final playerTwoId = _text(match['playerTwoId']);
+
+    if (id.isEmpty ||
+        tournament.isEmpty ||
+        playerOne.isEmpty ||
+        playerTwo.isEmpty ||
+        playerOneId.isEmpty ||
+        playerTwoId.isEmpty) {
+      return false;
+    }
+
+    final parsedStart = DateTime.tryParse(startTime);
+    if (parsedStart == null) return false;
+
+    return true;
+  }
+
+  bool _isInterestingTennisMatch(Map<String, Object?> match) {
+    if (!_hasMinimumTennisData(match)) return false;
+
+    final searchable = [
+      _text(match['tournament']),
+      _text(match['tour']),
+      _text(match['competitionType']),
+      _text(match['round']),
+      _text(match['gender']),
+    ].join(' ').toLowerCase();
+
+    if (_isYouthTennis(searchable)) return false;
+    if (_containsBlacklistedTennisToken(searchable)) return false;
+
+    // Optionaler Tour-Filter:
+    // Beispiel Railway:
+    // TENNIS_ALLOWED_TOURS=atp,wta,challenger
+    final allowedTours = _csvEnvironment('TENNIS_ALLOWED_TOURS');
+    if (allowedTours.isNotEmpty) {
+      final tour = _text(match['tour']).toLowerCase();
+      if (!allowedTours.contains(tour)) return false;
+    }
+
+    return true;
+  }
+
+  bool _isYouthTennis(String value) {
+    final patterns = <RegExp>[
+      RegExp(r'\bu[\s-]?(?:10|11|12|13|14|15|16|17|18|19|20|21|23)\b'),
+      RegExp(r'\bunder[\s-]?(?:10|11|12|13|14|15|16|17|18|19|20|21|23)\b'),
+      RegExp(r'\bjuniors?\b'),
+      RegExp(r'\byouth\b'),
+      RegExp(r'\bjunioren\b'),
+      RegExp(r'\bnachwuchs\b'),
+      RegExp(r'\bboys?\b'),
+      RegExp(r'\bgirls?\b'),
+      RegExp(r'\bteens?\b'),
+    ];
+
+    return patterns.any((pattern) => pattern.hasMatch(value));
+  }
+
+  bool _containsBlacklistedTennisToken(String value) {
+    const defaults = <String>{
+      'exhibition',
+      'exhibition matches',
+      'legends',
+      'senior tour',
+      'virtual tennis',
+      'esports',
+      'e-tennis',
+      'fantasy',
+      'battle of',
+      'national league',
+      'club league',
+      'university',
+      'college',
+      'amateur',
+    };
+
+    final configured = _csvEnvironment('TENNIS_TOURNAMENT_BLACKLIST');
+    final blacklist = <String>{...defaults, ...configured};
+
+    return blacklist.any(
+      (token) => token.isNotEmpty && value.contains(token.toLowerCase()),
+    );
+  }
+
+  Set<String> _csvEnvironment(String key) {
+    final raw = Platform.environment[key]?.trim() ?? '';
+    if (raw.isEmpty) return const <String>{};
+
+    return raw
+        .split(',')
+        .map((value) => value.trim().toLowerCase())
+        .where((value) => value.isNotEmpty)
+        .toSet();
   }
 
   Future<Response> _footballMatches(DateTime date) async {
@@ -110,9 +223,8 @@ class PhoenixApiGuard {
         }
       }
 
-      // Für Tennis existiert im Backend derzeit noch keine vollständige
-      // Analyse-Pipeline. Deshalb wird eine echte leere Liste statt null
-      // geliefert. So kann die App sauber rendern, ohne falsche Tipps zu erfinden.
+      // Eine Tennis-Tipp-Pipeline ist serverseitig noch nicht vollständig
+      // vorhanden. Deshalb wird eine echte leere Liste statt null geliefert.
       const tennisTips = <Map<String, Object?>>[];
 
       return jsonResponse({
@@ -141,19 +253,16 @@ class PhoenixApiGuard {
     List<Map<String, Object?>> matches,
   ) async {
     if (!database.isConfigured) {
-      // Ohne Datenbank gibt es keine verlässliche Whitelist.
       return const <Map<String, Object?>>[];
     }
 
     final allowed = <Map<String, Object?>>[];
 
     for (final match in matches) {
-      final leagueId = match['leagueId']?.toString().trim() ?? '';
+      final leagueId = _text(match['leagueId']);
       final season = _integer(match['season']);
 
-      if (leagueId.isEmpty || season == null || season <= 0) {
-        continue;
-      }
+      if (leagueId.isEmpty || season == null || season <= 0) continue;
 
       final profile = await database.leagueProfile(leagueId, season);
       final manualStatus =
@@ -167,10 +276,19 @@ class PhoenixApiGuard {
     return allowed;
   }
 
+  DateTime? _tennisMatchDate(String path) {
+    if (path == 'api/tennis/matches/today') return _berlinNow();
+
+    const prefix = 'api/tennis/matches/';
+    if (!path.startsWith(prefix)) return null;
+
+    final value = path.substring(prefix.length);
+    if (!RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(value)) return null;
+    return DateTime.tryParse(value);
+  }
+
   DateTime? _footballMatchDate(String path) {
-    if (path == 'api/football/matches/today') {
-      return _berlinNow();
-    }
+    if (path == 'api/football/matches/today') return _berlinNow();
 
     const prefix = 'api/football/matches/';
     if (!path.startsWith(prefix)) return null;
@@ -179,6 +297,8 @@ class PhoenixApiGuard {
     if (!RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(value)) return null;
     return DateTime.tryParse(value);
   }
+
+  String _text(Object? value) => value?.toString().trim() ?? '';
 
   int? _integer(Object? value) {
     if (value is num) return value.toInt();
@@ -190,9 +310,7 @@ class PhoenixApiGuard {
     final year = utc.year;
     final dstStart = _lastSundayUtc(year, 3, 1);
     final dstEnd = _lastSundayUtc(year, 10, 1);
-    final isSummerTime =
-        !utc.isBefore(dstStart) && utc.isBefore(dstEnd);
-
+    final isSummerTime = !utc.isBefore(dstStart) && utc.isBefore(dstEnd);
     return utc.add(Duration(hours: isSummerTime ? 2 : 1));
   }
 
