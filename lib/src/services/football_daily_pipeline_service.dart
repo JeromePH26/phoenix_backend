@@ -6,6 +6,7 @@ import 'football_phase_two_scan_service.dart';
 import 'football_service.dart';
 import 'football_simulation_service.dart';
 import 'football_value_service.dart';
+import 'gemini_context_service.dart';
 
 class FootballDailyPipelineService {
   FootballDailyPipelineService({
@@ -17,17 +18,17 @@ class FootballDailyPipelineService {
   final FootballService football;
 
   static const publishedModelVersion =
-      'phoenix_daily_pipeline_v8_tip_selector_100k';
+      'phoenix_daily_pipeline_v9_gemini_all_matches_100k';
 
   Future<void> run({
     required int jobId,
     required DateTime date,
-    int limit = 20,
+    int? limit,
     int minimumDataQuality = 60,
     int simulations = 100000,
   }) async {
     try {
-      final safeLimit = limit.clamp(1, 20);
+      final effectiveLimit = limit ?? 1000000;
       final safeQuality = minimumDataQuality.clamp(0, 100);
       final safeSimulations = simulations.clamp(1000, 100000);
 
@@ -51,11 +52,11 @@ class FootballDailyPipelineService {
       );
 
       // Phase 2 prüft bis zu 100 heutige Kandidaten auf ihre echte
-      // Datenqualität. Danach verarbeiten Engine und Simulation ausschließlich
-      // die besten `safeLimit` Spiele. Externe KI ist vollständig deaktiviert.
+      // Datenqualität. Erst danach verarbeiten Gemini, Engine und Simulation
+      // ausschließlich alle qualifizierten Whitelist-Spiele.
       final prepared = await phaseTwoService.prepare(
         phaseOneScanRunId: phaseOneId,
-        limit: 100,
+        limit: effectiveLimit,
         minimumDataQuality: safeQuality,
       );
 
@@ -92,14 +93,25 @@ class FootballDailyPipelineService {
         return;
       }
 
-      // WICHTIG: Gemini/OpenAI und alte KI-Fallbacks werden in diesem
-      // Tageslauf nicht aufgerufen. Die Engine arbeitet ausschließlich mit
-      // strukturierten API- und Datenbankdaten.
+      // Gemini läuft bewusst VOR dem Engine-Input. Dadurch fließen
+      // verifizierte Kontext-Deltas in die Torerwartungen und Simulation ein.
+      await _step(jobId, 'gemini_context');
+
+      try {
+        await GeminiContextService(database: database).verifyPhaseTwoMatches(
+          phaseTwoScanRunId: phaseTwoId,
+          limit: effectiveLimit,
+        );
+      } catch (_) {
+        // Die Pipeline bleibt lauffähig. Der Gemini-Service speichert
+        // Kandidatenfehler selbst und lässt die mathematische Pipeline ohne Gemini weiterlaufen.
+      }
+
       await _step(jobId, 'engine_input');
       final engineResult =
           await FootballEngineInputService(database: database).prepare(
         phaseTwoScanRunId: phaseTwoId,
-        limit: safeLimit,
+        limit: effectiveLimit,
       );
 
       final preparedInputs = _integer(engineResult['prepared']);
@@ -111,7 +123,7 @@ class FootballDailyPipelineService {
       final simulationResult =
           await FootballSimulationService(database: database).run(
         phaseTwoScanRunId: phaseTwoId,
-        limit: safeLimit,
+        limit: effectiveLimit,
         simulations: safeSimulations,
       );
 
@@ -124,7 +136,7 @@ class FootballDailyPipelineService {
       final marketResult =
           await FootballMarketSelectionService(database: database).select(
         phaseTwoScanRunId: phaseTwoId,
-        limit: safeLimit,
+        limit: effectiveLimit,
         minimumProbability: 60,
       );
 
@@ -141,7 +153,7 @@ class FootballDailyPipelineService {
           football: football,
         ).check(
           phaseTwoScanRunId: phaseTwoId,
-          limit: safeLimit,
+          limit: effectiveLimit,
           minimumMarketOdds: 1.40,
           minimumValuePercent: 5,
         );
@@ -199,10 +211,14 @@ class FootballDailyPipelineService {
       final rawFairOdds = _map(simulation['fairOdds']);
       final phoenixTip = _map(selection['phoenixTip']);
       final trust = _map(selection['trust']);
+      final aiContext = _map(simulation['aiContext']);
 
       final baseConfidence = _integer(trust['score']).clamp(0, 100);
-      const contextConfidenceDelta = 0;
-      final confidence = baseConfidence;
+      final contextConfidenceDelta = aiContext['applied'] == true
+          ? _integer(aiContext['confidenceDelta']).clamp(-10, 5)
+          : 0;
+      final confidence =
+          (baseConfidence + contextConfidenceDelta).clamp(0, 100);
 
       final recommendation = _string(phoenixTip['market']);
 
@@ -220,13 +236,8 @@ class FootballDailyPipelineService {
         'away': rawFairOdds['away'] ?? rawFairOdds['awayWin'],
         'homeWin': rawFairOdds['homeWin'] ?? rawFairOdds['home'],
         'awayWin': rawFairOdds['awayWin'] ?? rawFairOdds['away'],
-        'homeOrDraw': rawFairOdds['homeOrDraw'],
-        'drawOrAway': rawFairOdds['drawOrAway'],
-        'homeOrAway': rawFairOdds['homeOrAway'],
-        'over15': rawFairOdds['over15'],
         'over25': rawFairOdds['over25'],
         'under25': rawFairOdds['under25'],
-        'under35': rawFairOdds['under35'],
         'bttsYes': rawFairOdds['bttsYes'],
         'bttsNo': rawFairOdds['bttsNo'],
       };
@@ -246,13 +257,8 @@ class FootballDailyPipelineService {
           'away': awayProbability,
           'homeWin': homeProbability,
           'awayWin': awayProbability,
-          'homeOrDraw': _probability(rawProbabilities['homeOrDraw']),
-          'drawOrAway': _probability(rawProbabilities['drawOrAway']),
-          'homeOrAway': _probability(rawProbabilities['homeOrAway']),
-          'over15': _probability(rawProbabilities['over15']),
           'over25': _probability(rawProbabilities['over25']),
           'under25': _probability(rawProbabilities['under25']),
-          'under35': _probability(rawProbabilities['under35']),
           'bttsYes': _probability(rawProbabilities['bttsYes']),
           'bttsNo': _probability(rawProbabilities['bttsNo']),
         },
@@ -263,15 +269,11 @@ class FootballDailyPipelineService {
         'selection': selection,
         'simulation': simulation,
         'simulationCount': simulation['simulations'],
-        'aiContext': const <String, Object?>{
-          'provider': 'disabled',
-          'applied': false,
-          'summary': 'Externe KI-Kontextprüfung ist deaktiviert.',
-        },
-        'contextApplied': false,
-        'contextSource': 'disabled',
-        'contextSourceScanRunId': null,
-        'fallbackUsed': false,
+        'aiContext': aiContext,
+        'contextApplied': aiContext['applied'] == true,
+        'contextSource': aiContext['contextSource'],
+        'contextSourceScanRunId': aiContext['contextSourceScanRunId'],
+        'fallbackUsed': aiContext['fallbackUsed'] == true,
         'publishedAt': DateTime.now().toUtc().toIso8601String(),
       };
 
