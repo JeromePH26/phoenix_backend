@@ -218,7 +218,7 @@ class TennisService {
 
   Future<Map<String, dynamic>> _providerGet(String path) async {
     final uri = Uri.parse(
-      '$_baseUrl/$accessLevel/v3/$language$path',
+      '$_baseUrl/$accessLevel/v3/$language$path?api_key=$apiKey',
     );
 
     final response = await _client.get(
