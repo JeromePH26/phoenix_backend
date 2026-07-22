@@ -9,6 +9,7 @@ import 'config/app_config.dart';
 import 'database/database.dart';
 import 'http/json_response.dart';
 import 'http/phoenix_api_guard.dart';
+import 'http/tennis_analysis_api.dart';
 import 'services/football_service.dart';
 import 'services/tennis_service.dart';
 
@@ -59,10 +60,15 @@ class PhoenixBackend {
       tennis: tennis,
     );
 
+    final tennisAnalysisApi = TennisAnalysisApi(tennis: tennis);
+
     final pipeline = Pipeline()
         .addMiddleware(logRequests())
         .addMiddleware(corsHeaders())
         .addMiddleware(_errorMiddleware())
+        // Muss vor ApiRoutes liegen, weil ApiRoutes sonst mit seiner
+        // Catch-all-Route zuerst 404 zurückgibt.
+        .addMiddleware(tennisAnalysisApi.middleware)
         .addMiddleware(apiGuard.middleware)
         .addHandler(routes.router.call);
 
