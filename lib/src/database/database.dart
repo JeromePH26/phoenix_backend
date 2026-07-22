@@ -278,6 +278,62 @@ class PhoenixDatabase {
       )
     ''');
 
+
+    // PHÖNIX feste Wettbewerbs-Whitelist:
+    // 13 nationale Ligen, 12 nationale Pokale und 3 UEFA-Wettbewerbe.
+    // Bereits vorhandene Datensätze werden auf whitelist aktualisiert.
+    await db.execute(r'''
+      INSERT INTO football_leagues (
+        league_id,
+        league_name,
+        country,
+        gender,
+        competition_level,
+        manual_status,
+        historical_status,
+        updated_at
+      )
+      VALUES
+        ('39',  'Premier League',              'England',     'men', 1, 'whitelist', 'approved', NOW()),
+        ('61',  'Ligue 1',                     'France',      'men', 1, 'whitelist', 'approved', NOW()),
+        ('78',  'Bundesliga',                  'Germany',     'men', 1, 'whitelist', 'approved', NOW()),
+        ('79',  '2. Bundesliga',               'Germany',     'men', 2, 'whitelist', 'approved', NOW()),
+        ('80',  '3. Liga',                     'Germany',     'men', 3, 'whitelist', 'approved', NOW()),
+        ('88',  'Eredivisie',                  'Netherlands', 'men', 1, 'whitelist', 'approved', NOW()),
+        ('94',  'Primeira Liga',               'Portugal',    'men', 1, 'whitelist', 'approved', NOW()),
+        ('103', 'Eliteserien',                 'Norway',      'men', 1, 'whitelist', 'approved', NOW()),
+        ('113', 'Allsvenskan',                 'Sweden',      'men', 1, 'whitelist', 'approved', NOW()),
+        ('135', 'Serie A',                     'Italy',       'men', 1, 'whitelist', 'approved', NOW()),
+        ('140', 'La Liga',                     'Spain',       'men', 1, 'whitelist', 'approved', NOW()),
+        ('144', 'Jupiler Pro League',          'Belgium',     'men', 1, 'whitelist', 'approved', NOW()),
+        ('244', 'Veikkausliiga',               'Finland',     'men', 1, 'whitelist', 'approved', NOW()),
+
+        ('45',  'FA Cup',                      'England',     'men', NULL, 'whitelist', 'approved', NOW()),
+        ('48',  'EFL Cup',                     'England',     'men', NULL, 'whitelist', 'approved', NOW()),
+        ('66',  'Coupe de France',             'France',      'men', NULL, 'whitelist', 'approved', NOW()),
+        ('81',  'DFB Pokal',                   'Germany',     'men', NULL, 'whitelist', 'approved', NOW()),
+        ('90',  'KNVB Beker',                  'Netherlands', 'men', NULL, 'whitelist', 'approved', NOW()),
+        ('96',  'Taça de Portugal',            'Portugal',    'men', NULL, 'whitelist', 'approved', NOW()),
+        ('104', 'NM Cupen',                    'Norway',      'men', NULL, 'whitelist', 'approved', NOW()),
+        ('116', 'Svenska Cupen',               'Sweden',      'men', NULL, 'whitelist', 'approved', NOW()),
+        ('137', 'Coppa Italia',                'Italy',       'men', NULL, 'whitelist', 'approved', NOW()),
+        ('143', 'Copa del Rey',                'Spain',       'men', NULL, 'whitelist', 'approved', NOW()),
+        ('147', 'Belgian Cup',                 'Belgium',     'men', NULL, 'whitelist', 'approved', NOW()),
+        ('245', 'Suomen Cup',                  'Finland',     'men', NULL, 'whitelist', 'approved', NOW()),
+
+        ('2',   'UEFA Champions League',       'World',       'men', NULL, 'whitelist', 'approved', NOW()),
+        ('3',   'UEFA Europa League',          'World',       'men', NULL, 'whitelist', 'approved', NOW()),
+        ('848', 'UEFA Conference League',      'World',       'men', NULL, 'whitelist', 'approved', NOW())
+      ON CONFLICT (league_id) DO UPDATE SET
+        league_name = EXCLUDED.league_name,
+        country = EXCLUDED.country,
+        gender = EXCLUDED.gender,
+        competition_level = EXCLUDED.competition_level,
+        manual_status = 'whitelist',
+        historical_status = 'approved',
+        updated_at = NOW()
+    ''');
+
     await db.execute('''
       CREATE TABLE IF NOT EXISTS football_league_seasons (
         league_id TEXT NOT NULL REFERENCES football_leagues(league_id)
