@@ -8,6 +8,7 @@ import 'api/routes.dart';
 import 'config/app_config.dart';
 import 'database/database.dart';
 import 'http/json_response.dart';
+import 'http/phoenix_api_guard.dart';
 import 'services/football_service.dart';
 import 'services/tennis_service.dart';
 
@@ -52,10 +53,17 @@ class PhoenixBackend {
       tennis: tennis,
     );
 
+    final apiGuard = PhoenixApiGuard(
+      database: database,
+      football: football,
+      tennis: tennis,
+    );
+
     final pipeline = Pipeline()
         .addMiddleware(logRequests())
         .addMiddleware(corsHeaders())
         .addMiddleware(_errorMiddleware())
+        .addMiddleware(apiGuard.middleware)
         .addHandler(routes.router.call);
 
     return PhoenixBackend._(
