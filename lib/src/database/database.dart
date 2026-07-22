@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:postgres/postgres.dart';
 
@@ -46,20 +45,6 @@ class PhoenixDatabase {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    ''');
-
-    await db.execute('''
-      CREATE TABLE IF NOT EXISTS football_assets (
-        entity_type TEXT NOT NULL,
-        entity_id TEXT NOT NULL,
-        source_url TEXT NOT NULL DEFAULT '',
-        mime_type TEXT NOT NULL,
-        image_bytes BYTEA NOT NULL,
-        size_bytes INTEGER NOT NULL,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        PRIMARY KEY (entity_type, entity_id)
       )
     ''');
 
@@ -669,7 +654,6 @@ class PhoenixDatabase {
           ON s.league_id = l.league_id
         GROUP BY l.league_id
         ORDER BY l.last_seen_at DESC, l.league_name ASC
-        LIMIT @limit
       '''),
       parameters: {'limit': safeLimit},
     );
@@ -903,7 +887,7 @@ class PhoenixDatabase {
 
   Future<List<Map<String, Object?>>> eligiblePhaseOneMatches({
     int? scanRunId,
-    int limit = 20,
+    int limit = 1000000,
   }) async {
     final db = await connection();
     final result = await db.execute(
@@ -914,7 +898,6 @@ class PhoenixDatabase {
         WHERE sm.eligible = TRUE
           AND (@scan_run_id::BIGINT IS NULL OR sm.scan_run_id = @scan_run_id)
         ORDER BY sm.created_at ASC
-        LIMIT @limit
       '''),
       parameters: {'scan_run_id': scanRunId, 'limit': limit.clamp(1, 100)},
     );
@@ -964,7 +947,7 @@ class PhoenixDatabase {
 
   Future<List<Map<String, Object?>>> geminiPhaseTwoCandidates({
     required int phaseTwoScanRunId,
-    int limit = 20,
+    int limit = 1000000,
   }) async {
     final db = await connection();
     final result = await db.execute(
@@ -974,11 +957,9 @@ class PhoenixDatabase {
         WHERE scan_run_id = @scan_run_id
           AND analysis_allowed = TRUE
         ORDER BY data_quality DESC, fixture_id
-        LIMIT @limit
       '''),
       parameters: {
         'scan_run_id': phaseTwoScanRunId,
-        'limit': limit.clamp(1, 20),
       },
     );
     return result
@@ -1022,12 +1003,9 @@ class PhoenixDatabase {
     );
   }
 
-  /// Liefert Engine-Kandidaten ausschließlich aus den strukturierten
-  /// Phase-2-Daten. Alte Gemini/OpenAI-Kontexte bleiben zwar zu historischen
-  /// Zwecken in der Datenbank, werden aber nicht mehr gelesen oder angewendet.
   Future<List<Map<String, Object?>>> phaseFourCandidates({
     required int phaseTwoScanRunId,
-    int limit = 20,
+    int limit = 1000000,
   }) async {
     final db = await connection();
     final result = await db.execute(
@@ -1039,18 +1017,58 @@ class PhoenixDatabase {
           p.data_quality,
           p.availability,
           p.payload,
-          '{}'::jsonb AS context_result,
-          'disabled'::text AS context_source,
-          NULL::bigint AS context_source_scan_run_id
+          COALESCE(
+            current_context.context_result,
+            fallback_context.context_result,
+            '{}'::jsonb
+          ) AS context_result,
+          CASE
+            WHEN current_context.context_result IS NOT NULL THEN 'current'
+            WHEN fallback_context.context_result IS NOT NULL THEN 'fallback'
+            ELSE 'missing'
+          END AS context_source,
+          COALESCE(
+            current_context.phase_two_scan_run_id,
+            fallback_context.phase_two_scan_run_id
+          ) AS context_source_scan_run_id
         FROM football_phase_two_results p
+        LEFT JOIN LATERAL (
+          SELECT
+            c.phase_two_scan_run_id,
+            c.context_result
+          FROM football_ai_context_checks c
+          WHERE c.phase_two_scan_run_id = p.scan_run_id
+            AND c.fixture_id = p.fixture_id
+            AND c.status = 'completed'
+          ORDER BY c.created_at DESC
+          LIMIT 1
+        ) current_context ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT
+            c.phase_two_scan_run_id,
+            c.context_result
+          FROM football_ai_context_checks c
+          WHERE c.fixture_id = p.fixture_id
+            AND c.phase_two_scan_run_id <> p.scan_run_id
+            AND c.status = 'completed'
+            AND c.created_at >= NOW() - INTERVAL '12 hours'
+            AND COALESCE(
+              NULLIF(
+                c.context_result #>> '{context,applied}',
+                ''
+              )::boolean,
+              FALSE
+            ) = TRUE
+          ORDER BY c.created_at DESC
+          LIMIT 1
+        ) fallback_context
+          ON current_context.context_result IS NULL
         WHERE p.scan_run_id = @scan_run_id
           AND p.analysis_allowed = TRUE
         ORDER BY p.data_quality DESC, p.fixture_id
-        LIMIT @limit
       '''),
       parameters: {
         'scan_run_id': phaseTwoScanRunId,
-        'limit': limit.clamp(1, 100),
       },
     );
     return result
@@ -1097,7 +1115,7 @@ class PhoenixDatabase {
 
   Future<List<Map<String, Object?>>> engineInputsForSimulation({
     required int phaseTwoScanRunId,
-    int limit = 20,
+    int limit = 1000000,
   }) async {
     final db = await connection();
     final result = await db.execute(
@@ -1106,11 +1124,9 @@ class PhoenixDatabase {
         FROM football_engine_inputs
         WHERE phase_two_scan_run_id = @scan_run_id
         ORDER BY data_quality DESC, fixture_id
-        LIMIT @limit
       '''),
       parameters: {
         'scan_run_id': phaseTwoScanRunId,
-        'limit': limit.clamp(1, 100),
       },
     );
     return result
@@ -1152,7 +1168,7 @@ class PhoenixDatabase {
 
   Future<List<Map<String, Object?>>> simulationRowsForSelection({
     required int phaseTwoScanRunId,
-    int limit = 20,
+    int limit = 1000000,
   }) async {
     final db = await connection();
     final result = await db.execute(
@@ -1161,11 +1177,9 @@ class PhoenixDatabase {
         FROM football_simulation_results
         WHERE phase_two_scan_run_id = @scan_run_id
         ORDER BY fixture_id
-        LIMIT @limit
       '''),
       parameters: {
         'scan_run_id': phaseTwoScanRunId,
-        'limit': limit.clamp(1, 100),
       },
     );
     return result
@@ -1203,7 +1217,7 @@ class PhoenixDatabase {
 
   Future<List<Map<String, Object?>>> marketSelectionsForValue({
     required int phaseTwoScanRunId,
-    int limit = 20,
+    int limit = 1000000,
   }) async {
     final db = await connection();
     final result = await db.execute(
@@ -1212,11 +1226,9 @@ class PhoenixDatabase {
         FROM football_market_selections
         WHERE phase_two_scan_run_id = @scan_run_id
         ORDER BY fixture_id
-        LIMIT @limit
       '''),
       parameters: {
         'scan_run_id': phaseTwoScanRunId,
-        'limit': limit.clamp(1, 100),
       },
     );
     return result
@@ -1363,7 +1375,6 @@ class PhoenixDatabase {
       '''),
       parameters: {
         'date': _dateOnly(date),
-        'limit': limit,
         'quality': minimumDataQuality,
         'simulations': simulations < 100000
             ? 100000
@@ -1459,25 +1470,6 @@ class PhoenixDatabase {
       'created_at': row['created_at']?.toString(),
       'completed_at': row['completed_at']?.toString(),
     };
-  }
-
-  Future<Map<String, Object?>?> footballAsset({required String entityType, required String entityId}) async {
-    final db = await connection();
-    final result = await db.execute(Sql.named('''
-      SELECT entity_type, entity_id, source_url, mime_type, image_bytes, size_bytes, updated_at
-      FROM football_assets WHERE entity_type=@entity_type AND entity_id=@entity_id LIMIT 1
-    '''), parameters: {'entity_type':entityType,'entity_id':entityId});
-    if(result.isEmpty) return null;
-    return Map<String,Object?>.from(result.first.toColumnMap());
-  }
-
-  Future<void> saveFootballAsset({required String entityType, required String entityId, required String sourceUrl, required String mimeType, required Uint8List imageBytes}) async {
-    final db = await connection();
-    await db.execute(Sql.named('''
-      INSERT INTO football_assets(entity_type,entity_id,source_url,mime_type,image_bytes,size_bytes,updated_at)
-      VALUES(@entity_type,@entity_id,@source_url,@mime_type,@image_bytes,@size_bytes,NOW())
-      ON CONFLICT(entity_type,entity_id) DO UPDATE SET source_url=EXCLUDED.source_url,mime_type=EXCLUDED.mime_type,image_bytes=EXCLUDED.image_bytes,size_bytes=EXCLUDED.size_bytes,updated_at=NOW()
-    '''), parameters:{'entity_type':entityType,'entity_id':entityId,'source_url':sourceUrl,'mime_type':mimeType,'image_bytes':imageBytes,'size_bytes':imageBytes.length});
   }
 
   Future<void> close() async {
