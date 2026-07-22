@@ -7,18 +7,18 @@ class FootballSimulationService {
 
   final PhoenixDatabase database;
 
-  static const modelVersion = 'poisson_monte_carlo_v4_tip_markets';
+  static const modelVersion = 'poisson_monte_carlo_v5_gemini_all_matches';
 
   Future<Map<String, Object?>> run({
     required int phaseTwoScanRunId,
-    int limit = 20,
+    int? limit,
     int simulations = 100000,
   }) async {
     final safeSimulations = simulations.clamp(1000, 100000);
 
     final rows = await database.engineInputsForSimulation(
       phaseTwoScanRunId: phaseTwoScanRunId,
-      limit: limit.clamp(1, 20),
+      limit: limit ?? 1000000,
     );
 
     final outputs = <Map<String, Object?>>[];
@@ -80,10 +80,8 @@ class FootballSimulationService {
     var homeWins = 0;
     var draws = 0;
     var awayWins = 0;
-    var over15 = 0;
     var over25 = 0;
     var under25 = 0;
-    var under35 = 0;
     var bttsYes = 0;
     var bttsNo = 0;
 
@@ -101,20 +99,10 @@ class FootballSimulationService {
         awayWins++;
       }
 
-      final totalGoals = homeGoals + awayGoals;
-
-      if (totalGoals >= 2) {
-        over15++;
-      }
-
-      if (totalGoals >= 3) {
+      if (homeGoals + awayGoals >= 3) {
         over25++;
       } else {
         under25++;
-      }
-
-      if (totalGoals <= 3) {
-        under35++;
       }
 
       if (homeGoals > 0 && awayGoals > 0) {
@@ -133,13 +121,8 @@ class FootballSimulationService {
     final homeWinProbability = homeWins / simulations;
     final drawProbability = draws / simulations;
     final awayWinProbability = awayWins / simulations;
-    final over15Probability = over15 / simulations;
     final over25Probability = over25 / simulations;
     final under25Probability = under25 / simulations;
-    final under35Probability = under35 / simulations;
-    final homeOrDrawProbability = homeWinProbability + drawProbability;
-    final drawOrAwayProbability = drawProbability + awayWinProbability;
-    final homeOrAwayProbability = homeWinProbability + awayWinProbability;
     final bttsYesProbability = bttsYes / simulations;
     final bttsNoProbability = bttsNo / simulations;
 
@@ -171,13 +154,8 @@ class FootballSimulationService {
         'away': _probability(awayWinProbability),
         'homeWin': _probability(homeWinProbability),
         'awayWin': _probability(awayWinProbability),
-        'homeOrDraw': _probability(homeOrDrawProbability),
-        'drawOrAway': _probability(drawOrAwayProbability),
-        'homeOrAway': _probability(homeOrAwayProbability),
-        'over15': _probability(over15Probability),
         'over25': _probability(over25Probability),
         'under25': _probability(under25Probability),
-        'under35': _probability(under35Probability),
         'bttsYes': _probability(bttsYesProbability),
         'bttsNo': _probability(bttsNoProbability),
       },
@@ -185,13 +163,8 @@ class FootballSimulationService {
         'home': _percent(homeWinProbability),
         'draw': _percent(drawProbability),
         'away': _percent(awayWinProbability),
-        'homeOrDraw': _percent(homeOrDrawProbability),
-        'drawOrAway': _percent(drawOrAwayProbability),
-        'homeOrAway': _percent(homeOrAwayProbability),
-        'over15': _percent(over15Probability),
         'over25': _percent(over25Probability),
         'under25': _percent(under25Probability),
-        'under35': _percent(under35Probability),
         'bttsYes': _percent(bttsYesProbability),
         'bttsNo': _percent(bttsNoProbability),
       },
@@ -201,13 +174,8 @@ class FootballSimulationService {
         'away': _fairOdds(awayWinProbability),
         'homeWin': _fairOdds(homeWinProbability),
         'awayWin': _fairOdds(awayWinProbability),
-        'homeOrDraw': _fairOdds(homeOrDrawProbability),
-        'drawOrAway': _fairOdds(drawOrAwayProbability),
-        'homeOrAway': _fairOdds(homeOrAwayProbability),
-        'over15': _fairOdds(over15Probability),
         'over25': _fairOdds(over25Probability),
         'under25': _fairOdds(under25Probability),
-        'under35': _fairOdds(under35Probability),
         'bttsYes': _fairOdds(bttsYesProbability),
         'bttsNo': _fairOdds(bttsNoProbability),
       },
@@ -224,8 +192,12 @@ class FootballSimulationService {
       'warnings': [
         if (input['realXgAvailable'] != true)
           'Simulation basiert noch auf Torquoten, nicht auf echtem xG/xGA.',
-        'Externe KI-Kontextprüfung ist deaktiviert; verwendet werden nur '
-            'strukturierte API- und Datenbankdaten.',
+        if (aiContext['applied'] == true)
+          'Verifizierter Gemini-Kontext ist in den Torerwartungen enthalten.',
+        if (aiContext['applied'] != true)
+          'Kein verifizierter Gemini-Kontext in dieser Simulation.',
+        if (aiContext['fallbackUsed'] == true)
+          'Kontext-Fallback aus einem vorherigen verifizierten Lauf verwendet.',
       ],
     };
   }
