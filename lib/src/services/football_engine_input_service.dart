@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import '../database/database.dart';
 
 class FootballEngineInputService {
@@ -5,28 +7,23 @@ class FootballEngineInputService {
 
   final PhoenixDatabase database;
 
-  static const modelVersion = 'goal_rate_normalization_v3_structured_only';
+  static const modelVersion = 'goal_rate_normalization_v4_gemini_context';
 
   Future<Map<String, Object?>> prepare({
     int? phaseTwoScanRunId,
-    int limit = 20,
+    int? limit,
   }) async {
     final scanRunId = phaseTwoScanRunId;
-
     if (scanRunId == null) {
-      return {
-        'status': 'phase_two_scan_id_missing',
-        'prepared': 0,
-      };
+      return {'status': 'phase_two_scan_id_missing', 'prepared': 0};
     }
 
     final rows = await database.phaseFourCandidates(
       phaseTwoScanRunId: scanRunId,
-      limit: limit.clamp(1, 20),
+      limit: limit ?? 1000000,
     );
 
     final results = <Map<String, Object?>>[];
-
     for (final row in rows) {
       final fixtureId = _string(row['fixture_id']);
       if (fixtureId.isEmpty) continue;
@@ -38,6 +35,7 @@ class FootballEngineInputService {
         dataQuality: _int(row['data_quality']),
         availability: _map(row['availability']),
         payload: _map(row['payload']),
+        contextResult: _jsonMap(row['context_result']),
       );
 
       await database.saveFootballEngineInput(
@@ -49,7 +47,6 @@ class FootballEngineInputService {
         modelVersion: modelVersion,
         normalizedInput: normalized,
       );
-
       results.add(normalized);
     }
 
@@ -69,6 +66,7 @@ class FootballEngineInputService {
     required int dataQuality,
     required Map<String, Object?> availability,
     required Map<String, Object?> payload,
+    required Map<String, Object?> contextResult,
   }) {
     final homeFor = _number(availability['homeGoalsForAverageHome']);
     final homeAgainst = _number(availability['homeGoalsAgainstAverageHome']);
@@ -77,12 +75,25 @@ class FootballEngineInputService {
 
     final calculatedHome = _averageAvailable(homeFor, awayAgainst);
     final calculatedAway = _averageAvailable(awayFor, homeAgainst);
-
-    // Stabiler Minimal-Fallback, damit die Pipeline auch bei dünner
-    // API-Abdeckung vollständig getestet und gespeichert werden kann.
-    final expectedHome = calculatedHome ?? 1.35;
-    final expectedAway = calculatedAway ?? 1.10;
     final usesFallback = calculatedHome == null || calculatedAway == null;
+
+    final baseHome = calculatedHome ?? 1.35;
+    final baseAway = calculatedAway ?? 1.10;
+
+    final context = _map(contextResult['context']);
+    final contextApplied = context['applied'] == true &&
+        context['contextSource'] == 'current_scan';
+    final reliability = _int(context['reliability']).clamp(0, 100);
+
+    final homeDelta = contextApplied && reliability >= 60
+        ? (_number(context['homeGoalDelta']) ?? 0).clamp(-0.15, 0.15).toDouble()
+        : 0.0;
+    final awayDelta = contextApplied && reliability >= 60
+        ? (_number(context['awayGoalDelta']) ?? 0).clamp(-0.15, 0.15).toDouble()
+        : 0.0;
+
+    final expectedHome = (baseHome + homeDelta).clamp(0.20, 3.80).toDouble();
+    final expectedAway = (baseAway + awayDelta).clamp(0.20, 3.80).toDouble();
 
     return {
       'fixtureId': fixtureId,
@@ -100,9 +111,7 @@ class FootballEngineInputService {
       'awayLogo': _string(payload['awayLogo']),
       'dataQuality': dataQuality,
       'modelVersion': modelVersion,
-      'sourceType': usesFallback
-          ? 'safe_baseline_fallback'
-          : 'goal_rates_not_xg',
+      'sourceType': usesFallback ? 'safe_baseline_fallback' : 'goal_rates_not_xg',
       'realXgAvailable': availability['realXgAvailable'] == true,
       'raw': {
         'homeGoalsForAverageHome': homeFor,
@@ -112,32 +121,37 @@ class FootballEngineInputService {
       },
       'normalized': {
         'homeAttackStrength': _relativeStrength(homeFor, 1.35) ?? 1.0,
-        'homeDefenseStrength':
-            _inverseRelativeStrength(homeAgainst, 1.35) ?? 1.0,
+        'homeDefenseStrength': _inverseRelativeStrength(homeAgainst, 1.35) ?? 1.0,
         'awayAttackStrength': _relativeStrength(awayFor, 1.15) ?? 1.0,
-        'awayDefenseStrength':
-            _inverseRelativeStrength(awayAgainst, 1.35) ?? 1.0,
-        'baseGoalRateExpectedHome': _round(expectedHome),
-        'baseGoalRateExpectedAway': _round(expectedAway),
+        'awayDefenseStrength': _inverseRelativeStrength(awayAgainst, 1.35) ?? 1.0,
+        'baseGoalRateExpectedHome': _round(baseHome),
+        'baseGoalRateExpectedAway': _round(baseAway),
+        'geminiHomeGoalDelta': _round(homeDelta),
+        'geminiAwayGoalDelta': _round(awayDelta),
         'goalRateExpectedHome': _round(expectedHome),
         'goalRateExpectedAway': _round(expectedAway),
         'goalRateExpectedTotal': _round(expectedHome + expectedAway),
-        'contextAdjusted': false,
+        'contextAdjusted': contextApplied && (homeDelta != 0 || awayDelta != 0),
       },
-      'aiContext': const <String, Object?>{
-        'provider': 'disabled',
-        'applied': false,
-        'fallbackUsed': false,
-        'confidenceDelta': 0,
-      },
+      'aiContext': context,
       'warnings': [
-        if (usesFallback)
-          'Torwerte fehlen teilweise; PHÖNIX nutzt vorübergehend eine neutrale Basis.',
-        if (availability['realXgAvailable'] != true)
-          'Keine echten xG/xGA-Daten vorhanden.',
+        if (usesFallback) 'Torwerte fehlen teilweise; PHÖNIX nutzt eine neutrale Basis.',
+        if (availability['realXgAvailable'] != true) 'Keine echten xG/xGA-Daten vorhanden.',
+        if (!contextApplied) 'Kein aktueller verifizierter Gemini-Kontext angewendet.',
       ],
       'engineReady': true,
     };
+  }
+
+  Map<String, Object?> _jsonMap(Object? value) {
+    if (value is Map) return Map<String, Object?>.from(value);
+    if (value is String && value.trim().isNotEmpty) {
+      try {
+        final decoded = jsonDecode(value);
+        if (decoded is Map) return Map<String, Object?>.from(decoded);
+      } catch (_) {}
+    }
+    return <String, Object?>{};
   }
 
   double? _number(Object? value) {
@@ -163,15 +177,12 @@ class FootballEngineInputService {
   }
 
   double _round(double value) => double.parse(value.toStringAsFixed(3));
-
   Map<String, Object?> _map(Object? value) =>
       value is Map ? Map<String, Object?>.from(value) : <String, Object?>{};
-
   String _string(Object? value) => value?.toString().trim() ?? '';
-
-  int _int(Object? value) {
-    if (value is int) return value;
-    if (value is num) return value.round();
-    return int.tryParse(value?.toString() ?? '') ?? 0;
-  }
+  int _int(Object? value) => value is int
+      ? value
+      : value is num
+          ? value.round()
+          : int.tryParse(value?.toString() ?? '') ?? 0;
 }
