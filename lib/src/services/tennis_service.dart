@@ -226,6 +226,7 @@ class TennisService {
       headers: <String, String>{
         'accept': 'application/json',
         'x-api-key': apiKey,
+        'user-agent': 'PhoenixBackend/1.0',
       },
     ).timeout(const Duration(seconds: 35));
     _lastRequestAt = DateTime.now();
