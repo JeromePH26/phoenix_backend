@@ -37,7 +37,11 @@ class AppConfig {
       sportradarTennisApiKey: read('SPORTRADAR_TENNIS_API_KEY'),
       sportradarAccessLevel:
           read('SPORTRADAR_TENNIS_ACCESS_LEVEL', 'trial'),
-      sportradarLanguage: read('SPORTRADAR_TENNIS_LANGUAGE', 'de'),
+
+      // Sportradar Tennis Trial unterstützt den englischen v3-Pfad
+      // zuverlässig. "de" führte je nach Paket zu leeren Antworten/404.
+      sportradarLanguage: read('SPORTRADAR_TENNIS_LANGUAGE', 'en'),
+
       adminToken: read('PHOENIX_ADMIN_TOKEN'),
     );
   }
