@@ -292,56 +292,34 @@ class TennisService {
       );
     }
 
-    // Sportradar accepts this request from the Railway host through curl but
-    // rejects Dart's TLS/HTTP fingerprint with 403. A short-lived header file
-    // keeps the API key out of the process argument list. Using a real file is
-    // also more reliable than curl's stdin header mode in the Railway image.
-    final headerDirectory = await Directory.systemTemp.createTemp(
-      'phoenix-sportradar-',
-    );
-    final headerFile = File('${headerDirectory.path}/headers.txt');
-    await headerFile.writeAsString(
-      'accept: application/json\n'
-      'x-api-key: $apiKey\n',
-      flush: true,
-    );
-
-    late final Process process;
-    try {
-      process = await Process.start('curl', <String>[
-        '--silent',
-        '--show-error',
-        '--max-time',
-        '35',
-        '--write-out',
-        r'\n%{http_code}',
-        '--header',
-        '@${headerFile.path}',
-        uri.toString(),
-      ], runInShell: false);
-    } catch (_) {
-      await headerDirectory.delete(recursive: true);
-      rethrow;
-    }
+    // Sportradar accepts this exact cURL request from the Railway host but
+    // rejects Dart's TLS/HTTP fingerprint with 403. Keep the arguments equal
+    // to Sportradar's documented and verified request form.
+    final process = await Process.start('curl', <String>[
+      '--silent',
+      '--show-error',
+      '--max-time',
+      '35',
+      '--write-out',
+      r'\n%{http_code}',
+      '--header',
+      'accept: application/json',
+      '--header',
+      'x-api-key: $apiKey',
+      uri.toString(),
+    ], runInShell: false);
 
     final outputFuture = utf8.decoder.bind(process.stdout).join();
     final errorFuture = utf8.decoder.bind(process.stderr).join();
-    late final int exitCode;
-    late final String output;
-    late final String error;
-    try {
-      exitCode = await process.exitCode.timeout(
-        const Duration(seconds: 40),
-        onTimeout: () {
-          process.kill();
-          return -1;
-        },
-      );
-      output = await outputFuture;
-      error = await errorFuture;
-    } finally {
-      await headerDirectory.delete(recursive: true);
-    }
+    final exitCode = await process.exitCode.timeout(
+      const Duration(seconds: 40),
+      onTimeout: () {
+        process.kill();
+        return -1;
+      },
+    );
+    final output = await outputFuture;
+    final error = await errorFuture;
     if (exitCode != 0) {
       final safeError = error.replaceAll(apiKey, '[redacted]').trim();
       throw StateError('Sportradar curl fehlgeschlagen: $safeError');
