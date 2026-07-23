@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:http/http.dart' as http;
 
@@ -13,6 +14,18 @@ class _TennisCacheEntry {
   final DateTime expiresAt;
 }
 
+class _ProviderHttpResponse {
+  const _ProviderHttpResponse({
+    required this.statusCode,
+    required this.body,
+    this.headers = const <String, String>{},
+  });
+
+  final int statusCode;
+  final String body;
+  final Map<String, String> headers;
+}
+
 class TennisService {
   TennisService({
     required this.apiKey,
@@ -20,7 +33,8 @@ class TennisService {
     required this.language,
     http.Client? client,
     this.minimumRequestInterval = const Duration(milliseconds: 1100),
-  }) : _client = client ?? http.Client();
+  })  : _client = client ?? http.Client(),
+        _useSystemCurl = client == null;
 
   static const String _baseUrl = 'https://api.sportradar.com/tennis';
 
@@ -29,6 +43,7 @@ class TennisService {
   final String language;
   final Duration minimumRequestInterval;
   final http.Client _client;
+  final bool _useSystemCurl;
 
   final Map<String, _TennisCacheEntry> _cache =
       <String, _TennisCacheEntry>{};
@@ -221,17 +236,7 @@ class TennisService {
       '$_baseUrl/$accessLevel/v3/$language$path',
     );
 
-    final response = await _client.get(
-      uri,
-      headers: <String, String>{
-        'accept': 'application/json',
-        'x-api-key': apiKey,
-        // Sportradar's edge currently rejects the custom Phoenix user agent
-        // with HTTP 403 although the same key and URL work from this host.
-        // A conventional HTTP client user agent passes the provider edge.
-        'user-agent': 'curl/8.10.1',
-      },
-    ).timeout(const Duration(seconds: 35));
+    final response = await _performProviderGet(uri);
     _lastRequestAt = DateTime.now();
 
     if (response.statusCode == 401 || response.statusCode == 403) {
@@ -263,6 +268,75 @@ class TennisService {
       throw StateError('Ungültige Tennis-Antwort.');
     }
     return Map<String, dynamic>.from(decoded);
+  }
+
+  Future<_ProviderHttpResponse> _performProviderGet(Uri uri) async {
+    if (!_useSystemCurl) {
+      final response = await _client.get(
+        uri,
+        headers: <String, String>{
+          'accept': 'application/json',
+          'x-api-key': apiKey,
+        },
+      ).timeout(const Duration(seconds: 35));
+      return _ProviderHttpResponse(
+        statusCode: response.statusCode,
+        body: response.body,
+        headers: response.headers,
+      );
+    }
+
+    // Sportradar accepts this request from the Railway host through curl but
+    // rejects Dart's TLS/HTTP fingerprint with 403. Headers are supplied over
+    // stdin so the API key never appears in the process argument list.
+    final process = await Process.start(
+      'curl',
+      <String>[
+        '--silent',
+        '--show-error',
+        '--max-time',
+        '35',
+        '--write-out',
+        r'\n%{http_code}',
+        '--header',
+        '@-',
+        uri.toString(),
+      ],
+      runInShell: false,
+    );
+    process.stdin
+      ..writeln('accept: application/json')
+      ..writeln('x-api-key: $apiKey');
+    await process.stdin.close();
+
+    final outputFuture = utf8.decoder.bind(process.stdout).join();
+    final errorFuture = utf8.decoder.bind(process.stderr).join();
+    final exitCode = await process.exitCode.timeout(
+      const Duration(seconds: 40),
+      onTimeout: () {
+        process.kill();
+        return -1;
+      },
+    );
+    final output = await outputFuture;
+    final error = await errorFuture;
+    if (exitCode != 0) {
+      final safeError = error.replaceAll(apiKey, '[redacted]').trim();
+      throw StateError('Sportradar curl fehlgeschlagen: $safeError');
+    }
+
+    final separator = output.lastIndexOf('\n');
+    if (separator < 0) {
+      throw StateError('Ungültige Sportradar-curl-Antwort.');
+    }
+    final statusCode = int.tryParse(output.substring(separator + 1).trim());
+    if (statusCode == null) {
+      throw StateError('Ungültiger Sportradar-HTTP-Status.');
+    }
+    return _ProviderHttpResponse(
+      statusCode: statusCode,
+      body: output.substring(0, separator),
+    );
   }
 
   Duration _cacheDuration(String path) {
