@@ -226,7 +226,10 @@ class TennisService {
       headers: <String, String>{
         'accept': 'application/json',
         'x-api-key': apiKey,
-        'user-agent': 'PhoenixBackend/1.0',
+        // Sportradar's edge currently rejects the custom Phoenix user agent
+        // with HTTP 403 although the same key and URL work from this host.
+        // A conventional HTTP client user agent passes the provider edge.
+        'user-agent': 'curl/8.10.1',
       },
     ).timeout(const Duration(seconds: 35));
     _lastRequestAt = DateTime.now();
