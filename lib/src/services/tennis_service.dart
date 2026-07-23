@@ -5,10 +5,7 @@ import 'dart:io';
 import 'package:http/http.dart' as http;
 
 class _TennisCacheEntry {
-  const _TennisCacheEntry({
-    required this.payload,
-    required this.expiresAt,
-  });
+  const _TennisCacheEntry({required this.payload, required this.expiresAt});
 
   final Map<String, dynamic> payload;
   final DateTime expiresAt;
@@ -33,8 +30,8 @@ class TennisService {
     required this.language,
     http.Client? client,
     this.minimumRequestInterval = const Duration(milliseconds: 1100),
-  })  : _client = client ?? http.Client(),
-        _useSystemCurl = client == null;
+  }) : _client = client ?? http.Client(),
+       _useSystemCurl = client == null;
 
   static const String _baseUrl = 'https://api.sportradar.com/tennis';
 
@@ -45,8 +42,7 @@ class TennisService {
   final http.Client _client;
   final bool _useSystemCurl;
 
-  final Map<String, _TennisCacheEntry> _cache =
-      <String, _TennisCacheEntry>{};
+  final Map<String, _TennisCacheEntry> _cache = <String, _TennisCacheEntry>{};
   final Map<String, Future<Map<String, dynamic>>> _flights =
       <String, Future<Map<String, dynamic>>>{};
 
@@ -91,13 +87,13 @@ class TennisService {
         'id': sportEvent['id']?.toString() ?? '',
         'startTime': sportEvent['start_time']?.toString() ?? '',
         'status': status['status']?.toString() ?? 'scheduled',
-        'tournament': competition['name']?.toString() ??
-            season['name']?.toString() ??
-            '',
+        'tournament':
+            competition['name']?.toString() ?? season['name']?.toString() ?? '',
         'tour': _tour(competition),
         'surface': season['surface']?.toString() ?? 'unknown',
         'round': round['name']?.toString() ?? round['number']?.toString() ?? '',
-        'bestOf': _intValue(sportEvent['best_of']) ??
+        'bestOf':
+            _intValue(sportEvent['best_of']) ??
             _intValue(context['best_of']) ??
             3,
         'competitionType': competition['type']?.toString() ?? '',
@@ -114,17 +110,16 @@ class TennisService {
 
     values.removeWhere((row) => (row['id']?.toString() ?? '').isEmpty);
     values.sort(
-      (a, b) => (a['startTime']?.toString() ?? '')
-          .compareTo(b['startTime']?.toString() ?? ''),
+      (a, b) => (a['startTime']?.toString() ?? '').compareTo(
+        b['startTime']?.toString() ?? '',
+      ),
     );
     return values;
   }
 
   /// Zentraler, begrenzter Sportradar-Zugriff für die Flutter-App.
   /// Der geheime API-Key verlässt Railway niemals.
-  Future<Map<String, dynamic>> providerRequest({
-    required String path,
-  }) {
+  Future<Map<String, dynamic>> providerRequest({required String path}) {
     if (!isConfigured) {
       throw StateError('SPORTRADAR_TENNIS_API_KEY fehlt.');
     }
@@ -143,18 +138,20 @@ class TennisService {
     if (running != null) return running;
 
     late final Future<Map<String, dynamic>> tracked;
-    tracked = _queuedProviderGet(normalizedPath).then((payload) {
-      _cache[cacheKey] = _TennisCacheEntry(
-        payload: payload,
-        expiresAt: DateTime.now().add(_cacheDuration(normalizedPath)),
-      );
-      _removeExpiredCacheEntries();
-      return payload;
-    }).whenComplete(() {
-      if (identical(_flights[cacheKey], tracked)) {
-        _flights.remove(cacheKey);
-      }
-    });
+    tracked = _queuedProviderGet(normalizedPath)
+        .then((payload) {
+          _cache[cacheKey] = _TennisCacheEntry(
+            payload: payload,
+            expiresAt: DateTime.now().add(_cacheDuration(normalizedPath)),
+          );
+          _removeExpiredCacheEntries();
+          return payload;
+        })
+        .whenComplete(() {
+          if (identical(_flights[cacheKey], tracked)) {
+            _flights.remove(cacheKey);
+          }
+        });
 
     _flights[cacheKey] = tracked;
     return tracked;
@@ -192,55 +189,62 @@ class TennisService {
     const id = r'[A-Za-z0-9:_-]+';
     final allowed = <RegExp>[
       RegExp(r'^/schedules/\d{4}-\d{2}-\d{2}/summaries\.json$'),
-      RegExp('^/competitors/$id/profile[.]json' r'$'),
-      RegExp('^/competitors/$id/summaries[.]json' r'$'),
-      RegExp('^/competitors/$id/versus/$id/summaries[.]json' r'$'),
+      RegExp(
+        '^/competitors/$id/profile[.]json'
+        r'$',
+      ),
+      RegExp(
+        '^/competitors/$id/summaries[.]json'
+        r'$',
+      ),
+      RegExp(
+        '^/competitors/$id/versus/$id/summaries[.]json'
+        r'$',
+      ),
       RegExp(r'^/rankings\.json$'),
-      RegExp('^/seasons/$id/info[.]json' r'$'),
+      RegExp(
+        '^/seasons/$id/info[.]json'
+        r'$',
+      ),
     ];
 
     if (!allowed.any((pattern) => pattern.hasMatch(path))) {
-      throw ArgumentError(
-        'Tennis-Provider-Pfad ist nicht freigegeben: $path',
-      );
+      throw ArgumentError('Tennis-Provider-Pfad ist nicht freigegeben: $path');
     }
   }
 
   Future<Map<String, dynamic>> _queuedProviderGet(String path) {
     final completer = Completer<Map<String, dynamic>>();
 
-    _requestQueue = _requestQueue
-        .catchError((Object _) {})
-        .then((_) async {
-          try {
-            final last = _lastRequestAt;
-            if (last != null) {
-              final elapsed = DateTime.now().difference(last);
-              if (elapsed < minimumRequestInterval) {
-                await Future<void>.delayed(minimumRequestInterval - elapsed);
-              }
-            }
-
-            final payload = await _providerGet(path);
-            completer.complete(payload);
-          } catch (error, stackTrace) {
-            completer.completeError(error, stackTrace);
+    _requestQueue = _requestQueue.catchError((Object _) {}).then((_) async {
+      try {
+        final last = _lastRequestAt;
+        if (last != null) {
+          final elapsed = DateTime.now().difference(last);
+          if (elapsed < minimumRequestInterval) {
+            await Future<void>.delayed(minimumRequestInterval - elapsed);
           }
-        });
+        }
+
+        final payload = await _providerGet(path);
+        completer.complete(payload);
+      } catch (error, stackTrace) {
+        completer.completeError(error, stackTrace);
+      }
+    });
 
     return completer.future;
   }
 
   Future<Map<String, dynamic>> _providerGet(String path) async {
-    final uri = Uri.parse(
-      '$_baseUrl/$accessLevel/v3/$language$path',
-    );
+    final uri = Uri.parse('$_baseUrl/$accessLevel/v3/$language$path');
 
     final response = await _performProviderGet(uri);
     _lastRequestAt = DateTime.now();
 
     if (response.statusCode == 401 || response.statusCode == 403) {
-      final requestId = response.headers['x-request-id'] ??
+      final requestId =
+          response.headers['x-request-id'] ??
           response.headers['x-amzn-requestid'] ??
           response.headers['x-correlation-id'] ??
           'unbekannt';
@@ -272,13 +276,15 @@ class TennisService {
 
   Future<_ProviderHttpResponse> _performProviderGet(Uri uri) async {
     if (!_useSystemCurl) {
-      final response = await _client.get(
-        uri,
-        headers: <String, String>{
-          'accept': 'application/json',
-          'x-api-key': apiKey,
-        },
-      ).timeout(const Duration(seconds: 35));
+      final response = await _client
+          .get(
+            uri,
+            headers: <String, String>{
+              'accept': 'application/json',
+              'x-api-key': apiKey,
+            },
+          )
+          .timeout(const Duration(seconds: 35));
       return _ProviderHttpResponse(
         statusCode: response.statusCode,
         body: response.body,
@@ -287,11 +293,22 @@ class TennisService {
     }
 
     // Sportradar accepts this request from the Railway host through curl but
-    // rejects Dart's TLS/HTTP fingerprint with 403. Headers are supplied over
-    // stdin so the API key never appears in the process argument list.
-    final process = await Process.start(
-      'curl',
-      <String>[
+    // rejects Dart's TLS/HTTP fingerprint with 403. A short-lived header file
+    // keeps the API key out of the process argument list. Using a real file is
+    // also more reliable than curl's stdin header mode in the Railway image.
+    final headerDirectory = await Directory.systemTemp.createTemp(
+      'phoenix-sportradar-',
+    );
+    final headerFile = File('${headerDirectory.path}/headers.txt');
+    await headerFile.writeAsString(
+      'accept: application/json\n'
+      'x-api-key: $apiKey\n',
+      flush: true,
+    );
+
+    late final Process process;
+    try {
+      process = await Process.start('curl', <String>[
         '--silent',
         '--show-error',
         '--max-time',
@@ -299,27 +316,32 @@ class TennisService {
         '--write-out',
         r'\n%{http_code}',
         '--header',
-        '@-',
+        '@${headerFile.path}',
         uri.toString(),
-      ],
-      runInShell: false,
-    );
-    process.stdin
-      ..writeln('accept: application/json')
-      ..writeln('x-api-key: $apiKey');
-    await process.stdin.close();
+      ], runInShell: false);
+    } catch (_) {
+      await headerDirectory.delete(recursive: true);
+      rethrow;
+    }
 
     final outputFuture = utf8.decoder.bind(process.stdout).join();
     final errorFuture = utf8.decoder.bind(process.stderr).join();
-    final exitCode = await process.exitCode.timeout(
-      const Duration(seconds: 40),
-      onTimeout: () {
-        process.kill();
-        return -1;
-      },
-    );
-    final output = await outputFuture;
-    final error = await errorFuture;
+    late final int exitCode;
+    late final String output;
+    late final String error;
+    try {
+      exitCode = await process.exitCode.timeout(
+        const Duration(seconds: 40),
+        onTimeout: () {
+          process.kill();
+          return -1;
+        },
+      );
+      output = await outputFuture;
+      error = await errorFuture;
+    } finally {
+      await headerDirectory.delete(recursive: true);
+    }
     if (exitCode != 0) {
       final safeError = error.replaceAll(apiKey, '[redacted]').trim();
       throw StateError('Sportradar curl fehlgeschlagen: $safeError');
@@ -364,9 +386,10 @@ class TennisService {
   }
 
   String _tour(Map<String, dynamic> competition) {
-    final text = '${competition['name'] ?? ''} '
-            '${competition['category'] ?? ''}'
-        .toLowerCase();
+    final text =
+        '${competition['name'] ?? ''} '
+                '${competition['category'] ?? ''}'
+            .toLowerCase();
     if (text.contains('wta')) return 'wta';
     if (text.contains('challenger')) return 'challenger';
     if (text.contains('itf')) return 'itf';
@@ -389,9 +412,9 @@ class TennisService {
 
   List<Map<String, dynamic>> _maps(Object? value) => value is List
       ? value
-          .whereType<Map>()
-          .map((item) => Map<String, dynamic>.from(item))
-          .toList()
+            .whereType<Map>()
+            .map((item) => Map<String, dynamic>.from(item))
+            .toList()
       : const <Map<String, dynamic>>[];
 
   String _day(DateTime value) =>
