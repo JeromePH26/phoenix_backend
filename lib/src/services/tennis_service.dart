@@ -321,6 +321,7 @@ class TennisService {
     final process = await Process.start('curl', <String>[
       '--silent',
       '--show-error',
+      '--ipv4',
       '--max-time',
       '35',
       '--write-out',
