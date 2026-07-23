@@ -232,7 +232,21 @@ class TennisService {
     _lastRequestAt = DateTime.now();
 
     if (response.statusCode == 401 || response.statusCode == 403) {
-      throw StateError('Sportradar hat den Tennis-API-Key abgelehnt.');
+      final requestId = response.headers['x-request-id'] ??
+          response.headers['x-amzn-requestid'] ??
+          response.headers['x-correlation-id'] ??
+          'unbekannt';
+      final safeBody = response.body
+          .replaceAll(apiKey, '[redacted]')
+          .replaceAll(RegExp(r'\s+'), ' ')
+          .trim();
+      final preview = safeBody.length > 300
+          ? '${safeBody.substring(0, 300)}…'
+          : safeBody;
+      throw StateError(
+        'Sportradar Tennis HTTP ${response.statusCode}; '
+        'requestId=$requestId; response=$preview',
+      );
     }
     if (response.statusCode == 429) {
       throw StateError('Sportradar-Tennis-Anfragelimit erreicht.');
