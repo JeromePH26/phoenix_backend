@@ -292,6 +292,29 @@ class TennisService {
       );
     }
 
+    final headerResponse = await _performSystemCurl(uri);
+    if (headerResponse.statusCode != 401 && headerResponse.statusCode != 403) {
+      return headerResponse;
+    }
+
+    // Some Sportradar trial subscriptions still authenticate through the
+    // legacy api_key query parameter although the current docs show a header.
+    return _performSystemCurl(uri, keyInQuery: true);
+  }
+
+  Future<_ProviderHttpResponse> _performSystemCurl(
+    Uri uri, {
+    bool keyInQuery = false,
+  }) async {
+    final requestUri = keyInQuery
+        ? uri.replace(
+            queryParameters: <String, String>{
+              ...uri.queryParameters,
+              'api_key': apiKey,
+            },
+          )
+        : uri;
+
     // Sportradar accepts this exact cURL request from the Railway host but
     // rejects Dart's TLS/HTTP fingerprint with 403. Keep the arguments equal
     // to Sportradar's documented and verified request form.
@@ -304,9 +327,8 @@ class TennisService {
       r'\n%{http_code}',
       '--header',
       'accept: application/json',
-      '--header',
-      'x-api-key: $apiKey',
-      uri.toString(),
+      if (!keyInQuery) ...<String>['--header', 'x-api-key: $apiKey'],
+      requestUri.toString(),
     ], runInShell: false);
 
     final outputFuture = utf8.decoder.bind(process.stdout).join();
