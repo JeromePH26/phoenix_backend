@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:postgres/postgres.dart';
 import 'package:shelf/shelf.dart';
 
@@ -9,6 +11,8 @@ class FootballAnalysisApi {
   FootballAnalysisApi({required this.database});
 
   final PhoenixDatabase database;
+
+  static const _databaseTimeout = Duration(seconds: 8);
 
   Middleware get middleware => (Handler inner) => (Request request) async {
         if (request.method != 'GET') return inner(request);
@@ -38,28 +42,59 @@ class FootballAnalysisApi {
           final matches = await _storedAnalyses(
             date: date,
             minimumDataQuality: minimumDataQuality,
-          );
+          ).timeout(_databaseTimeout);
 
-          return jsonResponse(_jsonSafe({
-            'sport': 'football',
-            'date': _day(date),
-            'source': 'database',
-            'minimumDataQuality': minimumDataQuality.clamp(0, 100),
-            'count': matches.length,
-            'matches': matches,
-          }));
-        } catch (error) {
-          return jsonResponse(
-            {'error': error.toString()},
-            statusCode: 500,
+          return _analysisResponse(
+            date: date,
+            minimumDataQuality: minimumDataQuality,
+            matches: matches,
+          );
+        } on TimeoutException {
+          return _analysisResponse(
+            date: date,
+            minimumDataQuality: minimumDataQuality,
+            matches: const [],
+            databaseAvailable: false,
+            status: 'Datenbank antwortet momentan nicht rechtzeitig.',
+          );
+        } catch (_) {
+          return _analysisResponse(
+            date: date,
+            minimumDataQuality: minimumDataQuality,
+            matches: const [],
+            databaseAvailable: false,
+            status: 'Gespeicherte Analysen sind momentan nicht verfügbar.',
           );
         }
       };
+
+  Response _analysisResponse({
+    required DateTime date,
+    required int minimumDataQuality,
+    required List<Map<String, Object?>> matches,
+    bool databaseAvailable = true,
+    String? status,
+  }) {
+    return jsonResponse(_jsonSafe({
+      'sport': 'football',
+      'date': _day(date),
+      'source': 'database',
+      'databaseAvailable': databaseAvailable,
+      if (status != null) 'status': status,
+      'minimumDataQuality': minimumDataQuality.clamp(0, 100),
+      'count': matches.length,
+      'matches': matches,
+    }));
+  }
 
   Future<List<Map<String, Object?>>> _storedAnalyses({
     required DateTime date,
     required int minimumDataQuality,
   }) async {
+    if (!database.isConfigured) {
+      return const <Map<String, Object?>>[];
+    }
+
     final db = await database.connection();
     final safeQuality = minimumDataQuality.clamp(0, 100);
     final day = _day(date);
