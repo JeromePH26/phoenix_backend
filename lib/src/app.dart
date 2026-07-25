@@ -7,6 +7,7 @@ import 'package:shelf_cors_headers/shelf_cors_headers.dart';
 import 'api/routes.dart';
 import 'config/app_config.dart';
 import 'database/database.dart';
+import 'http/football_analysis_api.dart';
 import 'http/json_response.dart';
 import 'http/phoenix_api_guard.dart';
 import 'http/tennis_analysis_api.dart';
@@ -61,6 +62,7 @@ class PhoenixBackend {
     );
 
     final tennisAnalysisApi = TennisAnalysisApi(tennis: tennis);
+    final footballAnalysisApi = FootballAnalysisApi(database: database);
 
     final pipeline = Pipeline()
         .addMiddleware(logRequests())
@@ -70,6 +72,9 @@ class PhoenixBackend {
         // Catch-all-Route zuerst 404 zurückgibt.
         .addMiddleware(tennisAnalysisApi.middleware)
         .addMiddleware(apiGuard.middleware)
+        // Liefert vorbereitete Football-Analysen ausschließlich aus PostgreSQL.
+        // Kein Live-Aufruf beim Datenanbieter während eines App-Requests.
+        .addMiddleware(footballAnalysisApi.middleware)
         .addHandler(routes.router.call);
 
     return PhoenixBackend._(
