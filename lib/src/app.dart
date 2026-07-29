@@ -72,8 +72,12 @@ class PhoenixBackend {
         // Catch-all-Route zuerst 404 zurückgibt.
         .addMiddleware(tennisAnalysisApi.middleware)
         .addMiddleware(apiGuard.middleware)
-        // Liefert vorbereitete Football-Analysen ausschließlich aus PostgreSQL.
-        // Kein Live-Aufruf beim Datenanbieter während eines App-Requests.
+        // Liefert vorbereitete Football-Analysen aus PostgreSQL. Vor der
+        // Auslieferung aktualisiert _preparedFootballAnalyses() in routes.dart
+        // kurz Status/Endstand/Logos beim Datenanbieter (ein Aufruf für alle
+        // Spiele des Tages), damit beendete Partien nicht als LIVE 0:0
+        // stehen bleiben. Die eigentliche Analyse (Simulation, Value,
+        // Empfehlung) kommt weiterhin ausschließlich aus der Datenbank.
         .addMiddleware(footballAnalysisApi.middleware)
         .addHandler(routes.router.call);
 

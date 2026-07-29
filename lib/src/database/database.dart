@@ -719,6 +719,31 @@ class PhoenixDatabase {
         .toList();
   }
 
+  /// Liefert `manual_status` für mehrere Ligen in einer einzigen Abfrage.
+  /// Wird von PhoenixApiGuard genutzt, um pro Request nicht mehr eine
+  /// sequenzielle DB-Anfrage je Spiel auszulösen.
+  Future<Map<String, String>> footballLeagueManualStatuses(
+    Iterable<String> leagueIds,
+  ) async {
+    final ids = leagueIds.toSet().toList();
+    if (ids.isEmpty) return const <String, String>{};
+
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT league_id, manual_status
+        FROM football_leagues
+        WHERE league_id = ANY(@league_ids)
+      '''),
+      parameters: {'league_ids': ids},
+    );
+
+    return {
+      for (final row in result)
+        row[0].toString(): row[1]?.toString() ?? '',
+    };
+  }
+
   Future<bool> setFootballLeagueManualStatus({
     required String leagueId,
     required String manualStatus,

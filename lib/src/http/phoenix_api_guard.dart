@@ -256,24 +256,24 @@ class PhoenixApiGuard {
       return const <Map<String, Object?>>[];
     }
 
-    final allowed = <Map<String, Object?>>[];
+    final leagueIds = matches
+        .map((match) => _text(match['leagueId']))
+        .where((id) => id.isNotEmpty)
+        .toSet();
 
-    for (final match in matches) {
+    // Eine einzige Abfrage für alle Ligen dieser Antwort statt einer
+    // sequenziellen DB-Anfrage pro Spiel (manual_status hängt nicht von der
+    // Saison ab, daher genügt league_id als Schlüssel).
+    final statuses = await database.footballLeagueManualStatuses(leagueIds);
+
+    return matches.where((match) {
       final leagueId = _text(match['leagueId']);
       final season = _integer(match['season']);
+      if (leagueId.isEmpty || season == null || season <= 0) return false;
 
-      if (leagueId.isEmpty || season == null || season <= 0) continue;
-
-      final profile = await database.leagueProfile(leagueId, season);
-      final manualStatus =
-          profile?['manual_status']?.toString().trim().toLowerCase() ?? '';
-
-      if (manualStatus == 'whitelist') {
-        allowed.add(match);
-      }
-    }
-
-    return allowed;
+      final manualStatus = statuses[leagueId]?.trim().toLowerCase() ?? '';
+      return manualStatus == 'whitelist';
+    }).toList();
   }
 
   DateTime? _tennisMatchDate(String path) {

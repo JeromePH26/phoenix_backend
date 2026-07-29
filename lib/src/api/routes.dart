@@ -171,45 +171,11 @@ class ApiRoutes {
       },
     );
 
-    router.get('/api/football/matches/today', (Request request) async {
-      try {
-        final matches = await football.matchesForDate(DateTime.now());
-        return jsonResponse({
-          'sport': 'football',
-          'date': _day(DateTime.now()),
-          'count': matches.length,
-          'matches': matches,
-        });
-      } catch (error) {
-        return jsonResponse({'error': error.toString()}, statusCode: 502);
-      }
-    });
-
-    router.get(
-      '/api/football/matches/<date|[0-9]{4}-[0-9]{2}-[0-9]{2}>',
-      (Request request, String date) async {
-        final parsed = DateTime.tryParse(date);
-        if (parsed == null) {
-          return jsonResponse(
-            {'error': 'Datum muss YYYY-MM-DD sein.'},
-            statusCode: 400,
-          );
-        }
-
-        try {
-          final matches = await football.matchesForDate(parsed);
-          return jsonResponse({
-            'sport': 'football',
-            'date': _day(parsed),
-            'count': matches.length,
-            'matches': matches,
-          });
-        } catch (error) {
-          return jsonResponse({'error': error.toString()}, statusCode: 502);
-        }
-      },
-    );
-
+    // Hinweis: /api/football/matches/today und /api/football/matches/<date>
+    // werden nicht hier, sondern von PhoenixApiGuard.middleware bedient - sie
+    // sitzt in app.dart vor diesem Router und fängt beide Pfade immer zuerst
+    // ab (Whitelist-Filterung). Unfilterte Duplikate wurden entfernt, weil sie
+    // nie erreicht wurden.
 
     router.get(
       '/api/football/live/<fixtureId|[0-9]+>',
@@ -568,44 +534,10 @@ router.post('/api/admin/football/engine/prepare', (Request request) async {
       }
     });
 
-    router.get('/api/tennis/matches/today', (Request request) async {
-      try {
-        final matches = await tennis.matchesForDate(DateTime.now());
-        return jsonResponse({
-          'sport': 'tennis',
-          'date': _day(DateTime.now()),
-          'count': matches.length,
-          'matches': matches,
-        });
-      } catch (error) {
-        return jsonResponse({'error': error.toString()}, statusCode: 502);
-      }
-    });
-
-    router.get(
-      '/api/tennis/matches/<date|[0-9]{4}-[0-9]{2}-[0-9]{2}>',
-      (Request request, String date) async {
-        final parsed = DateTime.tryParse(date);
-        if (parsed == null) {
-          return jsonResponse(
-            {'error': 'Datum muss YYYY-MM-DD sein.'},
-            statusCode: 400,
-          );
-        }
-
-        try {
-          final matches = await tennis.matchesForDate(parsed);
-          return jsonResponse({
-            'sport': 'tennis',
-            'date': _day(parsed),
-            'count': matches.length,
-            'matches': matches,
-          });
-        } catch (error) {
-          return jsonResponse({'error': error.toString()}, statusCode: 502);
-        }
-      },
-    );
+    // Hinweis: /api/tennis/matches/today und /api/tennis/matches/<date>
+    // werden ebenfalls ausschließlich von PhoenixApiGuard.middleware bedient
+    // (Jugend-/Exhibition-Filterung), siehe Hinweis bei den Football-Routen
+    // oben.
 
     router.post('/api/admin/football/finalize', (Request request) async {
       if (!_isAdmin(request)) {
@@ -896,7 +828,16 @@ router.post('/api/admin/football/engine/prepare', (Request request) async {
   bool _isAdmin(Request request) {
     if (config.adminToken.isEmpty) return false;
     final header = request.headers['authorization'] ?? '';
-    return header == 'Bearer ${config.adminToken}';
+    final expected = 'Bearer ${config.adminToken}';
+
+    // Konstante Laufzeit statt String-Gleichheit, damit die Antwortzeit
+    // keinen Rückschluss auf übereinstimmende Präfixe des Admin-Tokens erlaubt.
+    if (header.length != expected.length) return false;
+    var diff = 0;
+    for (var i = 0; i < header.length; i++) {
+      diff |= header.codeUnitAt(i) ^ expected.codeUnitAt(i);
+    }
+    return diff == 0;
   }
 
   String _day(DateTime value) =>
