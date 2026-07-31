@@ -97,6 +97,17 @@ class ApiRoutes {
           statusCode: 400,
         );
       } catch (error) {
+        if (_isOptionalFootballProviderPath(path)) {
+          return jsonResponse({
+            'get': path.replaceFirst('/', ''),
+            'parameters': query,
+            'errors': {'degraded': error.toString()},
+            'results': 0,
+            'paging': {'current': 1, 'total': 1},
+            'response': const <Object?>[],
+            'degraded': true,
+          });
+        }
         return jsonResponse(
           {'error': error.toString()},
           statusCode: 502,
@@ -678,6 +689,22 @@ router.post('/api/admin/football/engine/prepare', (Request request) async {
   }
 
 
+
+  bool _isOptionalFootballProviderPath(String path) {
+    const optionalPaths = <String>{
+      '/fixtures/events',
+      '/fixtures/statistics',
+      '/fixtures/lineups',
+      '/fixtures/headtohead',
+      '/injuries',
+      '/players',
+      '/players/squads',
+      '/teams/statistics',
+      '/odds',
+    };
+    final normalized = path.startsWith('/') ? path : '/$path';
+    return optionalPaths.contains(normalized);
+  }
 
   Future<List<Map<String, Object?>>> _preparedFootballAnalyses({
     required DateTime date,
