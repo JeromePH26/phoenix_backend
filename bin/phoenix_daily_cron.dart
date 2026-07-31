@@ -301,8 +301,12 @@ class _CronConfig {
       backendUrl: backendUrl,
       adminToken: adminToken,
       limit: integer('PHOENIX_CRON_LIMIT', 20).clamp(1, 20),
+      // 0 statt vorher 50: Jede Analyse soll gespeichert werden, egal wie
+      // niedrig die Datenqualität ist. Die App filtert beim Abruf
+      // (minimumQuality) weiterhin selbst, welche Tipps sie anzeigt -
+      // dieser Wert steuert nur, ob überhaupt gespeichert wird.
       minimumDataQuality:
-          integer('PHOENIX_CRON_MINIMUM_DATA_QUALITY', 50).clamp(0, 100),
+          integer('PHOENIX_CRON_MINIMUM_DATA_QUALITY', 0).clamp(0, 100),
       simulations:
           integer('PHOENIX_CRON_SIMULATIONS', 10000).clamp(1000, 100000),
       pollingInterval: Duration(

@@ -586,10 +586,12 @@ router.post('/api/admin/football/engine/prepare', (Request request) async {
             request.url.queryParameters['limit'] ?? '',
           ) ??
           20;
+      // 0 statt vorher 60: ein manuell ausgelöster Tagesscan soll standardmäßig
+      // ebenfalls jede Analyse speichern, nicht nur die mit hoher Datenqualität.
       final minimumDataQuality = int.tryParse(
             request.url.queryParameters['minimumDataQuality'] ?? '',
           ) ??
-          60;
+          0;
       final simulations = int.tryParse(
             request.url.queryParameters['simulations'] ?? '',
           ) ??

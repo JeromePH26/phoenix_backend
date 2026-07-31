@@ -25,7 +25,10 @@ class FootballDailyPipelineService {
     required int jobId,
     required DateTime date,
     int? limit,
-    int minimumDataQuality = 60,
+    // 0 statt vorher 60: jede gescannte Analyse soll gespeichert werden;
+    // welche Tipps angezeigt werden, entscheidet weiterhin der App-seitige
+    // minimumQuality-Filter beim Abruf, nicht dieser Speicher-Gate.
+    int minimumDataQuality = 0,
     int simulations = 100000,
   }) async {
     try {
