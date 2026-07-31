@@ -106,24 +106,51 @@ class FootballService {
       await pause();
     }
 
+    int playedTotal(Map<String, dynamic> statistics) {
+      final fixtures = _map(statistics['fixtures']);
+      final played = _map(fixtures['played']);
+      final total = played['total'];
+      return total is num ? total.round() : int.tryParse(total?.toString() ?? '') ?? 0;
+    }
+
+    Future<Map<String, dynamic>> fetchStatistics(
+      String teamId,
+      int forSeason,
+    ) async {
+      final decoded = await _get(
+        '/teams/statistics',
+        {
+          'league': leagueId,
+          'season': forSeason.toString(),
+          'team': teamId,
+        },
+      );
+      final raw = decoded['response'];
+      return raw is Map ? Map<String, dynamic>.from(raw) : <String, dynamic>{};
+    }
+
     Future<void> checkTeamStatistics(
       String prefix,
       String teamId,
     ) async {
       try {
-        final decoded = await _get(
-          '/teams/statistics',
-          {
-            'league': leagueId,
-            'season': season.toString(),
-            'team': teamId,
-          },
-        );
+        var statistics = await fetchStatistics(teamId, season);
 
-        final raw = decoded['response'];
-        final statistics = raw is Map
-            ? Map<String, dynamic>.from(raw)
-            : <String, dynamic>{};
+        // Direkt nach einem Saisonwechsel hat die neue Saison fast immer
+        // < 3 gespielte Partien; die Statistik wäre dann strukturell
+        // unbrauchbar, obwohl die Vorsaison reichlich Daten liefert. In dem
+        // Fall wird zusätzlich die Vorsaison abgefragt und verwendet, wenn
+        // sie mehr gespielte Partien hat.
+        if (playedTotal(statistics) < 3) {
+          try {
+            final previous = await fetchStatistics(teamId, season - 1);
+            if (playedTotal(previous) > playedTotal(statistics)) {
+              statistics = previous;
+            }
+          } catch (_) {
+            // Vorsaison nicht verfügbar; mit der aktuellen Saison weiter.
+          }
+        }
 
         final hasStatistics = statistics.isNotEmpty;
         result['${prefix}TeamStatistics'] = hasStatistics;
@@ -168,12 +195,16 @@ class FootballService {
       },
     );
 
+    // Kein 'season'-Filter: 'last' liefert bei API-Football ohnehin schon
+    // die chronologisch letzten Spiele eines Teams. Mit einem Saisonfilter
+    // wären direkt nach einem Saisonwechsel praktisch immer 0 Spiele
+    // gefunden, obwohl die Teams gerade erst zig Spiele der Vorsaison
+    // bestritten haben.
     await checkList(
       'homeRecent',
       '/fixtures',
       {
         'team': homeTeamId,
-        'season': season.toString(),
         'last': '5',
       },
     );
@@ -183,7 +214,6 @@ class FootballService {
       '/fixtures',
       {
         'team': awayTeamId,
-        'season': season.toString(),
         'last': '5',
       },
     );

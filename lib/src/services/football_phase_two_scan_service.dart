@@ -112,15 +112,26 @@ class FootballPhaseTwoScanService {
   int _quality(Map<String, Object?> a) {
     var score = 5;
     if (a['standings'] == true) score += 15;
-    score += ((_int(a['homeRecentCount']).clamp(0, 5) / 5) * 10).round();
-    score += ((_int(a['awayRecentCount']).clamp(0, 5) / 5) * 10).round();
+    // Die letzten 5 Spiele sind jetzt saisonübergreifend (siehe
+    // coverageForFixture) und daher fast immer verfügbar, tragen aber
+    // bewusst weniger zum Score bei: kurz nach einem Saisonwechsel mischen
+    // sich Liga-, Pokal- und Testspiele, was die Aussagekraft von "letzte
+    // Form" schwächt, ohne dass die Datenlage insgesamt schlecht ist.
+    score += ((_int(a['homeRecentCount']).clamp(0, 5) / 5) * 6).round();
+    score += ((_int(a['awayRecentCount']).clamp(0, 5) / 5) * 6).round();
     if (a['odds'] == true) score += 15;
     if (a['injuries'] == true) score += 10;
     if (a['h2h'] == true) score += 10;
-    if (a['homeTeamStatisticsUsable'] == true) score += 10;
-    if (a['awayTeamStatisticsUsable'] == true) score += 10;
+    if (a['homeTeamStatisticsUsable'] == true) score += 12;
+    if (a['awayTeamStatisticsUsable'] == true) score += 12;
     if (a['realXgAvailable'] == true) score += 5;
-    if (_int(a['homePlayedTotal']) == 0 || _int(a['awayPlayedTotal']) == 0) score -= 15;
+    // Nur noch ein kleiner Malus, und nur wenn wirklich beide Teams ganz
+    // ohne aktuelle Saison-Spielpraxis dastehen. homeTeamStatistics fällt
+    // in dem Fall bereits auf die Vorsaison zurück, daher muss dieser
+    // Malus keine komplette Datenlosigkeit mehr unterstellen.
+    if (_int(a['homePlayedTotal']) == 0 && _int(a['awayPlayedTotal']) == 0) {
+      score -= 5;
+    }
     return score.clamp(0, 100);
   }
 
