@@ -979,6 +979,7 @@ class PhoenixDatabase {
         WHERE sm.eligible = TRUE
           AND (@scan_run_id::BIGINT IS NULL OR sm.scan_run_id = @scan_run_id)
         ORDER BY sm.created_at ASC
+        LIMIT @limit
       '''),
       parameters: {'scan_run_id': scanRunId, 'limit': limit.clamp(1, 100)},
     );
