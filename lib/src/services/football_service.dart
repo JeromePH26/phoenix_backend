@@ -297,6 +297,7 @@ class FootballService {
       '/fixtures/events',
       '/fixtures/statistics',
       '/fixtures/lineups',
+      '/fixtures/headtohead',
       '/standings',
       '/odds',
       '/injuries',

@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import '../database/database.dart';
 import 'football_engine_input_service.dart';
 import 'football_market_selection_service.dart';
@@ -169,7 +171,11 @@ class FootballDailyPipelineService {
         published: _integer(publishResult['published']),
         phaseTwoId: phaseTwoId,
       );
-    } catch (error) {
+    } catch (error, stackTrace) {
+      stderr.writeln(
+        '[PHOENIX PIPELINE] Job $jobId fehlgeschlagen: $error',
+      );
+      stderr.writeln(stackTrace);
       await database.updateFootballDailyPipelineJob(
         jobId: jobId,
         status: 'failed',
@@ -303,8 +309,8 @@ class FootballDailyPipelineService {
     required int processed,
     required int published,
     int? phaseTwoId,
-  }) {
-    return database.updateFootballDailyPipelineJob(
+  }) async {
+    await database.updateFootballDailyPipelineJob(
       jobId: jobId,
       status: 'completed',
       currentStep: step,
@@ -312,6 +318,10 @@ class FootballDailyPipelineService {
       processed: processed,
       published: published,
       completed: true,
+    );
+    stdout.writeln(
+      '[PHOENIX PIPELINE] Job $jobId abgeschlossen: '
+      'step=$step processed=$processed published=$published',
     );
   }
 

@@ -384,6 +384,8 @@ class FootballPhaseOneScanService {
       'serie a',
       'ligue 1',
       'eredivisie',
+      'allsvenskan',
+      'veikkausliiga',
       'primeira liga',
       'super lig',
       'süper lig',
