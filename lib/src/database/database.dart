@@ -1456,6 +1456,7 @@ class PhoenixDatabase {
       '''),
       parameters: {
         'date': _dateOnly(date),
+        'limit': limit,
         'quality': minimumDataQuality,
         'simulations': simulations < 100000
             ? 100000
