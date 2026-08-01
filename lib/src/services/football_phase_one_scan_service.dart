@@ -13,6 +13,7 @@ class FootballPhaseOneScanService {
   Future<Map<String, Object?>> run(
     DateTime date, {
     bool includeDetails = false,
+    int? eligibleLimit,
   }) async {
     final scanRunId = await database.createFootballScanRun(date);
 
@@ -21,8 +22,15 @@ class FootballPhaseOneScanService {
       final eligible = <Map<String, Object?>>[];
       final excluded = <Map<String, Object?>>[];
       final reasons = <String, int>{};
+      final safeEligibleLimit = eligibleLimit?.clamp(1, 1000);
+      var processed = 0;
 
       for (final match in matches) {
+        if (safeEligibleLimit != null &&
+            eligible.length >= safeEligibleLimit) {
+          break;
+        }
+        processed++;
         final decision = await _decide(match);
 
         await database.savePhaseOneDecision(
@@ -57,7 +65,7 @@ class FootballPhaseOneScanService {
         'scanRunId': scanRunId,
         'phase': 1,
         'date': _day(date),
-        'total': matches.length,
+        'total': processed,
         'eligibleCount': eligible.length,
         'excludedCount': excluded.length,
         'exclusionReasons': reasons,
@@ -67,7 +75,7 @@ class FootballPhaseOneScanService {
 
       await database.completeFootballScanRun(
         scanRunId: scanRunId,
-        totalMatches: matches.length,
+        totalMatches: processed,
         eligibleMatches: eligible.length,
         excludedMatches: excluded.length,
         payload: {'exclusionReasons': reasons},
