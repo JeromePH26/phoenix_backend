@@ -1360,8 +1360,7 @@ class PhoenixDatabase {
     required Map<String, Object?> payload,
   }) async {
     final db = await connection();
-    final kickoff =
-        DateTime.tryParse(payload['kickoff']?.toString() ?? '') ??
+    final kickoff = DateTime.tryParse(payload['kickoff']?.toString() ?? '') ??
         DateTime.now().toUtc();
     await db.execute(
       Sql.named('''
@@ -1459,21 +1458,32 @@ class PhoenixDatabase {
   }) async {
     final db = await connection();
     final tip = _jsonMap(payload['phoenixTip']);
+    final selection = _jsonMap(payload['selection']);
+    final value = _jsonMap(selection['value']);
+    final rawMarketOdds = value['marketOdds'];
+    final marketOdds = rawMarketOdds is num
+        ? rawMarketOdds.toDouble()
+        : double.tryParse(rawMarketOdds?.toString() ?? '');
+    // A flat one-unit stake keeps ROI comparable. Predictions without a real
+    // bookmaker quote remain in history, but are deliberately not backtested.
+    final assignedUnits = marketOdds != null && marketOdds > 1 ? 1.0 : 0.0;
     final kickoff = DateTime.tryParse(payload['kickoff']?.toString() ?? '');
     final predictionDate =
         kickoff?.toUtc().toIso8601String().substring(0, 10) ??
-        DateTime.now().toUtc().toIso8601String().substring(0, 10);
+            DateTime.now().toUtc().toIso8601String().substring(0, 10);
     await db.execute(
       Sql.named('''
         INSERT INTO football_analysis_history (
           phase_two_scan_run_id, fixture_id, prediction_date, kickoff,
           model_version, market_key, market_label, model_probability,
-          fair_odds, data_quality, confidence, payload
+          fair_odds, market_odds, assigned_units, data_quality, confidence,
+          payload
         ) VALUES (
           @scan_run_id, @fixture_id, CAST(@prediction_date AS DATE),
           CAST(NULLIF(@kickoff, '') AS TIMESTAMPTZ), @model_version,
           @market_key, @market_label, @model_probability, @fair_odds,
-          @data_quality, @confidence, CAST(@payload AS JSONB)
+          @market_odds, @assigned_units, @data_quality, @confidence,
+          CAST(@payload AS JSONB)
         )
         ON CONFLICT (phase_two_scan_run_id, fixture_id) DO NOTHING
       '''),
@@ -1487,6 +1497,8 @@ class PhoenixDatabase {
         'market_label': tip['market']?.toString() ?? '',
         'model_probability': tip['probability'],
         'fair_odds': tip['fairOdds'],
+        'market_odds': marketOdds,
+        'assigned_units': assignedUnits,
         'data_quality': dataQuality,
         'confidence': confidence,
         'payload': jsonEncode(payload),
@@ -1544,23 +1556,93 @@ class PhoenixDatabase {
 
   Future<Map<String, Object?>> footballPerformanceSummary() async {
     final db = await connection();
-    final rows = await db.execute('''
-      SELECT COUNT(*) FILTER (WHERE result_status IN ('won','lost','push')) AS settled,
-             COUNT(*) FILTER (WHERE result_status = 'won') AS won,
-             COUNT(*) FILTER (WHERE result_status = 'lost') AS lost,
-             COUNT(*) FILTER (WHERE result_status = 'push') AS push
-      FROM football_analysis_history
-    ''');
-    final row = Map<String, Object?>.from(rows.first.toColumnMap());
-    int value(String key) => int.tryParse(row[key]?.toString() ?? '') ?? 0;
-    final settled = value('settled');
-    final won = value('won');
+    Map<String, Object?> metrics(Map<String, Object?> row) {
+      int integer(String key) => int.tryParse(row[key]?.toString() ?? '') ?? 0;
+      double number(String key) =>
+          double.tryParse(row[key]?.toString() ?? '') ?? 0;
+      final won = integer('won');
+      final lost = integer('lost');
+      final decided = won + lost;
+      final staked = number('staked_units');
+      final profit = number('profit_units');
+      return {
+        'totalAnalyses': integer('total'),
+        'pricedAnalyses': integer('priced'),
+        'settledAnalyses': integer('settled'),
+        'won': won,
+        'lost': lost,
+        'push': integer('push'),
+        'hitRatePercent': decided == 0 ? 0 : won / decided * 100,
+        'stakedUnits': staked,
+        'profitUnits': profit,
+        'roiPercent': staked == 0 ? 0 : profit / staked * 100,
+      };
+    }
+
+    Future<Map<String, Object?>> period(String condition) async {
+      final result = await db.execute('''
+        SELECT COUNT(*) AS total,
+               COUNT(*) FILTER (WHERE market_odds > 1) AS priced,
+               COUNT(*) FILTER (WHERE result_status IN ('won','lost','push')
+                 AND assigned_units > 0) AS settled,
+               COUNT(*) FILTER (WHERE result_status = 'won'
+                 AND assigned_units > 0) AS won,
+               COUNT(*) FILTER (WHERE result_status = 'lost'
+                 AND assigned_units > 0) AS lost,
+               COUNT(*) FILTER (WHERE result_status = 'push'
+                 AND assigned_units > 0) AS push,
+               COALESCE(SUM(assigned_units) FILTER (WHERE result_status IN
+                 ('won','lost','push') AND assigned_units > 0), 0) AS staked_units,
+               COALESCE(SUM(profit_units) FILTER (WHERE result_status IN
+                 ('won','lost','push') AND assigned_units > 0), 0) AS profit_units
+        FROM football_analysis_history
+        WHERE $condition
+      ''');
+      return metrics(Map<String, Object?>.from(result.first.toColumnMap()));
+    }
+
+    Future<List<Map<String, Object?>>> grouped(String expression) async {
+      final result = await db.execute('''
+        SELECT $expression AS name, COUNT(*) AS total,
+               COUNT(*) FILTER (WHERE market_odds > 1) AS priced,
+               COUNT(*) FILTER (WHERE result_status IN ('won','lost','push')
+                 AND assigned_units > 0) AS settled,
+               COUNT(*) FILTER (WHERE result_status = 'won'
+                 AND assigned_units > 0) AS won,
+               COUNT(*) FILTER (WHERE result_status = 'lost'
+                 AND assigned_units > 0) AS lost,
+               COUNT(*) FILTER (WHERE result_status = 'push'
+                 AND assigned_units > 0) AS push,
+               COALESCE(SUM(assigned_units) FILTER (WHERE result_status IN
+                 ('won','lost','push') AND assigned_units > 0), 0) AS staked_units,
+               COALESCE(SUM(profit_units) FILTER (WHERE result_status IN
+                 ('won','lost','push') AND assigned_units > 0), 0) AS profit_units
+        FROM football_analysis_history
+        GROUP BY 1
+        ORDER BY settled DESC, name
+      ''');
+      return result.map((row) {
+        final values = Map<String, Object?>.from(row.toColumnMap());
+        return {'name': values['name']?.toString() ?? '', ...metrics(values)};
+      }).toList();
+    }
+
+    final all = await period('TRUE');
     return {
-      'settledAnalyses': settled,
-      'won': won,
-      'lost': value('lost'),
-      'push': value('push'),
-      'hitRatePercent': settled == 0 ? 0 : won / settled * 100,
+      ...all,
+      'periods': {
+        'days7':
+            await period("prediction_date >= CURRENT_DATE - INTERVAL '6 days'"),
+        'days30': await period(
+            "prediction_date >= CURRENT_DATE - INTERVAL '29 days'"),
+        'all': all,
+      },
+      'byMarket':
+          await grouped("COALESCE(NULLIF(market_label, ''), 'Unbekannt')"),
+      'byLeague': await grouped(
+        "COALESCE(NULLIF(payload->>'league', ''), 'Unbekannt')",
+      ),
+      'stakingModel': 'flat_1_unit_when_market_odds_available',
     };
   }
 
