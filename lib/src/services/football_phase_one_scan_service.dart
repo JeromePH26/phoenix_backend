@@ -177,13 +177,12 @@ class FootballPhaseOneScanService {
       );
     }
 
-    // Fehlen nur Liga-Metadaten, darf das Spiel trotzdem in Phase 2.
-    // Dort entscheidet die tatsächliche Datenqualität über die Nutzung.
+    // Ohne eindeutige Liga-ID kann die feste Whitelist nicht geprüft werden.
     if (leagueId.isEmpty || leagueName.isEmpty || season <= 0) {
       return const _PhaseOneDecision(
-        eligible: true,
-        status: 'minimum_data',
-        reason: null,
+        eligible: false,
+        status: 'excluded',
+        reason: 'missing_whitelist_metadata',
       );
     }
 
@@ -217,18 +216,10 @@ class FootballPhaseOneScanService {
             knownTopCompetition ? 'provisional' : 'observation',
       );
 
-      if (knownTopCompetition) {
-        return const _PhaseOneDecision(
-          eligible: true,
-          status: 'provisional',
-          reason: null,
-        );
-      }
-
       return const _PhaseOneDecision(
         eligible: false,
         status: 'observation',
-        reason: 'unknown_league',
+        reason: 'not_whitelisted',
       );
     }
 
@@ -266,44 +257,10 @@ class FootballPhaseOneScanService {
       );
     }
 
-    final seasonStatus = _string(profile['season_status']);
-    if (seasonStatus == 'approved' || seasonStatus == 'provisional') {
-      return _PhaseOneDecision(
-        eligible: true,
-        status: seasonStatus,
-        reason: null,
-      );
-    }
-
-    if (seasonStatus == 'restricted') {
-      return const _PhaseOneDecision(
-        eligible: false,
-        status: 'restricted',
-        reason: 'restricted_coverage',
-      );
-    }
-
-    if (seasonStatus == 'blacklist') {
-      return const _PhaseOneDecision(
-        eligible: false,
-        status: 'blacklist',
-        reason: 'automatic_blacklist',
-      );
-    }
-
-    final historicalStatus = _string(profile['historical_status']);
-    if (historicalStatus == 'approved' || knownTopCompetition) {
-      return const _PhaseOneDecision(
-        eligible: true,
-        status: 'provisional',
-        reason: null,
-      );
-    }
-
     return const _PhaseOneDecision(
       eligible: false,
       status: 'observation',
-      reason: 'league_under_observation',
+      reason: 'not_whitelisted',
     );
   }
 
