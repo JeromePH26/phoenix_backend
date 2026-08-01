@@ -121,7 +121,7 @@ class ApiRoutes {
             request.url.queryParameters['minimumQuality'] ?? '',
           ) ??
           60;
-      final date = DateTime.now();
+      final date = _berlinNow();
 
       try {
         final matches = await _preparedFootballAnalyses(
@@ -873,4 +873,19 @@ router.post('/api/admin/football/engine/prepare', (Request request) async {
       '${value.year.toString().padLeft(4, '0')}-'
       '${value.month.toString().padLeft(2, '0')}-'
       '${value.day.toString().padLeft(2, '0')}';
+
+  DateTime _berlinNow() {
+    final utc = DateTime.now().toUtc();
+    final marchSwitch = _lastSundayUtc(utc.year, DateTime.march);
+    final octoberSwitch = _lastSundayUtc(utc.year, DateTime.october);
+    final summerTime =
+        !utc.isBefore(marchSwitch) && utc.isBefore(octoberSwitch);
+    return utc.add(Duration(hours: summerTime ? 2 : 1));
+  }
+
+  DateTime _lastSundayUtc(int year, int month) {
+    final lastDay = DateTime.utc(year, month + 1, 0);
+    final sunday = lastDay.subtract(Duration(days: lastDay.weekday % 7));
+    return DateTime.utc(year, month, sunday.day, 1);
+  }
 }
