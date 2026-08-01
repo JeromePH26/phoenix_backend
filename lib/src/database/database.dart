@@ -310,7 +310,7 @@ class PhoenixDatabase {
     ''');
 
     // PHÖNIX feste Wettbewerbs-Whitelist:
-    // 13 nationale Ligen, 12 nationale Pokale und 3 UEFA-Wettbewerbe.
+    // 14 nationale Ligen, 11 nationale Pokale und 3 UEFA-Wettbewerbe.
     // Bereits vorhandene Datensätze werden auf whitelist aktualisiert.
     await db.execute(r'''
       INSERT INTO football_leagues (
@@ -337,6 +337,7 @@ class PhoenixDatabase {
         ('140', 'La Liga',                     'Spain',       'men', 1, 'whitelist', 'approved', NOW()),
         ('144', 'Jupiler Pro League',          'Belgium',     'men', 1, 'whitelist', 'approved', NOW()),
         ('244', 'Veikkausliiga',               'Finland',     'men', 1, 'whitelist', 'approved', NOW()),
+        ('207', 'Super League',                 'Switzerland', 'men', 1, 'whitelist', 'approved', NOW()),
 
         ('45',  'FA Cup',                      'England',     'men', NULL, 'whitelist', 'approved', NOW()),
         ('48',  'EFL Cup',                     'England',     'men', NULL, 'whitelist', 'approved', NOW()),
@@ -345,7 +346,6 @@ class PhoenixDatabase {
         ('90',  'KNVB Beker',                  'Netherlands', 'men', NULL, 'whitelist', 'approved', NOW()),
         ('96',  'Taça de Portugal',            'Portugal',    'men', NULL, 'whitelist', 'approved', NOW()),
         ('104', 'NM Cupen',                    'Norway',      'men', NULL, 'whitelist', 'approved', NOW()),
-        ('116', 'Svenska Cupen',               'Sweden',      'men', NULL, 'whitelist', 'approved', NOW()),
         ('137', 'Coppa Italia',                'Italy',       'men', NULL, 'whitelist', 'approved', NOW()),
         ('143', 'Copa del Rey',                'Spain',       'men', NULL, 'whitelist', 'approved', NOW()),
         ('147', 'Belgian Cup',                 'Belgium',     'men', NULL, 'whitelist', 'approved', NOW()),
@@ -361,6 +361,26 @@ class PhoenixDatabase {
         competition_level = EXCLUDED.competition_level,
         manual_status = 'whitelist',
         historical_status = 'approved',
+        updated_at = NOW()
+    ''');
+
+    // API-Football 116 ist die belarussische Premier League. Eine ältere
+    // Zuordnung als Svenska Cupen hatte sie versehentlich freigeschaltet.
+    await db.execute(r'''
+      INSERT INTO football_leagues (
+        league_id, league_name, country, gender, competition_level,
+        manual_status, historical_status, updated_at
+      ) VALUES (
+        '116', 'Premier League', 'Belarus', 'men', 1,
+        'blacklist', 'blacklist', NOW()
+      )
+      ON CONFLICT (league_id) DO UPDATE SET
+        league_name = EXCLUDED.league_name,
+        country = EXCLUDED.country,
+        gender = EXCLUDED.gender,
+        competition_level = EXCLUDED.competition_level,
+        manual_status = 'blacklist',
+        historical_status = 'blacklist',
         updated_at = NOW()
     ''');
 
