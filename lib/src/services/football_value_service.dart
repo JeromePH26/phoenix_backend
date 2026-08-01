@@ -78,6 +78,18 @@ class FootballValueService {
       final marketOdds = oddsSummary.best;
       final marketReferenceOdds = oddsSummary.median;
 
+      // Für 1X2 wird der Market-Guard gegen eine entvigte Konsens-
+      // Wahrscheinlichkeit geprüft statt gegen die rohe Medianquote: die
+      // rohe Quote hat die Buchmacher-Marge (Overround) noch eingepreist,
+      // wodurch ein Teil der erlaubten Abweichung von der Marge statt von
+      // einer echten Modell-vs-Markt-Differenz verzehrt wird. homeWin/draw/
+      // awayWin kommen aus denselben, schon geladenen Buchmacherquoten -
+      // kein zusätzlicher API-Call nötig.
+      final deviggedProbability = _devigged1X2Probability(
+        rawOdds: rawOdds,
+        marketKey: marketKey,
+      );
+
       final hasRequiredData = fairOdds != null &&
           fairOdds > 1 &&
           marketOdds != null &&
@@ -86,16 +98,22 @@ class FootballValueService {
           marketReferenceOdds > 1;
 
       final valuePercent = hasRequiredData
-          ? _round(((marketOdds! / fairOdds!) - 1) * 100)
+          ? _round(((marketOdds / fairOdds) - 1) * 100)
           : null;
 
-      final fairMarketDeviationPercent = hasRequiredData
-          ? _round(
-              ((marketReferenceOdds! - fairOdds!).abs() /
-                      marketReferenceOdds) *
-                  100,
-            )
-          : null;
+      final fairMarketDeviationPercent = !hasRequiredData
+          ? null
+          : deviggedProbability != null
+              ? _round(
+                  (((1 / fairOdds) - deviggedProbability).abs() /
+                          deviggedProbability) *
+                      100,
+                )
+              : _round(
+                  ((marketReferenceOdds - fairOdds).abs() /
+                          marketReferenceOdds) *
+                      100,
+                );
 
       final minimumOddsPassed =
           marketOdds != null && marketOdds >= minimumMarketOdds;
@@ -121,6 +139,7 @@ class FootballValueService {
           'marketOdds': marketOdds,
           'marketReferenceOdds': marketReferenceOdds,
           'bookmakerQuotesFound': oddsSummary.count,
+          'deviggedMarketProbability': deviggedProbability,
           'fairOdds': fairOdds,
           'minimumMarketOdds': minimumMarketOdds,
           'minimumValuePercent': minimumValuePercent,
@@ -180,6 +199,35 @@ class FootballValueService {
       modelVersion: modelVersion,
       selection: selection,
     );
+  }
+
+  /// Entvigte 1X2-Konsenswahrscheinlichkeit für [marketKey] (nur homeWin/
+  /// draw/awayWin - andere Märkte liefern weiterhin null und fallen auf den
+  /// bisherigen rohquoten-basierten Vergleich zurück). Nimmt den Median je
+  /// Ausgang aus denselben, schon geladenen Buchmacherquoten, rechnet in
+  /// Wahrscheinlichkeiten um und normalisiert sie auf 100 %, damit die
+  /// Buchmacher-Marge nicht mehr in den Market-Guard-Vergleich einfließt.
+  double? _devigged1X2Probability({
+    required List<Map<String, Object?>> rawOdds,
+    required String marketKey,
+  }) {
+    const outcomes = ['homeWin', 'draw', 'awayWin'];
+    if (!outcomes.contains(marketKey)) return null;
+
+    final rawProbabilities = <String, double>{};
+    for (final outcome in outcomes) {
+      final median = _oddsForMarket(rawOdds, outcome).median;
+      if (median == null || median <= 1) return null;
+      rawProbabilities[outcome] = 1 / median;
+    }
+
+    final overround = rawProbabilities.values.fold<double>(
+      0,
+      (sum, value) => sum + value,
+    );
+    if (overround <= 0) return null;
+
+    return rawProbabilities[marketKey]! / overround;
   }
 
   _OddsSummary _oddsForMarket(
