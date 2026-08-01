@@ -32,7 +32,10 @@ class FootballDailyPipelineService {
     int simulations = 100000,
   }) async {
     try {
-      final effectiveLimit = limit ?? 1000000;
+      // Kein fachliches 20er-Limit mehr: verarbeitet alle Spiele der festen
+      // Liga-Whitelist. 1000 ist nur ein technischer Schutz gegen fehlerhafte
+      // Providerantworten und liegt weit über der Whitelist-Tagesmenge.
+      const effectiveLimit = 1000;
       final safeQuality = minimumDataQuality.clamp(0, 100);
       final safeSimulations = simulations.clamp(1000, 100000);
 
