@@ -40,7 +40,10 @@ class FootballDailyPipelineService {
       final phaseOne = await FootballPhaseOneScanService(
         database: database,
         football: football,
-      ).run(date);
+      ).run(
+        date,
+        eligibleLimit: effectiveLimit,
+      );
       final phaseOneId = _integer(phaseOne['scanRunId']);
 
       await database.updateFootballDailyPipelineJob(
