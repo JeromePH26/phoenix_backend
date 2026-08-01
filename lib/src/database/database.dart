@@ -115,6 +115,39 @@ class PhoenixDatabase {
       )
     ''');
 
+    // Unveränderliche Prognose-Snapshots für die spätere Erfolgsanalyse.
+    // `analyses` liefert weiterhin nur den aktuellsten Stand an die App.
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS football_analysis_history (
+        phase_two_scan_run_id BIGINT NOT NULL,
+        fixture_id TEXT NOT NULL,
+        prediction_date DATE NOT NULL,
+        kickoff TIMESTAMPTZ,
+        model_version TEXT NOT NULL,
+        market_key TEXT NOT NULL DEFAULT '',
+        market_label TEXT NOT NULL DEFAULT '',
+        model_probability DOUBLE PRECISION,
+        fair_odds DOUBLE PRECISION,
+        market_odds DOUBLE PRECISION,
+        assigned_units DOUBLE PRECISION NOT NULL DEFAULT 0,
+        data_quality INTEGER NOT NULL,
+        confidence INTEGER NOT NULL,
+        result_status TEXT NOT NULL DEFAULT 'pending',
+        home_score INTEGER,
+        away_score INTEGER,
+        profit_units DOUBLE PRECISION,
+        settled_at TIMESTAMPTZ,
+        payload JSONB NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (phase_two_scan_run_id, fixture_id)
+      )
+    ''');
+
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_football_analysis_history_date
+      ON football_analysis_history (prediction_date, result_status)
+    ''');
+
     await db.execute('''
       CREATE TABLE IF NOT EXISTS daily_tips (
         tip_date DATE NOT NULL,
@@ -125,7 +158,6 @@ class PhoenixDatabase {
         PRIMARY KEY (tip_date, sport)
       )
     ''');
-
 
     await db.execute('''
       CREATE TABLE IF NOT EXISTS football_phase_two_results (
@@ -237,7 +269,6 @@ class PhoenixDatabase {
       ON football_daily_pipeline_jobs (scan_date, id DESC)
     ''');
 
-
     // PHÖNIX-Fußballanalysen laufen verbindlich mit 100.000 Simulationen.
     // Dadurch erhalten auch bereits bestehende Railway-Datenbanken den
     // aktuellen Standardwert.
@@ -277,7 +308,6 @@ class PhoenixDatabase {
         )
       )
     ''');
-
 
     // PHÖNIX feste Wettbewerbs-Whitelist:
     // 13 nationale Ligen, 12 nationale Pokale und 3 UEFA-Wettbewerbe.
@@ -469,10 +499,7 @@ class PhoenixDatabase {
         WHERE l.league_id = @league_id
         LIMIT 1
       '''),
-      parameters: {
-        'league_id': leagueId,
-        'season': season,
-      },
+      parameters: {'league_id': leagueId, 'season': season},
     );
 
     if (result.isEmpty) return null;
@@ -675,7 +702,6 @@ class PhoenixDatabase {
     );
   }
 
-
   Future<List<Map<String, Object?>>> listFootballLeagueProfiles({
     int limit = 200,
   }) async {
@@ -739,8 +765,7 @@ class PhoenixDatabase {
     );
 
     return {
-      for (final row in result)
-        row[0].toString(): row[1]?.toString() ?? '',
+      for (final row in result) row[0].toString(): row[1]?.toString() ?? '',
     };
   }
 
@@ -749,9 +774,7 @@ class PhoenixDatabase {
     required String manualStatus,
   }) async {
     if (!const {'auto', 'whitelist', 'blacklist'}.contains(manualStatus)) {
-      throw ArgumentError(
-        'Status muss auto, whitelist oder blacklist sein.',
-      );
+      throw ArgumentError('Status muss auto, whitelist oder blacklist sein.');
     }
 
     final db = await connection();
@@ -762,10 +785,7 @@ class PhoenixDatabase {
         WHERE league_id = @league_id
         RETURNING league_id
       '''),
-      parameters: {
-        'league_id': leagueId,
-        'manual_status': manualStatus,
-      },
+      parameters: {'league_id': leagueId, 'manual_status': manualStatus},
     );
 
     return result.isNotEmpty;
@@ -825,45 +845,45 @@ class PhoenixDatabase {
           ) > 0
         ORDER BY a.match_id, a.analyzed_at DESC
       '''),
-      parameters: {
-        'day': day,
-        'minimum_quality': safeQuality,
-      },
+      parameters: {'day': day, 'minimum_quality': safeQuality},
     );
 
-    return result.map((row) {
-      final values = Map<String, Object?>.from(row.toColumnMap());
-      final rawMatch = _jsonMap(values.remove('raw_json'));
-      final analysis = _normalizePreparedAnalysis(
-        _jsonMap(values.remove('analysis_payload')),
-      );
+    return result
+        .map((row) {
+          final values = Map<String, Object?>.from(row.toColumnMap());
+          final rawMatch = _jsonMap(values.remove('raw_json'));
+          final analysis = _normalizePreparedAnalysis(
+            _jsonMap(values.remove('analysis_payload')),
+          );
 
-      return <String, Object?>{
-        ...rawMatch,
-        'id': values['id']?.toString() ?? '',
-        'kickoff': values['kickoff_utc']?.toString() ?? '',
-        'status': values['status']?.toString() ?? '',
-        'leagueId': values['league_id']?.toString() ?? '',
-        'league': values['league_name']?.toString() ?? '',
-        'country': values['country']?.toString() ?? '',
-        'homeTeamId': values['home_team_id']?.toString() ?? '',
-        'homeTeam': values['home_team_name']?.toString() ?? '',
-        'homeLogo': values['home_logo']?.toString() ?? '',
-        'awayTeamId': values['away_team_id']?.toString() ?? '',
-        'awayTeam': values['away_team_name']?.toString() ?? '',
-        'awayLogo': values['away_logo']?.toString() ?? '',
-        'homeGoals': values['home_goals'],
-        'awayGoals': values['away_goals'],
-        'analysis': {
-          ...analysis,
-          'modelVersion': values['model_version']?.toString() ?? '',
-          'dataQuality': values['data_quality'],
-          'confidence': values['confidence'],
-          'recommendation': values['recommendation'],
-          'analyzedAt': values['analyzed_at']?.toString() ?? '',
-        },
-      };
-    }).where((row) => (row['id']?.toString() ?? '').isNotEmpty).toList();
+          return <String, Object?>{
+            ...rawMatch,
+            'id': values['id']?.toString() ?? '',
+            'kickoff': values['kickoff_utc']?.toString() ?? '',
+            'status': values['status']?.toString() ?? '',
+            'leagueId': values['league_id']?.toString() ?? '',
+            'league': values['league_name']?.toString() ?? '',
+            'country': values['country']?.toString() ?? '',
+            'homeTeamId': values['home_team_id']?.toString() ?? '',
+            'homeTeam': values['home_team_name']?.toString() ?? '',
+            'homeLogo': values['home_logo']?.toString() ?? '',
+            'awayTeamId': values['away_team_id']?.toString() ?? '',
+            'awayTeam': values['away_team_name']?.toString() ?? '',
+            'awayLogo': values['away_logo']?.toString() ?? '',
+            'homeGoals': values['home_goals'],
+            'awayGoals': values['away_goals'],
+            'analysis': {
+              ...analysis,
+              'modelVersion': values['model_version']?.toString() ?? '',
+              'dataQuality': values['data_quality'],
+              'confidence': values['confidence'],
+              'recommendation': values['recommendation'],
+              'analyzedAt': values['analyzed_at']?.toString() ?? '',
+            },
+          };
+        })
+        .where((row) => (row['id']?.toString() ?? '').isNotEmpty)
+        .toList();
   }
 
   Map<String, Object?> _normalizePreparedAnalysis(
@@ -875,9 +895,7 @@ class PhoenixDatabase {
     final probabilities = _jsonMap(normalized['probabilities']);
 
     if (probabilities.isNotEmpty) {
-      final result = <String, Object?>{
-        ...probabilities,
-      };
+      final result = <String, Object?>{...probabilities};
 
       for (final key in const <String>[
         'home',
@@ -951,7 +969,6 @@ class PhoenixDatabase {
 
     return <String, Object?>{};
   }
-
 
   Future<int> createFootballPhaseTwoScanRun(DateTime date) async {
     final db = await connection();
@@ -1040,9 +1057,7 @@ class PhoenixDatabase {
           AND analysis_allowed = TRUE
         ORDER BY data_quality DESC, fixture_id
       '''),
-      parameters: {
-        'scan_run_id': phaseTwoScanRunId,
-      },
+      parameters: {'scan_run_id': phaseTwoScanRunId},
     );
     return result
         .map((row) => Map<String, Object?>.from(row.toColumnMap()))
@@ -1149,9 +1164,7 @@ class PhoenixDatabase {
           AND p.analysis_allowed = TRUE
         ORDER BY p.data_quality DESC, p.fixture_id
       '''),
-      parameters: {
-        'scan_run_id': phaseTwoScanRunId,
-      },
+      parameters: {'scan_run_id': phaseTwoScanRunId},
     );
     return result
         .map((row) => Map<String, Object?>.from(row.toColumnMap()))
@@ -1207,9 +1220,7 @@ class PhoenixDatabase {
         WHERE phase_two_scan_run_id = @scan_run_id
         ORDER BY data_quality DESC, fixture_id
       '''),
-      parameters: {
-        'scan_run_id': phaseTwoScanRunId,
-      },
+      parameters: {'scan_run_id': phaseTwoScanRunId},
     );
     return result
         .map((row) => Map<String, Object?>.from(row.toColumnMap()))
@@ -1260,9 +1271,7 @@ class PhoenixDatabase {
         WHERE phase_two_scan_run_id = @scan_run_id
         ORDER BY fixture_id
       '''),
-      parameters: {
-        'scan_run_id': phaseTwoScanRunId,
-      },
+      parameters: {'scan_run_id': phaseTwoScanRunId},
     );
     return result
         .map((row) => Map<String, Object?>.from(row.toColumnMap()))
@@ -1309,9 +1318,7 @@ class PhoenixDatabase {
         WHERE phase_two_scan_run_id = @scan_run_id
         ORDER BY fixture_id
       '''),
-      parameters: {
-        'scan_run_id': phaseTwoScanRunId,
-      },
+      parameters: {'scan_run_id': phaseTwoScanRunId},
     );
     return result
         .map((row) => Map<String, Object?>.from(row.toColumnMap()))
@@ -1353,7 +1360,8 @@ class PhoenixDatabase {
     required Map<String, Object?> payload,
   }) async {
     final db = await connection();
-    final kickoff = DateTime.tryParse(payload['kickoff']?.toString() ?? '') ??
+    final kickoff =
+        DateTime.tryParse(payload['kickoff']?.toString() ?? '') ??
         DateTime.now().toUtc();
     await db.execute(
       Sql.named('''
@@ -1439,6 +1447,121 @@ class PhoenixDatabase {
         'payload': jsonEncode(payload),
       },
     );
+  }
+
+  Future<void> saveFootballAnalysisHistory({
+    required int phaseTwoScanRunId,
+    required String fixtureId,
+    required String modelVersion,
+    required int dataQuality,
+    required int confidence,
+    required Map<String, Object?> payload,
+  }) async {
+    final db = await connection();
+    final tip = _jsonMap(payload['phoenixTip']);
+    final kickoff = DateTime.tryParse(payload['kickoff']?.toString() ?? '');
+    final predictionDate =
+        kickoff?.toUtc().toIso8601String().substring(0, 10) ??
+        DateTime.now().toUtc().toIso8601String().substring(0, 10);
+    await db.execute(
+      Sql.named('''
+        INSERT INTO football_analysis_history (
+          phase_two_scan_run_id, fixture_id, prediction_date, kickoff,
+          model_version, market_key, market_label, model_probability,
+          fair_odds, data_quality, confidence, payload
+        ) VALUES (
+          @scan_run_id, @fixture_id, CAST(@prediction_date AS DATE),
+          CAST(NULLIF(@kickoff, '') AS TIMESTAMPTZ), @model_version,
+          @market_key, @market_label, @model_probability, @fair_odds,
+          @data_quality, @confidence, CAST(@payload AS JSONB)
+        )
+        ON CONFLICT (phase_two_scan_run_id, fixture_id) DO NOTHING
+      '''),
+      parameters: {
+        'scan_run_id': phaseTwoScanRunId,
+        'fixture_id': fixtureId,
+        'prediction_date': predictionDate,
+        'kickoff': kickoff?.toUtc().toIso8601String() ?? '',
+        'model_version': modelVersion,
+        'market_key': tip['marketKey']?.toString() ?? '',
+        'market_label': tip['market']?.toString() ?? '',
+        'model_probability': tip['probability'],
+        'fair_odds': tip['fairOdds'],
+        'data_quality': dataQuality,
+        'confidence': confidence,
+        'payload': jsonEncode(payload),
+      },
+    );
+  }
+
+  Future<List<Map<String, Object?>>> pendingFootballTips({
+    DateTime? date,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT phase_two_scan_run_id, fixture_id, market_key, market_label,
+               market_odds, assigned_units, payload
+        FROM football_analysis_history
+        WHERE result_status = 'pending'
+          AND (@prediction_date IS NULL OR prediction_date = CAST(@prediction_date AS DATE))
+        ORDER BY kickoff
+      '''),
+      parameters: {'prediction_date': date?.toIso8601String().substring(0, 10)},
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  Future<void> settleFootballTip({
+    required int phaseTwoScanRunId,
+    required String fixtureId,
+    required int homeScore,
+    required int awayScore,
+    required String resultStatus,
+    required double profitUnits,
+  }) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        UPDATE football_analysis_history SET
+          home_score = @home_score, away_score = @away_score,
+          result_status = @result_status, profit_units = @profit_units,
+          settled_at = NOW()
+        WHERE phase_two_scan_run_id = @scan_run_id AND fixture_id = @fixture_id
+      '''),
+      parameters: {
+        'scan_run_id': phaseTwoScanRunId,
+        'fixture_id': fixtureId,
+        'home_score': homeScore,
+        'away_score': awayScore,
+        'result_status': resultStatus,
+        'profit_units': profitUnits,
+      },
+    );
+  }
+
+  Future<Map<String, Object?>> footballPerformanceSummary() async {
+    final db = await connection();
+    final rows = await db.execute('''
+      SELECT COUNT(*) FILTER (WHERE result_status IN ('won','lost','push')) AS settled,
+             COUNT(*) FILTER (WHERE result_status = 'won') AS won,
+             COUNT(*) FILTER (WHERE result_status = 'lost') AS lost,
+             COUNT(*) FILTER (WHERE result_status = 'push') AS push
+      FROM football_analysis_history
+    ''');
+    final row = Map<String, Object?>.from(rows.first.toColumnMap());
+    int value(String key) => int.tryParse(row[key]?.toString() ?? '') ?? 0;
+    final settled = value('settled');
+    final won = value('won');
+    return {
+      'settledAnalyses': settled,
+      'won': won,
+      'lost': value('lost'),
+      'push': value('push'),
+      'hitRatePercent': settled == 0 ? 0 : won / settled * 100,
+    };
   }
 
   Future<int> createFootballDailyPipelineJob({

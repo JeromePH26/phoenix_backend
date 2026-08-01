@@ -43,10 +43,7 @@ class FootballDailyPipelineService {
       final phaseOne = await FootballPhaseOneScanService(
         database: database,
         football: football,
-      ).run(
-        date,
-        eligibleLimit: effectiveLimit,
-      );
+      ).run(date, eligibleLimit: effectiveLimit);
       final phaseOneId = _integer(phaseOne['scanRunId']);
 
       await database.updateFootballDailyPipelineJob(
@@ -115,11 +112,9 @@ class FootballDailyPipelineService {
       // fällt ohne Kontext automatisch auf die statistische Basis zurück, die
       // Pipeline bleibt also voll funktionsfähig.
       await _step(jobId, 'engine_input');
-      final engineResult =
-          await FootballEngineInputService(database: database).prepare(
-        phaseTwoScanRunId: phaseTwoId,
-        limit: effectiveLimit,
-      );
+      final engineResult = await FootballEngineInputService(
+        database: database,
+      ).prepare(phaseTwoScanRunId: phaseTwoId, limit: effectiveLimit);
 
       final preparedInputs = _integer(engineResult['prepared']);
       if (preparedInputs <= 0) {
@@ -129,10 +124,10 @@ class FootballDailyPipelineService {
       await _step(jobId, 'simulation');
       final simulationResult =
           await FootballSimulationService(database: database).run(
-        phaseTwoScanRunId: phaseTwoId,
-        limit: effectiveLimit,
-        simulations: safeSimulations,
-      );
+            phaseTwoScanRunId: phaseTwoId,
+            limit: effectiveLimit,
+            simulations: safeSimulations,
+          );
 
       final simulated = _integer(simulationResult['processed']);
       if (simulated <= 0) {
@@ -142,10 +137,10 @@ class FootballDailyPipelineService {
       await _step(jobId, 'market_selection');
       final marketResult =
           await FootballMarketSelectionService(database: database).select(
-        phaseTwoScanRunId: phaseTwoId,
-        limit: effectiveLimit,
-        minimumProbability: 60,
-      );
+            phaseTwoScanRunId: phaseTwoId,
+            limit: effectiveLimit,
+            minimumProbability: 60,
+          );
 
       final selected = _integer(marketResult['processed']);
       if (selected <= 0) {
@@ -181,9 +176,7 @@ class FootballDailyPipelineService {
         phaseTwoId: phaseTwoId,
       );
     } catch (error, stackTrace) {
-      stderr.writeln(
-        '[PHOENIX PIPELINE] Job $jobId fehlgeschlagen: $error',
-      );
+      stderr.writeln('[PHOENIX PIPELINE] Job $jobId fehlgeschlagen: $error');
       stderr.writeln(stackTrace);
       await database.updateFootballDailyPipelineJob(
         jobId: jobId,
@@ -228,8 +221,10 @@ class FootballDailyPipelineService {
       final contextConfidenceDelta = aiContext['applied'] == true
           ? _integer(aiContext['confidenceDelta']).clamp(-10, 5)
           : 0;
-      final confidence =
-          (baseConfidence + contextConfidenceDelta).clamp(0, 100);
+      final confidence = (baseConfidence + contextConfidenceDelta).clamp(
+        0,
+        100,
+      );
 
       final recommendation = _string(phoenixTip['market']);
 
@@ -298,18 +293,23 @@ class FootballDailyPipelineService {
         modelVersion: publishedModelVersion,
         dataQuality: dataQuality,
         confidence: confidence,
-        recommendation:
-            recommendation.isEmpty ? null : recommendation,
+        recommendation: recommendation.isEmpty ? null : recommendation,
+        payload: analysisPayload,
+      );
+
+      await database.saveFootballAnalysisHistory(
+        phaseTwoScanRunId: phaseTwoScanRunId,
+        fixtureId: fixtureId,
+        modelVersion: publishedModelVersion,
+        dataQuality: dataQuality,
+        confidence: confidence,
         payload: analysisPayload,
       );
 
       published++;
     }
 
-    return {
-      'processed': processed,
-      'published': published,
-    };
+    return {'processed': processed, 'published': published};
   }
 
   Future<void> _finish({
@@ -345,9 +345,7 @@ class FootballDailyPipelineService {
   double _probability(Object? value) {
     final number = _number(value) ?? 0;
     final decimal = number > 1 ? number / 100 : number;
-    return double.parse(
-      decimal.clamp(0.0, 1.0).toStringAsFixed(6),
-    );
+    return double.parse(decimal.clamp(0.0, 1.0).toStringAsFixed(6));
   }
 
   double? _number(Object? value) {
