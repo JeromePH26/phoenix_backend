@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:shelf/shelf.dart';
 import 'package:shelf_router/shelf_router.dart';
@@ -18,6 +19,7 @@ import '../services/football_result_settlement_service.dart';
 import '../services/football_daily_pipeline_service.dart';
 import '../services/football_service.dart';
 import '../services/football_asset_service.dart';
+import '../services/football_news_service.dart';
 import '../services/tennis_service.dart';
 
 class ApiRoutes {
@@ -26,12 +28,14 @@ class ApiRoutes {
     required this.database,
     required this.football,
     required this.tennis,
+    required this.news,
   });
 
   final AppConfig config;
   final PhoenixDatabase database;
   final FootballService football;
   final TennisService tennis;
+  final FootballNewsService news;
 
   Router get router {
     final router = Router();
@@ -117,10 +121,33 @@ class ApiRoutes {
       }
     });
 
+    router.get('/api/news', (Request request) async {
+      await news.refreshIfStale();
+      final query = request.url.queryParameters;
+      final articles = await database.newsArticles(
+        teamId: query['teamId'],
+        leagueId: query['leagueId'],
+        category: query['category'],
+        importantOnly: query['important'] == 'true',
+        hours: int.tryParse(query['hours'] ?? '') ?? 168,
+        limit: int.tryParse(query['limit'] ?? '') ?? 80,
+      );
+      return jsonResponse({
+        'count': articles.length,
+        'articles': articles,
+        'filters': {
+          'teamId': query['teamId'],
+          'leagueId': query['leagueId'],
+          'category': query['category'],
+          'important': query['important'] == 'true',
+        },
+      });
+    });
+
     router.get('/api/football/analyses/today', (Request request) async {
       final quality =
           int.tryParse(request.url.queryParameters['minimumQuality'] ?? '') ??
-          60;
+              60;
       final date = _berlinNow();
 
       try {
@@ -156,7 +183,7 @@ class ApiRoutes {
 
       final quality =
           int.tryParse(request.url.queryParameters['minimumQuality'] ?? '') ??
-          50;
+              50;
 
       try {
         final matches = await _preparedFootballAnalyses(
@@ -196,15 +223,144 @@ class ApiRoutes {
       }
     });
 
+    router.post('/api/push/devices', (Request request) async {
+      try {
+        final body = jsonDecode(await request.readAsString());
+        if (body is! Map<String, dynamic>) {
+          return jsonResponse({'error': 'Ungültiger JSON-Body.'},
+              statusCode: 400);
+        }
+        final installationId = body['installationId']?.toString().trim() ?? '';
+        final pushToken = body['pushToken']?.toString().trim() ?? '';
+        final platform =
+            body['platform']?.toString().trim().toLowerCase() ?? '';
+        if (installationId.length < 16 ||
+            pushToken.length < 20 ||
+            !const {'android', 'ios'}.contains(platform)) {
+          return jsonResponse({'error': 'Gerätedaten sind unvollständig.'},
+              statusCode: 400);
+        }
+        await database.registerPushDevice(
+          installationId: installationId,
+          pushToken: pushToken,
+          platform: platform,
+          locale: body['locale']?.toString().trim() ?? 'de',
+        );
+        return jsonResponse({'status': 'registered'});
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 400);
+      }
+    });
+
+    router.get('/api/push/favorites', (Request request) async {
+      final installationId =
+          request.headers['x-phoenix-installation-id']?.trim() ?? '';
+      if (installationId.length < 16) {
+        return jsonResponse({'error': 'Installation-ID fehlt.'},
+            statusCode: 401);
+      }
+      final fixtureIds = await database.footballFavorites(installationId);
+      return jsonResponse({'fixtureIds': fixtureIds});
+    });
+
+    router.put('/api/push/favorites/<fixtureId|[0-9]+>', (
+      Request request,
+      String fixtureId,
+    ) async {
+      final installationId =
+          request.headers['x-phoenix-installation-id']?.trim() ?? '';
+      if (installationId.length < 16) {
+        return jsonResponse({'error': 'Installation-ID fehlt.'},
+            statusCode: 401);
+      }
+      await database.setFootballFavorite(
+        installationId: installationId,
+        fixtureId: fixtureId,
+        favorite: true,
+      );
+      return jsonResponse({'status': 'favorite', 'fixtureId': fixtureId});
+    });
+
+    router.delete('/api/push/favorites/<fixtureId|[0-9]+>', (
+      Request request,
+      String fixtureId,
+    ) async {
+      final installationId =
+          request.headers['x-phoenix-installation-id']?.trim() ?? '';
+      if (installationId.length < 16) {
+        return jsonResponse({'error': 'Installation-ID fehlt.'},
+            statusCode: 401);
+      }
+      await database.setFootballFavorite(
+        installationId: installationId,
+        fixtureId: fixtureId,
+        favorite: false,
+      );
+      return jsonResponse({'status': 'removed', 'fixtureId': fixtureId});
+    });
+
+    router.put('/api/push/favorite-<type|teams|leagues>/<entityId>', (
+      Request request,
+      String type,
+      String entityId,
+    ) async {
+      final installationId =
+          request.headers['x-phoenix-installation-id']?.trim() ?? '';
+      if (installationId.length < 16 || entityId.trim().isEmpty) {
+        return jsonResponse({'error': 'Gerätedaten fehlen.'}, statusCode: 401);
+      }
+      await database.setFavoriteEntity(
+        installationId: installationId,
+        entityType: type == 'teams' ? 'team' : 'league',
+        entityId: entityId.trim(),
+        favorite: true,
+      );
+      return jsonResponse({'status': 'favorite'});
+    });
+
+    router.delete('/api/push/favorite-<type|teams|leagues>/<entityId>', (
+      Request request,
+      String type,
+      String entityId,
+    ) async {
+      final installationId =
+          request.headers['x-phoenix-installation-id']?.trim() ?? '';
+      if (installationId.length < 16 || entityId.trim().isEmpty) {
+        return jsonResponse({'error': 'Gerätedaten fehlen.'}, statusCode: 401);
+      }
+      await database.setFavoriteEntity(
+        installationId: installationId,
+        entityType: type == 'teams' ? 'team' : 'league',
+        entityId: entityId.trim(),
+        favorite: false,
+      );
+      return jsonResponse({'status': 'removed'});
+    });
+
+    router.put('/api/push/settings/news', (Request request) async {
+      final installationId =
+          request.headers['x-phoenix-installation-id']?.trim() ?? '';
+      if (installationId.length < 16) {
+        return jsonResponse({'error': 'Installation-ID fehlt.'},
+            statusCode: 401);
+      }
+      final body = jsonDecode(await request.readAsString());
+      final enabled = body is Map && body['enabled'] == true;
+      await database.setNewsNotifications(
+        installationId: installationId,
+        enabled: enabled,
+      );
+      return jsonResponse({'newsEnabled': enabled});
+    });
+
     router.post('/api/admin/football/scan/phase1', (Request request) async {
       if (!_isAdmin(request)) {
         return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
       }
 
       final dateValue = request.url.queryParameters['date'];
-      final date = dateValue == null
-          ? DateTime.now()
-          : DateTime.tryParse(dateValue);
+      final date =
+          dateValue == null ? DateTime.now() : DateTime.tryParse(dateValue);
 
       if (date == null) {
         return jsonResponse({
@@ -233,8 +389,7 @@ class ApiRoutes {
       );
       final limit =
           int.tryParse(request.url.queryParameters['limit'] ?? '') ?? 1;
-      final minimumDataQuality =
-          int.tryParse(
+      final minimumDataQuality = int.tryParse(
             request.url.queryParameters['minimumDataQuality'] ?? '',
           ) ??
           60;
@@ -315,7 +470,7 @@ class ApiRoutes {
           int.tryParse(request.url.queryParameters['limit'] ?? '') ?? 1;
       final simulations =
           int.tryParse(request.url.queryParameters['simulations'] ?? '') ??
-          100000;
+              100000;
 
       if (phaseTwoScanRunId == null) {
         return jsonResponse({
@@ -360,8 +515,7 @@ class ApiRoutes {
       );
       final limit =
           int.tryParse(request.url.queryParameters['limit'] ?? '') ?? 1;
-      final minimumProbability =
-          double.tryParse(
+      final minimumProbability = double.tryParse(
             request.url.queryParameters['minimumProbability'] ?? '',
           ) ??
           55.0;
@@ -409,13 +563,11 @@ class ApiRoutes {
       );
       final limit =
           int.tryParse(request.url.queryParameters['limit'] ?? '') ?? 1;
-      final minimumMarketOdds =
-          double.tryParse(
+      final minimumMarketOdds = double.tryParse(
             request.url.queryParameters['minimumMarketOdds'] ?? '',
           ) ??
           1.40;
-      final minimumValuePercent =
-          double.tryParse(
+      final minimumValuePercent = double.tryParse(
             request.url.queryParameters['minimumValuePercent'] ?? '',
           ) ??
           5.0;
@@ -587,21 +739,19 @@ class ApiRoutes {
       }
 
       final dateText = request.url.queryParameters['date'];
-      final date = dateText == null
-          ? DateTime.now()
-          : DateTime.tryParse(dateText);
+      final date =
+          dateText == null ? DateTime.now() : DateTime.tryParse(dateText);
       final limit =
           int.tryParse(request.url.queryParameters['limit'] ?? '') ?? 20;
       // 0 statt vorher 60: ein manuell ausgelöster Tagesscan soll standardmäßig
       // ebenfalls jede Analyse speichern, nicht nur die mit hoher Datenqualität.
-      final minimumDataQuality =
-          int.tryParse(
+      final minimumDataQuality = int.tryParse(
             request.url.queryParameters['minimumDataQuality'] ?? '',
           ) ??
           0;
       final simulations =
           int.tryParse(request.url.queryParameters['simulations'] ?? '') ??
-          100000;
+              100000;
 
       if (date == null) {
         return jsonResponse({
@@ -862,8 +1012,7 @@ class ApiRoutes {
     return diff == 0;
   }
 
-  String _day(DateTime value) =>
-      '${value.year.toString().padLeft(4, '0')}-'
+  String _day(DateTime value) => '${value.year.toString().padLeft(4, '0')}-'
       '${value.month.toString().padLeft(2, '0')}-'
       '${value.day.toString().padLeft(2, '0')}';
 

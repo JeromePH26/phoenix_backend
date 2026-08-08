@@ -10,6 +10,8 @@ class AppConfig {
     required this.sportradarAccessLevel,
     required this.sportradarLanguage,
     required this.adminToken,
+    required this.firebaseProjectId,
+    required this.firebaseServiceAccountJson,
   });
 
   final int port;
@@ -20,10 +22,14 @@ class AppConfig {
   final String sportradarAccessLevel;
   final String sportradarLanguage;
   final String adminToken;
+  final String firebaseProjectId;
+  final String firebaseServiceAccountJson;
 
   bool get hasDatabase => databaseUrl.trim().isNotEmpty;
   bool get hasFootballApi => apiFootballKey.trim().isNotEmpty;
   bool get hasTennisApi => sportradarTennisApiKey.trim().isNotEmpty;
+  bool get hasFirebasePush =>
+      firebaseProjectId.isNotEmpty && firebaseServiceAccountJson.isNotEmpty;
 
   factory AppConfig.fromEnvironment() {
     String read(String key, [String fallback = '']) =>
@@ -35,14 +41,15 @@ class AppConfig {
       databaseUrl: read('DATABASE_URL'),
       apiFootballKey: read('API_FOOTBALL_KEY'),
       sportradarTennisApiKey: read('SPORTRADAR_TENNIS_API_KEY'),
-      sportradarAccessLevel:
-          read('SPORTRADAR_TENNIS_ACCESS_LEVEL', 'trial'),
+      sportradarAccessLevel: read('SPORTRADAR_TENNIS_ACCESS_LEVEL', 'trial'),
 
       // Sportradar Tennis Trial unterstützt den englischen v3-Pfad
       // zuverlässig. "de" führte je nach Paket zu leeren Antworten/404.
       sportradarLanguage: read('SPORTRADAR_TENNIS_LANGUAGE', 'en'),
 
       adminToken: read('PHOENIX_ADMIN_TOKEN'),
+      firebaseProjectId: read('FIREBASE_PROJECT_ID'),
+      firebaseServiceAccountJson: read('FIREBASE_SERVICE_ACCOUNT_JSON'),
     );
   }
 }
