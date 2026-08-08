@@ -12,6 +12,9 @@ import 'http/json_response.dart';
 import 'http/phoenix_api_guard.dart';
 import 'http/tennis_analysis_api.dart';
 import 'services/football_service.dart';
+import 'services/firebase_push_service.dart';
+import 'services/football_favorite_live_monitor.dart';
+import 'services/football_news_service.dart';
 import 'services/tennis_service.dart';
 
 class PhoenixBackend {
@@ -21,6 +24,8 @@ class PhoenixBackend {
     required this.handler,
     required this.football,
     required this.tennis,
+    required this.favoriteLiveMonitor,
+    required this.news,
   });
 
   final AppConfig config;
@@ -28,6 +33,8 @@ class PhoenixBackend {
   final Handler handler;
   final FootballService football;
   final TennisService tennis;
+  final FootballFavoriteLiveMonitor favoriteLiveMonitor;
+  final FootballNewsService news;
 
   static Future<PhoenixBackend> create() async {
     final config = AppConfig.fromEnvironment();
@@ -38,6 +45,16 @@ class PhoenixBackend {
       accessLevel: config.sportradarAccessLevel,
       language: config.sportradarLanguage,
     );
+    final push = FirebasePushService(
+      projectId: config.firebaseProjectId,
+      serviceAccountJson: config.firebaseServiceAccountJson,
+    );
+    final favoriteLiveMonitor = FootballFavoriteLiveMonitor(
+      database: database,
+      football: football,
+      push: push,
+    );
+    final news = FootballNewsService(database: database, push: push);
 
     if (database.isConfigured) {
       try {
@@ -53,6 +70,7 @@ class PhoenixBackend {
       database: database,
       football: football,
       tennis: tennis,
+      news: news,
     );
 
     final apiGuard = PhoenixApiGuard(
@@ -81,12 +99,19 @@ class PhoenixBackend {
         .addMiddleware(footballAnalysisApi.middleware)
         .addHandler(routes.router.call);
 
+    if (config.hasFirebasePush && database.isConfigured) {
+      favoriteLiveMonitor.start();
+    }
+    if (database.isConfigured) news.start();
+
     return PhoenixBackend._(
       config: config,
       database: database,
       handler: pipeline,
       football: football,
       tennis: tennis,
+      favoriteLiveMonitor: favoriteLiveMonitor,
+      news: news,
     );
   }
 
@@ -98,6 +123,8 @@ class PhoenixBackend {
       );
 
   Future<void> close() async {
+    favoriteLiveMonitor.close();
+    news.close();
     football.close();
     tennis.close();
     await database.close();
