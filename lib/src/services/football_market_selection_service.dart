@@ -5,7 +5,7 @@ class FootballMarketSelectionService {
 
   final PhoenixDatabase database;
 
-  static const modelVersion = 'market_selection_trust_v3_extended_markets';
+  static const modelVersion = 'market_selection_trust_v4_balanced_markets';
 
   Future<Map<String, Object?>> select({
     required int phaseTwoScanRunId,
@@ -135,18 +135,28 @@ class FootballMarketSelectionService {
             probability <= 0.82 &&
             fair >= 1.20;
       }).toList(growable: false);
-      final ranked = selectable.isNotEmpty ? selectable : candidates;
+      final ranked = List<Map<String, Object?>>.from(
+        selectable.isNotEmpty ? selectable : candidates,
+      )..sort((a, b) {
+          final scoreA = _selectionScore(a);
+          final scoreB = _selectionScore(b);
+          final scoreComparison = scoreB.compareTo(scoreA);
+          if (scoreComparison != 0) return scoreComparison;
+          return (_number(b['probability']) ?? 0)
+              .compareTo(_number(a['probability']) ?? 0);
+        });
 
       final best = ranked.first;
       final second = ranked.length > 1 ? ranked[1] : ranked.first;
 
       final bestProbability = _asProbability(best['probability']);
-      final secondProbability = _asProbability(second['probability']);
-      final probabilityGap =
-          (bestProbability - secondProbability).clamp(0.0, 1.0).toDouble();
+      final selectionScoreGap =
+          (_selectionScore(best) - _selectionScore(second))
+              .clamp(0.0, 1.0)
+              .toDouble();
 
       final bestProbabilityPercent = bestProbability * 100;
-      final probabilityGapPercent = probabilityGap * 100;
+      final probabilityGapPercent = selectionScoreGap * 100;
 
       final dataQuality = _int(simulation['dataQuality'], fallback: 0);
       final realXgAvailable = goalExpectations['realXgAvailable'] == true;
@@ -177,6 +187,7 @@ class FootballMarketSelectionService {
           'probability': _roundProbability(bestProbability),
           'probabilityPercent': _round(bestProbabilityPercent),
           'fairOdds': best['fairOdds'],
+          'selectionScore': _round(_selectionScore(best) * 100),
         },
         'trust': {
           'score': trustScore,
@@ -184,7 +195,8 @@ class FootballMarketSelectionService {
           'components': {
             'modelProbability': _roundProbability(bestProbability),
             'modelProbabilityPercent': _round(bestProbabilityPercent),
-            'probabilityGapToSecondMarket': _roundProbability(probabilityGap),
+            'selectionScoreGapToSecondMarket':
+                _roundProbability(selectionScoreGap),
             'probabilityGapPercent': _round(probabilityGapPercent),
             'dataQuality': dataQuality,
             'simulationCount': simulations,
@@ -263,6 +275,59 @@ class FootballMarketSelectionService {
           ? null
           : double.parse(parsedFairOdds.toStringAsFixed(2)),
     };
+  }
+
+  /// Balanciert Sicherheit und Aussagekraft. Ohne diese Gewichtung gewinnt
+  /// fast immer die mathematisch breiteste Absicherung (1X/X2 oder Over 1.5),
+  /// obwohl ein spezifischerer Markt nur wenige Prozentpunkte dahinterliegt.
+  /// Die Modellwahrscheinlichkeit selbst bleibt dabei vollständig unverändert.
+  double _selectionScore(Map<String, Object?> candidate) {
+    final key = _string(candidate['key']);
+    final probability = _asProbability(candidate['probability']);
+    final fairOdds = _number(candidate['fairOdds']) ??
+        (probability > 0 ? 1 / probability : 0);
+
+    var specificityAdjustment = 0.0;
+    if (const {'over05', 'under55'}.contains(key)) {
+      specificityAdjustment = -0.20;
+    } else if (const {
+      'over15',
+      'dc1x',
+      'dcX2',
+      'ahHomePlus05',
+      'ahAwayPlus05',
+      'ahHomePlus15',
+      'ahAwayPlus15',
+    }.contains(key)) {
+      specificityAdjustment = -0.075;
+    } else if (key == 'dc12' || key == 'under45') {
+      specificityAdjustment = -0.04;
+    } else if (key.startsWith('combo')) {
+      specificityAdjustment = 0.055;
+    } else if (key.contains('Minus15')) {
+      specificityAdjustment = 0.045;
+    } else if (const {
+      'homeWin',
+      'draw',
+      'awayWin',
+      'over25',
+      'under25',
+      'bttsYes',
+      'bttsNo',
+      'dnbHome',
+      'dnbAway',
+    }.contains(key)) {
+      specificityAdjustment = 0.025;
+    }
+
+    // Faire Quoten im praxisnahen Bereich erhalten einen kleinen Bonus.
+    // Sehr niedrige Quoten bleiben sichtbar, dominieren aber nicht den Pick.
+    final oddsAdjustment = fairOdds >= 1.40 && fairOdds <= 2.80
+        ? 0.02
+        : fairOdds < 1.30
+            ? -0.04
+            : 0.0;
+    return probability + specificityAdjustment + oddsAdjustment;
   }
 
   int _trustScore({
