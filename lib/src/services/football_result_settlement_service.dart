@@ -135,6 +135,53 @@ class FootballResultSettlementService {
         .replaceAll('ü', 'u');
 
     final total = homeScore + awayScore;
+    final normalizedMarketKey = marketKey.toLowerCase();
+    final goalDifference = homeScore - awayScore;
+
+    // Kombinations- und Handicapmärkte müssen vor den enthaltenen
+    // Einzelbegriffen (z. B. 1X oder Heimsieg) ausgewertet werden.
+    switch (normalizedMarketKey) {
+      case 'combo1xunder35':
+        return homeScore >= awayScore && total < 3.5 ? 'won' : 'lost';
+      case 'combox2under35':
+        return awayScore >= homeScore && total < 3.5 ? 'won' : 'lost';
+      case 'combo1xover15':
+        return homeScore >= awayScore && total > 1.5 ? 'won' : 'lost';
+      case 'combox2over15':
+        return awayScore >= homeScore && total > 1.5 ? 'won' : 'lost';
+      case 'combohomeover15':
+        return homeScore > awayScore && total > 1.5 ? 'won' : 'lost';
+      case 'comboawayover15':
+        return awayScore > homeScore && total > 1.5 ? 'won' : 'lost';
+      case 'ahhomeminus05':
+        return goalDifference >= 1 ? 'won' : 'lost';
+      case 'ahhomeplus05':
+        return goalDifference >= 0 ? 'won' : 'lost';
+      case 'ahhomeminus15':
+        return goalDifference >= 2 ? 'won' : 'lost';
+      case 'ahhomeplus15':
+        return goalDifference >= -1 ? 'won' : 'lost';
+      case 'ahawayminus05':
+        return goalDifference <= -1 ? 'won' : 'lost';
+      case 'ahawayplus05':
+        return goalDifference <= 0 ? 'won' : 'lost';
+      case 'ahawayminus15':
+        return goalDifference <= -2 ? 'won' : 'lost';
+      case 'ahawayplus15':
+        return goalDifference <= 1 ? 'won' : 'lost';
+      case 'dnbhome':
+        return goalDifference > 0
+            ? 'won'
+            : goalDifference == 0
+                ? 'push'
+                : 'lost';
+      case 'dnbaway':
+        return goalDifference < 0
+            ? 'won'
+            : goalDifference == 0
+                ? 'push'
+                : 'lost';
+    }
 
     if (_containsAny(key, ['home_win', 'home win', 'heimsieg', '1x2_home'])) {
       return homeScore > awayScore ? 'won' : 'lost';

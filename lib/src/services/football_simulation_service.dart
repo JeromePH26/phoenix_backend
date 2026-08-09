@@ -7,7 +7,7 @@ class FootballSimulationService {
 
   final PhoenixDatabase database;
 
-  static const modelVersion = 'poisson_monte_carlo_v5_gemini_all_matches';
+  static const modelVersion = 'poisson_monte_carlo_v6_extended_markets';
 
   Future<Map<String, Object?>> run({
     required int phaseTwoScanRunId,
@@ -84,6 +84,11 @@ class FootballSimulationService {
     var under25 = 0;
     var bttsYes = 0;
     var bttsNo = 0;
+    final extendedCounts = <String, int>{};
+
+    void hit(String key, bool condition) {
+      if (condition) extendedCounts[key] = (extendedCounts[key] ?? 0) + 1;
+    }
 
     final scoreCounts = <String, int>{};
 
@@ -111,6 +116,40 @@ class FootballSimulationService {
         bttsNo++;
       }
 
+      final total = homeGoals + awayGoals;
+      final homeWin = homeGoals > awayGoals;
+      final draw = homeGoals == awayGoals;
+      final awayWin = homeGoals < awayGoals;
+      hit('over05', total >= 1);
+      hit('under05', total == 0);
+      hit('over15', total >= 2);
+      hit('under15', total <= 1);
+      hit('over35', total >= 4);
+      hit('under35', total <= 3);
+      hit('over45', total >= 5);
+      hit('under45', total <= 4);
+      hit('over55', total >= 6);
+      hit('under55', total <= 5);
+      hit('dc1x', homeWin || draw);
+      hit('dc12', homeWin || awayWin);
+      hit('dcX2', draw || awayWin);
+      hit('dnbHome', homeWin);
+      hit('dnbAway', awayWin);
+      hit('ahHomeMinus05', homeWin);
+      hit('ahHomePlus05', homeWin || draw);
+      hit('ahHomeMinus15', homeGoals - awayGoals >= 2);
+      hit('ahHomePlus15', homeGoals - awayGoals >= -1);
+      hit('ahAwayMinus05', awayWin);
+      hit('ahAwayPlus05', awayWin || draw);
+      hit('ahAwayMinus15', awayGoals - homeGoals >= 2);
+      hit('ahAwayPlus15', awayGoals - homeGoals >= -1);
+      hit('combo1xUnder35', (homeWin || draw) && total <= 3);
+      hit('comboX2Under35', (awayWin || draw) && total <= 3);
+      hit('combo1xOver15', (homeWin || draw) && total >= 2);
+      hit('comboX2Over15', (awayWin || draw) && total >= 2);
+      hit('comboHomeOver15', homeWin && total >= 2);
+      hit('comboAwayOver15', awayWin && total >= 2);
+
       final score = '$homeGoals:$awayGoals';
       scoreCounts[score] = (scoreCounts[score] ?? 0) + 1;
     }
@@ -125,6 +164,10 @@ class FootballSimulationService {
     final under25Probability = under25 / simulations;
     final bttsYesProbability = bttsYes / simulations;
     final bttsNoProbability = bttsNo / simulations;
+    final extendedProbabilities = <String, double>{
+      for (final entry in extendedCounts.entries)
+        entry.key: entry.value / simulations,
+    };
 
     final aiContext = _map(input['aiContext']);
     final normalized = _map(input['normalized']);
@@ -158,6 +201,8 @@ class FootballSimulationService {
         'under25': _probability(under25Probability),
         'bttsYes': _probability(bttsYesProbability),
         'bttsNo': _probability(bttsNoProbability),
+        for (final entry in extendedProbabilities.entries)
+          entry.key: _probability(entry.value),
       },
       'probabilitiesPercent': {
         'home': _percent(homeWinProbability),
@@ -167,6 +212,8 @@ class FootballSimulationService {
         'under25': _percent(under25Probability),
         'bttsYes': _percent(bttsYesProbability),
         'bttsNo': _percent(bttsNoProbability),
+        for (final entry in extendedProbabilities.entries)
+          entry.key: _percent(entry.value),
       },
       'fairOdds': {
         'home': _fairOdds(homeWinProbability),
@@ -178,6 +225,8 @@ class FootballSimulationService {
         'under25': _fairOdds(under25Probability),
         'bttsYes': _fairOdds(bttsYesProbability),
         'bttsNo': _fairOdds(bttsNoProbability),
+        for (final entry in extendedProbabilities.entries)
+          entry.key: _fairOdds(entry.value),
       },
       'topScorelines': topScores.take(5).map((entry) {
         final probability = entry.value / simulations;
@@ -239,8 +288,7 @@ class FootballSimulationService {
     return double.parse((1 / probability).toStringAsFixed(2));
   }
 
-  double _round(double value) =>
-      double.parse(value.toStringAsFixed(3));
+  double _round(double value) => double.parse(value.toStringAsFixed(3));
 
   Map<String, Object?> _map(Object? value) =>
       value is Map ? Map<String, Object?>.from(value) : <String, Object?>{};

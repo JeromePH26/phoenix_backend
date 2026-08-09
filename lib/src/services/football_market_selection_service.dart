@@ -5,7 +5,7 @@ class FootballMarketSelectionService {
 
   final PhoenixDatabase database;
 
-  static const modelVersion = 'market_selection_trust_v2_decimal';
+  static const modelVersion = 'market_selection_trust_v3_extended_markets';
 
   Future<Map<String, Object?>> select({
     required int phaseTwoScanRunId,
@@ -74,14 +74,71 @@ class FootballMarketSelectionService {
         ),
       ];
 
+      const extendedMarkets = <String, String>{
+        'over05': 'Über 0,5 Tore',
+        'under05': 'Unter 0,5 Tore',
+        'over15': 'Über 1,5 Tore',
+        'under15': 'Unter 1,5 Tore',
+        'over35': 'Über 3,5 Tore',
+        'under35': 'Unter 3,5 Tore',
+        'over45': 'Über 4,5 Tore',
+        'under45': 'Unter 4,5 Tore',
+        'over55': 'Über 5,5 Tore',
+        'under55': 'Unter 5,5 Tore',
+        'dc1x': 'Doppelte Chance 1X',
+        'dc12': 'Doppelte Chance 12',
+        'dcX2': 'Doppelte Chance X2',
+        'dnbHome': 'Draw No Bet Heim',
+        'dnbAway': 'Draw No Bet Auswärts',
+        'ahHomeMinus05': 'Heim -0,5',
+        'ahHomePlus05': 'Heim +0,5',
+        'ahHomeMinus15': 'Heim -1,5',
+        'ahHomePlus15': 'Heim +1,5',
+        'ahAwayMinus05': 'Auswärts -0,5',
+        'ahAwayPlus05': 'Auswärts +0,5',
+        'ahAwayMinus15': 'Auswärts -1,5',
+        'ahAwayPlus15': 'Auswärts +1,5',
+        'combo1xUnder35': '1X & unter 3,5 Tore',
+        'comboX2Under35': 'X2 & unter 3,5 Tore',
+        'combo1xOver15': '1X & über 1,5 Tore',
+        'comboX2Over15': 'X2 & über 1,5 Tore',
+        'comboHomeOver15': 'Heimsieg & über 1,5 Tore',
+        'comboAwayOver15': 'Auswärtssieg & über 1,5 Tore',
+      };
+      for (final market in extendedMarkets.entries) {
+        candidates.add(
+          _candidate(
+            key: market.key,
+            label: market.value,
+            probability: probabilities[market.key],
+            fairOdds: fairOdds[market.key],
+          ),
+        );
+      }
+      candidates.removeWhere(
+        (candidate) => (_number(candidate['probability']) ?? 0) <= 0,
+      );
+
       candidates.sort((a, b) {
         final pA = _number(a['probability']) ?? 0;
         final pB = _number(b['probability']) ?? 0;
         return pB.compareTo(pA);
       });
 
-      final best = candidates.first;
-      final second = candidates.length > 1 ? candidates[1] : candidates.first;
+      // Extrem sichere Linien wie Über 0,5 oder Unter 5,5 haben fast immer
+      // unspielbar kleine Quoten. Sie bleiben in der Marktübersicht, dürfen
+      // aber nicht automatisch jeden sinnvolleren Pick verdrängen.
+      final selectable = candidates.where((candidate) {
+        final probability = _asProbability(candidate['probability']);
+        final fair = _number(candidate['fairOdds']) ?? 0;
+        return probability >= minimumProbabilityDecimal.clamp(0.0, 1.0) &&
+            probability <= 0.82 &&
+            fair >= 1.20;
+      }).toList(growable: false);
+      final ranked = selectable.isNotEmpty ? selectable : candidates;
+
+      final best = ranked.first;
+      final second = ranked.length > 1 ? ranked[1] : ranked.first;
 
       final bestProbability = _asProbability(best['probability']);
       final secondProbability = _asProbability(second['probability']);
@@ -93,8 +150,7 @@ class FootballMarketSelectionService {
 
       final dataQuality = _int(simulation['dataQuality'], fallback: 0);
       final realXgAvailable = goalExpectations['realXgAvailable'] == true;
-      final simulations =
-          _int(simulation['simulations'], fallback: 100000);
+      final simulations = _int(simulation['simulations'], fallback: 100000);
 
       final trustScore = _trustScore(
         bestProbabilityPercent: bestProbabilityPercent,
@@ -128,18 +184,17 @@ class FootballMarketSelectionService {
           'components': {
             'modelProbability': _roundProbability(bestProbability),
             'modelProbabilityPercent': _round(bestProbabilityPercent),
-            'probabilityGapToSecondMarket':
-                _roundProbability(probabilityGap),
+            'probabilityGapToSecondMarket': _roundProbability(probabilityGap),
             'probabilityGapPercent': _round(probabilityGapPercent),
             'dataQuality': dataQuality,
             'simulationCount': simulations,
             'realXgAvailable': realXgAvailable,
-            'lineupConfirmed':
-                aiContext['lineupStatus'] == 'confirmed',
+            'lineupConfirmed': aiContext['lineupStatus'] == 'confirmed',
             'aiContextVerified': aiContext['applied'] == true,
           },
         },
-        'topMarkets': candidates.take(3).toList(),
+        'topMarkets': ranked.take(5).toList(),
+        'allMarkets': candidates,
         'aiContext': aiContext,
         'value': {
           'status': 'not_checked',
@@ -158,8 +213,7 @@ class FootballMarketSelectionService {
           'showValueTip': false,
         },
         'warnings': [
-          if (!realXgAvailable)
-            'Noch keine echten xG/xGA-Daten vorhanden.',
+          if (!realXgAvailable) 'Noch keine echten xG/xGA-Daten vorhanden.',
           if (aiContext['lineupStatus'] != 'confirmed')
             'Bestätigte Aufstellung ist noch nicht verfügbar.',
           if (aiContext['applied'] == true)
@@ -221,14 +275,11 @@ class FootballMarketSelectionService {
     final probabilityComponent =
         (bestProbabilityPercent.clamp(0, 100) / 100) * 35;
 
-    final gapComponent =
-        (probabilityGapPercent.clamp(0, 25) / 25) * 20;
+    final gapComponent = (probabilityGapPercent.clamp(0, 25) / 25) * 20;
 
-    final dataQualityComponent =
-        (dataQuality.clamp(0, 100) / 100) * 30;
+    final dataQualityComponent = (dataQuality.clamp(0, 100) / 100) * 30;
 
-    final simulationComponent =
-        (simulations.clamp(1000, 100000) / 100000) * 10;
+    final simulationComponent = (simulations.clamp(1000, 100000) / 100000) * 10;
 
     final xgComponent = realXgAvailable ? 5.0 : 0.0;
 
@@ -262,8 +313,7 @@ class FootballMarketSelectionService {
   double _roundProbability(double value) =>
       double.parse(value.toStringAsFixed(6));
 
-  double _round(double value) =>
-      double.parse(value.toStringAsFixed(2));
+  double _round(double value) => double.parse(value.toStringAsFixed(2));
 
   Map<String, Object?> _map(Object? value) =>
       value is Map ? Map<String, Object?>.from(value) : <String, Object?>{};

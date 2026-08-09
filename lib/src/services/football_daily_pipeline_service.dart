@@ -124,10 +124,10 @@ class FootballDailyPipelineService {
       await _step(jobId, 'simulation');
       final simulationResult =
           await FootballSimulationService(database: database).run(
-            phaseTwoScanRunId: phaseTwoId,
-            limit: effectiveLimit,
-            simulations: safeSimulations,
-          );
+        phaseTwoScanRunId: phaseTwoId,
+        limit: effectiveLimit,
+        simulations: safeSimulations,
+      );
 
       final simulated = _integer(simulationResult['processed']);
       if (simulated <= 0) {
@@ -137,10 +137,10 @@ class FootballDailyPipelineService {
       await _step(jobId, 'market_selection');
       final marketResult =
           await FootballMarketSelectionService(database: database).select(
-            phaseTwoScanRunId: phaseTwoId,
-            limit: effectiveLimit,
-            minimumProbability: 60,
-          );
+        phaseTwoScanRunId: phaseTwoId,
+        limit: effectiveLimit,
+        minimumProbability: 60,
+      );
 
       final selected = _integer(marketResult['processed']);
       if (selected <= 0) {
@@ -237,6 +237,7 @@ class FootballDailyPipelineService {
       );
 
       final fairOdds = <String, Object?>{
+        ...rawFairOdds,
         'home': rawFairOdds['home'] ?? rawFairOdds['homeWin'],
         'draw': rawFairOdds['draw'],
         'away': rawFairOdds['away'] ?? rawFairOdds['awayWin'],
@@ -258,6 +259,9 @@ class FootballDailyPipelineService {
         'contextConfidenceDelta': contextConfidenceDelta,
         'recommendation': recommendation,
         'probabilities': {
+          ...rawProbabilities.map(
+            (key, value) => MapEntry(key, _probability(value)),
+          ),
           'home': homeProbability,
           'draw': drawProbability,
           'away': awayProbability,
@@ -269,6 +273,11 @@ class FootballDailyPipelineService {
           'bttsNo': _probability(rawProbabilities['bttsNo']),
         },
         'fairOdds': fairOdds,
+        'marketOddsByKey': {
+          if (_string(phoenixTip['marketKey']).isNotEmpty)
+            _string(phoenixTip['marketKey']):
+                _map(selection['value'])['marketOdds'],
+        },
         'goalExpectations': simulation['goalExpectations'],
         'topScorelines': simulation['topScorelines'],
         'phoenixTip': phoenixTip,

@@ -1,4 +1,3 @@
-
 import '../database/database.dart';
 import 'football_service.dart';
 
@@ -97,9 +96,8 @@ class FootballValueService {
           marketReferenceOdds != null &&
           marketReferenceOdds > 1;
 
-      final valuePercent = hasRequiredData
-          ? _round(((marketOdds / fairOdds) - 1) * 100)
-          : null;
+      final valuePercent =
+          hasRequiredData ? _round(((marketOdds / fairOdds) - 1) * 100) : null;
 
       final fairMarketDeviationPercent = !hasRequiredData
           ? null
@@ -119,11 +117,10 @@ class FootballValueService {
           marketOdds != null && marketOdds >= minimumMarketOdds;
       final minimumValuePassed =
           valuePercent != null && valuePercent >= minimumValuePercent;
-      final maximumValuePassed = valuePercent != null &&
-          valuePercent <= maximumAutomaticValuePercent;
+      final maximumValuePassed =
+          valuePercent != null && valuePercent <= maximumAutomaticValuePercent;
       final marketGuardPassed = fairMarketDeviationPercent != null &&
-          fairMarketDeviationPercent <=
-              maximumFairMarketDeviationPercent;
+          fairMarketDeviationPercent <= maximumFairMarketDeviationPercent;
 
       final isValueTip = hasRequiredData &&
           minimumOddsPassed &&
@@ -315,6 +312,7 @@ class FootballValueService {
             _isMatchWinner(betName) &&
             _containsAny(valueLabel, ['away', '2', 'away win']);
       case 'homeOrDraw':
+      case 'dc1x':
         return fullTimeMarket &&
             _isDoubleChanceMarket(betName) &&
             _containsAny(valueLabel, [
@@ -324,6 +322,7 @@ class FootballValueService {
               'heim oder unentschieden',
             ]);
       case 'drawOrAway':
+      case 'dcX2':
         return fullTimeMarket &&
             _isDoubleChanceMarket(betName) &&
             _containsAny(valueLabel, [
@@ -333,6 +332,7 @@ class FootballValueService {
               'unentschieden oder auswarts',
             ]);
       case 'homeOrAway':
+      case 'dc12':
         return fullTimeMarket &&
             _isDoubleChanceMarket(betName) &&
             _containsAny(valueLabel, [
@@ -340,10 +340,22 @@ class FootballValueService {
               'home or away',
               'home/away',
             ]);
+      case 'over05':
+        return fullTimeMarket &&
+            _isExactGoalsOverUnderMarket(betName) &&
+            _isExactLine(valueLabel, over: true, line: 0.5);
+      case 'under05':
+        return fullTimeMarket &&
+            _isExactGoalsOverUnderMarket(betName) &&
+            _isExactLine(valueLabel, over: false, line: 0.5);
       case 'over15':
         return fullTimeMarket &&
             _isExactGoalsOverUnderMarket(betName) &&
             _isExactLine(valueLabel, over: true, line: 1.5);
+      case 'under15':
+        return fullTimeMarket &&
+            _isExactGoalsOverUnderMarket(betName) &&
+            _isExactLine(valueLabel, over: false, line: 1.5);
       case 'over25':
         return fullTimeMarket &&
             _isExactGoalsOverUnderMarket(betName) &&
@@ -356,6 +368,98 @@ class FootballValueService {
         return fullTimeMarket &&
             _isExactGoalsOverUnderMarket(betName) &&
             _isExactLine(valueLabel, over: false, line: 3.5);
+      case 'over35':
+        return fullTimeMarket &&
+            _isExactGoalsOverUnderMarket(betName) &&
+            _isExactLine(valueLabel, over: true, line: 3.5);
+      case 'over45':
+        return fullTimeMarket &&
+            _isExactGoalsOverUnderMarket(betName) &&
+            _isExactLine(valueLabel, over: true, line: 4.5);
+      case 'under45':
+        return fullTimeMarket &&
+            _isExactGoalsOverUnderMarket(betName) &&
+            _isExactLine(valueLabel, over: false, line: 4.5);
+      case 'over55':
+        return fullTimeMarket &&
+            _isExactGoalsOverUnderMarket(betName) &&
+            _isExactLine(valueLabel, over: true, line: 5.5);
+      case 'under55':
+        return fullTimeMarket &&
+            _isExactGoalsOverUnderMarket(betName) &&
+            _isExactLine(valueLabel, over: false, line: 5.5);
+      case 'dnbHome':
+        return betName.contains('draw no bet') &&
+            _containsAny(valueLabel, ['home', '1']);
+      case 'dnbAway':
+        return betName.contains('draw no bet') &&
+            _containsAny(valueLabel, ['away', '2']);
+      case 'ahHomeMinus05':
+        return _isAsianHandicap(betName) &&
+            _isHandicap(valueLabel, home: true, line: -0.5);
+      case 'ahHomePlus05':
+        return _isAsianHandicap(betName) &&
+            _isHandicap(valueLabel, home: true, line: 0.5);
+      case 'ahHomeMinus15':
+        return _isAsianHandicap(betName) &&
+            _isHandicap(valueLabel, home: true, line: -1.5);
+      case 'ahHomePlus15':
+        return _isAsianHandicap(betName) &&
+            _isHandicap(valueLabel, home: true, line: 1.5);
+      case 'ahAwayMinus05':
+        return _isAsianHandicap(betName) &&
+            _isHandicap(valueLabel, home: false, line: -0.5);
+      case 'ahAwayPlus05':
+        return _isAsianHandicap(betName) &&
+            _isHandicap(valueLabel, home: false, line: 0.5);
+      case 'ahAwayMinus15':
+        return _isAsianHandicap(betName) &&
+            _isHandicap(valueLabel, home: false, line: -1.5);
+      case 'ahAwayPlus15':
+        return _isAsianHandicap(betName) &&
+            _isHandicap(valueLabel, home: false, line: 1.5);
+      case 'combo1xUnder35':
+        return _isCombination(
+          betName,
+          valueLabel,
+          result: '1x',
+          total: 'under 3.5',
+        );
+      case 'comboX2Under35':
+        return _isCombination(
+          betName,
+          valueLabel,
+          result: 'x2',
+          total: 'under 3.5',
+        );
+      case 'combo1xOver15':
+        return _isCombination(
+          betName,
+          valueLabel,
+          result: '1x',
+          total: 'over 1.5',
+        );
+      case 'comboX2Over15':
+        return _isCombination(
+          betName,
+          valueLabel,
+          result: 'x2',
+          total: 'over 1.5',
+        );
+      case 'comboHomeOver15':
+        return _isCombination(
+          betName,
+          valueLabel,
+          result: 'home',
+          total: 'over 1.5',
+        );
+      case 'comboAwayOver15':
+        return _isCombination(
+          betName,
+          valueLabel,
+          result: 'away',
+          total: 'over 1.5',
+        );
       case 'bttsYes':
         return fullTimeMarket &&
             _isBttsMarket(betName) &&
@@ -409,8 +513,7 @@ class FootballValueService {
       value == 'full time result' ||
       value == 'match result';
 
-  bool _isDoubleChanceMarket(String value) =>
-      value.contains('double chance');
+  bool _isDoubleChanceMarket(String value) => value.contains('double chance');
 
   bool _isExactGoalsOverUnderMarket(String value) =>
       value == 'goals over/under' ||
@@ -424,10 +527,8 @@ class FootballValueService {
     required bool over,
     required double line,
   }) {
-    final normalized = value
-        .replaceAll(',', '.')
-        .replaceAll(RegExp(r'\s+'), ' ')
-        .trim();
+    final normalized =
+        value.replaceAll(',', '.').replaceAll(RegExp(r'\s+'), ' ').trim();
 
     final prefix = over ? 'over' : 'under';
     return normalized == '$prefix ${line.toStringAsFixed(1)}';
@@ -438,20 +539,70 @@ class FootballValueService {
       value == 'both teams to score' ||
       value == 'btts';
 
+  bool _isAsianHandicap(String value) => value.contains('asian handicap');
+
+  bool _isHandicap(
+    String value, {
+    required bool home,
+    required double line,
+  }) {
+    final sideMatches = home
+        ? _containsAny(value, ['home', '1 '])
+        : _containsAny(value, ['away', '2 ']);
+    if (!sideMatches) return false;
+    final normalized = value.replaceAll(',', '.');
+    final lineText =
+        line >= 0 ? '+${line.toStringAsFixed(1)}' : line.toStringAsFixed(1);
+    return normalized.contains(lineText);
+  }
+
+  bool _isCombination(
+    String betName,
+    String valueLabel, {
+    required String result,
+    required String total,
+  }) {
+    final joined = '$betName $valueLabel'.replaceAll(',', '.');
+    final suitableMarket = joined.contains('result') ||
+        joined.contains('double chance') ||
+        joined.contains('total');
+    if (!suitableMarket || !joined.contains(total)) return false;
+    return switch (result) {
+      '1x' => joined.contains('1x') || joined.contains('home or draw'),
+      'x2' => joined.contains('x2') || joined.contains('draw or away'),
+      'home' => joined.contains('home') || joined.contains('1 and'),
+      'away' => joined.contains('away') || joined.contains('2 and'),
+      _ => false,
+    };
+  }
+
   bool _isSuspiciousOdds({
     required String marketKey,
     required double odds,
   }) {
     if (const {
       'over15',
+      'over05',
+      'under05',
+      'under15',
       'over25',
       'under25',
+      'over35',
       'under35',
+      'over45',
+      'under45',
+      'over55',
+      'under55',
       'bttsYes',
       'bttsNo',
       'homeOrDraw',
       'drawOrAway',
       'homeOrAway',
+      'dc1x',
+      'dc12',
+      'dcX2',
+      'dnbHome',
+      'dnbAway',
     }.contains(marketKey)) {
       return odds > 5.00;
     }
@@ -495,8 +646,7 @@ class FootballValueService {
     return double.tryParse(value?.toString().replaceAll(',', '.') ?? '');
   }
 
-  double _round(double value) =>
-      double.parse(value.toStringAsFixed(2));
+  double _round(double value) => double.parse(value.toStringAsFixed(2));
 
   Map<String, Object?> _map(Object? value) =>
       value is Map ? Map<String, Object?>.from(value) : <String, Object?>{};
