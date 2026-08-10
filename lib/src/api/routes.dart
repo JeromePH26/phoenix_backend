@@ -74,7 +74,7 @@ class ApiRoutes {
 
     router.get('/api/baseball/mlb/games', (Request request) async {
       final date = request.url.queryParameters['date']?.trim() ?? '';
-      if (!RegExp(r'^\d{4}-\d{2}-\d{2}\$').hasMatch(date)) {
+      if (!RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(date)) {
         return jsonResponse({'error': 'Datum muss YYYY-MM-DD sein.'},
             statusCode: 400);
       }
