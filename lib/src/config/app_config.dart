@@ -6,6 +6,7 @@ class AppConfig {
     required this.environment,
     required this.databaseUrl,
     required this.apiFootballKey,
+    required this.apiBaseballKey,
     required this.sportradarTennisApiKey,
     required this.sportradarAccessLevel,
     required this.sportradarLanguage,
@@ -18,6 +19,7 @@ class AppConfig {
   final String environment;
   final String databaseUrl;
   final String apiFootballKey;
+  final String apiBaseballKey;
   final String sportradarTennisApiKey;
   final String sportradarAccessLevel;
   final String sportradarLanguage;
@@ -27,6 +29,7 @@ class AppConfig {
 
   bool get hasDatabase => databaseUrl.trim().isNotEmpty;
   bool get hasFootballApi => apiFootballKey.trim().isNotEmpty;
+  bool get hasBaseballApi => apiBaseballKey.trim().isNotEmpty;
   bool get hasTennisApi => sportradarTennisApiKey.trim().isNotEmpty;
   bool get hasFirebasePush =>
       firebaseProjectId.isNotEmpty && firebaseServiceAccountJson.isNotEmpty;
@@ -40,6 +43,7 @@ class AppConfig {
       environment: read('APP_ENV', 'production'),
       databaseUrl: read('DATABASE_URL'),
       apiFootballKey: read('API_FOOTBALL_KEY'),
+      apiBaseballKey: read('API_BASEBALL_KEY', read('API_FOOTBALL_KEY')),
       sportradarTennisApiKey: read('SPORTRADAR_TENNIS_API_KEY'),
       sportradarAccessLevel: read('SPORTRADAR_TENNIS_ACCESS_LEVEL', 'trial'),
 

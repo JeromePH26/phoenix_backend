@@ -12,6 +12,7 @@ import 'http/json_response.dart';
 import 'http/phoenix_api_guard.dart';
 import 'http/tennis_analysis_api.dart';
 import 'services/football_service.dart';
+import 'services/baseball_service.dart';
 import 'services/firebase_push_service.dart';
 import 'services/football_favorite_live_monitor.dart';
 import 'services/football_news_service.dart';
@@ -23,6 +24,7 @@ class PhoenixBackend {
     required this.database,
     required this.handler,
     required this.football,
+    required this.baseball,
     required this.tennis,
     required this.favoriteLiveMonitor,
     required this.news,
@@ -32,6 +34,7 @@ class PhoenixBackend {
   final PhoenixDatabase database;
   final Handler handler;
   final FootballService football;
+  final BaseballService baseball;
   final TennisService tennis;
   final FootballFavoriteLiveMonitor favoriteLiveMonitor;
   final FootballNewsService news;
@@ -40,6 +43,7 @@ class PhoenixBackend {
     final config = AppConfig.fromEnvironment();
     final database = PhoenixDatabase(config.databaseUrl);
     final football = FootballService(apiKey: config.apiFootballKey);
+    final baseball = BaseballService(apiKey: config.apiBaseballKey);
     final tennis = TennisService(
       apiKey: config.sportradarTennisApiKey,
       accessLevel: config.sportradarAccessLevel,
@@ -69,6 +73,7 @@ class PhoenixBackend {
       config: config,
       database: database,
       football: football,
+      baseball: baseball,
       tennis: tennis,
       news: news,
     );
@@ -109,6 +114,7 @@ class PhoenixBackend {
       database: database,
       handler: pipeline,
       football: football,
+      baseball: baseball,
       tennis: tennis,
       favoriteLiveMonitor: favoriteLiveMonitor,
       news: news,

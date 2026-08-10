@@ -18,6 +18,7 @@ import '../services/football_finalization_service.dart';
 import '../services/football_result_settlement_service.dart';
 import '../services/football_daily_pipeline_service.dart';
 import '../services/football_service.dart';
+import '../services/baseball_service.dart';
 import '../services/football_asset_service.dart';
 import '../services/football_news_service.dart';
 import '../services/tennis_service.dart';
@@ -27,6 +28,7 @@ class ApiRoutes {
     required this.config,
     required this.database,
     required this.football,
+    required this.baseball,
     required this.tennis,
     required this.news,
   });
@@ -34,6 +36,7 @@ class ApiRoutes {
   final AppConfig config;
   final PhoenixDatabase database;
   final FootballService football;
+  final BaseballService baseball;
   final TennisService tennis;
   final FootballNewsService news;
 
@@ -63,9 +66,23 @@ class ApiRoutes {
         },
         'providers': {
           'football': football.isConfigured,
+          'baseball': baseball.isConfigured,
           'tennis': tennis.isConfigured,
         },
       });
+    });
+
+    router.get('/api/baseball/mlb/games', (Request request) async {
+      final date = request.url.queryParameters['date']?.trim() ?? '';
+      if (!RegExp(r'^\d{4}-\d{2}-\d{2}\$').hasMatch(date)) {
+        return jsonResponse({'error': 'Datum muss YYYY-MM-DD sein.'},
+            statusCode: 400);
+      }
+      try {
+        return jsonResponse(await baseball.mlbGames(date));
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 503);
+      }
     });
 
     router.get('/api/assets/<type>/<id>', (
