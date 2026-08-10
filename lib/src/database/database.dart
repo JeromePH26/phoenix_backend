@@ -320,7 +320,7 @@ class PhoenixDatabase {
     ''');
 
     // PHÖNIX feste Wettbewerbs-Whitelist:
-    // 15 nationale Ligen, 11 nationale Pokale und 3 UEFA-Wettbewerbe.
+    // 16 nationale Ligen, 11 nationale Pokale und 3 UEFA-Wettbewerbe.
     // Bereits vorhandene Datensätze werden auf whitelist aktualisiert.
     await db.execute(r'''
       INSERT INTO football_leagues (
@@ -349,6 +349,7 @@ class PhoenixDatabase {
         ('144', 'Jupiler Pro League',          'Belgium',     'men', 1, 'whitelist', 'approved', NOW()),
         ('244', 'Veikkausliiga',               'Finland',     'men', 1, 'whitelist', 'approved', NOW()),
         ('207', 'Super League',                 'Switzerland', 'men', 1, 'whitelist', 'approved', NOW()),
+        ('253', 'Major League Soccer',          'USA',         'men', 1, 'whitelist', 'approved', NOW()),
 
         ('45',  'FA Cup',                      'England',     'men', NULL, 'whitelist', 'approved', NOW()),
         ('48',  'EFL Cup',                     'England',     'men', NULL, 'whitelist', 'approved', NOW()),
@@ -916,6 +917,11 @@ class PhoenixDatabase {
              league_ids, league_names, published_at
       FROM news_articles
       WHERE published_at >= NOW() - (@hours * INTERVAL '1 hour')
+        AND (title || ' ' || summary) !~* '(^|[^[:alnum:]])wm([^[:alnum:]]|\$)'
+        AND LOWER(title || ' ' || summary) NOT LIKE ALL (ARRAY[
+          '%weltmeisterschaft%', '%world cup%', '%klub-wm%',
+          '%club world cup%', '%nationalmannschaft%', '%nationalteam%'
+        ])
         AND (
           EXISTS (
             SELECT 1 FROM football_leagues l

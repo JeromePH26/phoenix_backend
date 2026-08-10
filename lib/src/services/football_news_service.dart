@@ -64,6 +64,15 @@ class FootballNewsService {
       fixedLeagueName: '3. Liga',
       footballOnly: true,
     ),
+    (
+      name: 'RevierSport',
+      site: 'https://www.reviersport.de',
+      feed:
+          'https://news.google.com/rss/search?q=site%3Areviersport.de%20Fu%C3%9Fball&hl=de&gl=DE&ceid=DE%3Ade',
+      fixedLeagueId: null,
+      fixedLeagueName: null,
+      footballOnly: true,
+    ),
   ];
 
   void start() {
@@ -104,6 +113,7 @@ class FootballNewsService {
             final summary = _clean(_text(item, 'description'));
             final haystack = '$title $summary'.toLowerCase();
             if (!source.footballOnly && !_isFootball(haystack)) continue;
+            if (_isExcludedCompetition(haystack)) continue;
             final published = _date(_text(item, 'pubDate'));
             if (published == null) continue;
             final age = DateTime.now().toUtc().difference(published);
@@ -214,6 +224,23 @@ class FootballNewsService {
         'ligue 1',
         'conference league',
       ].any(text.contains);
+
+  bool _isExcludedCompetition(String text) {
+    return const [
+          'weltmeisterschaft',
+          'world cup',
+          'klub-wm',
+          'club world cup',
+          'frauen-wm',
+          'u17-wm',
+          'u-17-wm',
+          'u20-wm',
+          'u-20-wm',
+          'nationalmannschaft',
+          'nationalteam',
+        ].any(text.contains) ||
+        RegExp(r'(^|[^a-z0-9])wm([^a-z0-9]|$)').hasMatch(text);
+  }
 
   String _category(String text) {
     if (const ['verletzt', 'verletzung', 'fällt aus', 'ausfall']
