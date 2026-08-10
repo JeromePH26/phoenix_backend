@@ -85,6 +85,18 @@ class ApiRoutes {
       }
     });
 
+    router.get('/api/baseball/mlb/overview', (Request request) async {
+      final date = request.url.queryParameters['date'] ?? '';
+      if (!RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(date)) {
+        return jsonResponse({'error': 'Ungültiges Datum.'}, statusCode: 400);
+      }
+      try {
+        return jsonResponse(await baseball.mlbOverview(date));
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 502);
+      }
+    });
+
     router.get('/api/assets/<type>/<id>', (
       Request request,
       String type,
