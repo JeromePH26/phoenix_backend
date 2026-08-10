@@ -148,6 +148,37 @@ class PhoenixDatabase {
       ON football_analysis_history (prediction_date, result_status)
     ''');
 
+    // MLB snapshots are stored before the first pitch. A result is useful for
+    // model calibration even without odds; units/ROI stay at zero until a
+    // licensed odds source provides a real market price.
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS baseball_analysis_history (
+        game_id TEXT PRIMARY KEY,
+        prediction_date DATE NOT NULL,
+        scheduled_at TIMESTAMPTZ,
+        home_team TEXT NOT NULL,
+        away_team TEXT NOT NULL,
+        pick_side TEXT NOT NULL,
+        market_label TEXT NOT NULL,
+        model_probability DOUBLE PRECISION,
+        fair_odds DOUBLE PRECISION,
+        market_odds DOUBLE PRECISION,
+        assigned_units DOUBLE PRECISION NOT NULL DEFAULT 0,
+        result_status TEXT NOT NULL DEFAULT 'pending',
+        home_score INTEGER,
+        away_score INTEGER,
+        profit_units DOUBLE PRECISION,
+        settled_at TIMESTAMPTZ,
+        payload JSONB NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    ''');
+
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_baseball_analysis_history_date
+      ON baseball_analysis_history (prediction_date, result_status)
+    ''');
+
     // ROI represents bets the value guard actually released. Older snapshots
     // incorrectly assigned one unit to every analysis that merely had odds.
     await db.execute('''
@@ -2149,6 +2180,132 @@ class PhoenixDatabase {
         "COALESCE(NULLIF(payload->>'league', ''), 'Unbekannt')",
       ),
       'stakingModel': 'flat_1_unit_when_market_odds_available',
+    };
+  }
+
+  Future<void> saveBaseballAnalysisHistory({
+    required Map<String, dynamic> game,
+    required Map<String, dynamic> analysis,
+  }) async {
+    final db = await connection();
+    final id = game['id']?.toString() ?? '';
+    if (id.isEmpty) return;
+    final teams = _jsonMap(game['teams']);
+    final home = _jsonMap(teams['home']);
+    final away = _jsonMap(teams['away']);
+    final kickoff = DateTime.tryParse(game['date']?.toString() ?? '');
+    final pickSide = analysis['pickSide']?.toString() ?? 'home';
+    final rawMarketOdds = analysis['marketOdds'];
+    final marketOdds = rawMarketOdds is num
+        ? rawMarketOdds.toDouble()
+        : double.tryParse(rawMarketOdds?.toString() ?? '');
+    final isValue = analysis['isValueBet'] == true;
+    final assignedUnits =
+        isValue && marketOdds != null && marketOdds > 1 ? 1.0 : 0.0;
+    final date =
+        (kickoff ?? DateTime.now()).toUtc().toIso8601String().substring(0, 10);
+    await db.execute(
+      Sql.named('''
+        INSERT INTO baseball_analysis_history (
+          game_id, prediction_date, scheduled_at, home_team, away_team,
+          pick_side, market_label, model_probability, fair_odds, market_odds,
+          assigned_units, payload
+        ) VALUES (
+          @game_id, CAST(@prediction_date AS DATE),
+          CAST(NULLIF(@scheduled_at, '') AS TIMESTAMPTZ), @home_team,
+          @away_team, @pick_side, @market_label, @model_probability,
+          @fair_odds, @market_odds, @assigned_units, CAST(@payload AS JSONB)
+        ) ON CONFLICT (game_id) DO NOTHING
+      '''),
+      parameters: {
+        'game_id': id,
+        'prediction_date': date,
+        'scheduled_at': kickoff?.toUtc().toIso8601String() ?? '',
+        'home_team': home['name']?.toString() ?? 'Home',
+        'away_team': away['name']?.toString() ?? 'Away',
+        'pick_side': pickSide,
+        'market_label': analysis['bestPick']?.toString() ?? '',
+        'model_probability': analysis['bestPickProbability'],
+        'fair_odds': analysis['fairOdds'],
+        'market_odds': marketOdds,
+        'assigned_units': assignedUnits,
+        'payload': jsonEncode({'game': game, 'analysis': analysis}),
+      },
+    );
+  }
+
+  Future<List<Map<String, Object?>>> pendingBaseballAnalyses() async {
+    final db = await connection();
+    final result = await db.execute('''
+      SELECT game_id, home_team, away_team, pick_side, market_odds,
+             assigned_units
+      FROM baseball_analysis_history
+      WHERE result_status = 'pending'
+        AND prediction_date >= CURRENT_DATE - INTERVAL '14 days'
+      ORDER BY scheduled_at
+    ''');
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList(growable: false);
+  }
+
+  Future<void> settleBaseballAnalysis({
+    required String gameId,
+    required int homeScore,
+    required int awayScore,
+    required String resultStatus,
+    required double profitUnits,
+  }) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        UPDATE baseball_analysis_history SET
+          home_score = @home_score, away_score = @away_score,
+          result_status = @result_status, profit_units = @profit_units,
+          settled_at = NOW()
+        WHERE game_id = @game_id
+      '''),
+      parameters: {
+        'game_id': gameId,
+        'home_score': homeScore,
+        'away_score': awayScore,
+        'result_status': resultStatus,
+        'profit_units': profitUnits,
+      },
+    );
+  }
+
+  Future<Map<String, Object?>> baseballPerformanceSummary() async {
+    final db = await connection();
+    final result = await db.execute('''
+      SELECT COUNT(*) AS total,
+             COUNT(*) FILTER (WHERE result_status IN ('won', 'lost')) AS settled,
+             COUNT(*) FILTER (WHERE result_status = 'won') AS won,
+             COUNT(*) FILTER (WHERE result_status = 'lost') AS lost,
+             COALESCE(SUM(assigned_units) FILTER (WHERE result_status IN
+               ('won', 'lost') AND assigned_units > 0), 0) AS staked_units,
+             COALESCE(SUM(profit_units) FILTER (WHERE result_status IN
+               ('won', 'lost') AND assigned_units > 0), 0) AS profit_units
+      FROM baseball_analysis_history
+    ''');
+    final row = Map<String, Object?>.from(result.first.toColumnMap());
+    int integer(String key) => int.tryParse(row[key]?.toString() ?? '') ?? 0;
+    double number(String key) =>
+        double.tryParse(row[key]?.toString() ?? '') ?? 0;
+    final won = integer('won');
+    final lost = integer('lost');
+    final staked = number('staked_units');
+    final profit = number('profit_units');
+    return {
+      'totalAnalyses': integer('total'),
+      'settledAnalyses': integer('settled'),
+      'won': won,
+      'lost': lost,
+      'hitRatePercent': won + lost == 0 ? 0 : won / (won + lost) * 100,
+      'stakedUnits': staked,
+      'profitUnits': profit,
+      'roiPercent': staked == 0 ? 0 : profit / staked * 100,
+      'stakingModel': 'flat_1_unit_only_when_verified_market_odds_available',
     };
   }
 

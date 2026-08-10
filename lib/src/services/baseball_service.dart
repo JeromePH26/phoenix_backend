@@ -3,14 +3,20 @@ import 'dart:math' as math;
 
 import 'package:http/http.dart' as http;
 
+import '../database/database.dart';
+
 class BaseballService {
-  BaseballService({required this.apiKey, http.Client? client})
-      : _client = client ?? http.Client();
+  BaseballService({
+    required this.apiKey,
+    this.database,
+    http.Client? client,
+  }) : _client = client ?? http.Client();
 
   static const _baseUrl = 'https://v1.baseball.api-sports.io';
   static const _dailySafetyLimit = 90;
 
   final String apiKey;
+  final PhoenixDatabase? database;
   final http.Client _client;
   final Map<String, _BaseballCacheEntry> _cache = {};
   DateTime? _quotaDay;
@@ -38,13 +44,24 @@ class BaseballService {
       ...await _officialMlbHistory(requested),
     ];
     final completed = history.where(_isCompleted).toList(growable: false);
+    await _settleStoredAnalyses(completed);
     final standings = _formStandings(completed);
     const standingsKind = 'Formtabelle (letzte 8 Spieltage)';
     final analyses = <String, dynamic>{};
     for (final game in fixtures) {
       final id = game['id']?.toString();
       if (id == null || id.isEmpty) continue;
-      analyses[id] = _analyse(game, completed, const []);
+      final analysis = _analyse(game, completed, const []);
+      analyses[id] = analysis;
+      final scheduledAt = DateTime.tryParse(game['date']?.toString() ?? '');
+      if (!_isCompleted(game) &&
+          scheduledAt != null &&
+          scheduledAt.isAfter(DateTime.now())) {
+        await database?.saveBaseballAnalysisHistory(
+          game: game,
+          analysis: analysis,
+        );
+      }
     }
     return {
       'date': date,
@@ -56,7 +73,56 @@ class BaseballService {
       'model': 'Phoenix MLB v1',
       'requestsUsedToday': _requestsToday,
       'dailySafetyLimit': _dailySafetyLimit,
+      'performance': database == null
+          ? null
+          : await database!.baseballPerformanceSummary(),
     };
+  }
+
+  Future<void> _settleStoredAnalyses(
+    List<Map<String, dynamic>> completed,
+  ) async {
+    final store = database;
+    if (store == null || completed.isEmpty) return;
+    final pending = await store.pendingBaseballAnalyses();
+    for (final snapshot in pending) {
+      final gameId = snapshot['game_id']?.toString() ?? '';
+      final home = snapshot['home_team']?.toString() ?? '';
+      final away = snapshot['away_team']?.toString() ?? '';
+      final game = completed.cast<Map<String, dynamic>>().firstWhere(
+        (candidate) {
+          final teams = _map(candidate['teams']);
+          final candidateHome = _map(teams['home'])['name']?.toString() ?? '';
+          final candidateAway = _map(teams['away'])['name']?.toString() ?? '';
+          return candidate['id']?.toString() == gameId ||
+              (candidateHome == home && candidateAway == away);
+        },
+        orElse: () => const <String, dynamic>{},
+      );
+      if (game.isEmpty) continue;
+      final scores = _map(game['scores']);
+      final homeScore = _integer(_map(scores['home'])['total']);
+      final awayScore = _integer(_map(scores['away'])['total']);
+      if (homeScore == null || awayScore == null || homeScore == awayScore) {
+        continue;
+      }
+      final pickSide = snapshot['pick_side']?.toString();
+      final won =
+          pickSide == 'home' ? homeScore > awayScore : awayScore > homeScore;
+      final units = _number(snapshot['assigned_units']);
+      final odds = _number(snapshot['market_odds']);
+      await store.settleBaseballAnalysis(
+        gameId: gameId,
+        homeScore: homeScore,
+        awayScore: awayScore,
+        resultStatus: won ? 'won' : 'lost',
+        profitUnits: won && units > 0 && odds > 1
+            ? units * (odds - 1)
+            : won
+                ? 0
+                : -units,
+      );
+    }
   }
 
   Future<List<Map<String, dynamic>>> _gamesForDate(String date) async {
@@ -239,6 +305,7 @@ class BaseballService {
       'predictedHomeScore': expectedHome.round(),
       'predictedAwayScore': expectedAway.round(),
       'bestPick': '$pickTeam Sieg',
+      'pickSide': pickHome ? 'home' : 'away',
       'bestPickProbability': _percent(pickProbability),
       'fairOdds': _decimal(1 / pickProbability),
       'marketOdds': marketOdd == null ? null : _decimal(marketOdd),
@@ -520,6 +587,14 @@ class BaseballService {
   static double _number(Object? value) => value is num
       ? value.toDouble()
       : double.tryParse(value?.toString() ?? '') ?? 0;
+
+  static int? _integer(Object? value) {
+    if (value == null) return null;
+    if (value is int) return value;
+    if (value is num) return value.toInt();
+    return int.tryParse(value.toString());
+  }
+
   static double _percent(double value) => (value * 1000).round() / 10;
   static double _decimal(double value) => (value * 100).round() / 100;
 

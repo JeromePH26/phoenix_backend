@@ -43,7 +43,10 @@ class PhoenixBackend {
     final config = AppConfig.fromEnvironment();
     final database = PhoenixDatabase(config.databaseUrl);
     final football = FootballService(apiKey: config.apiFootballKey);
-    final baseball = BaseballService(apiKey: config.apiBaseballKey);
+    final baseball = BaseballService(
+      apiKey: config.apiBaseballKey,
+      database: database,
+    );
     final tennis = TennisService(
       apiKey: config.sportradarTennisApiKey,
       accessLevel: config.sportradarAccessLevel,

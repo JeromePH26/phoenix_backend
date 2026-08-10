@@ -762,6 +762,15 @@ class ApiRoutes {
       return jsonResponse(await database.footballPerformanceSummary());
     });
 
+    router.get('/api/performance', (Request request) async {
+      return jsonResponse({
+        'football': await database.footballPerformanceSummary(),
+        'baseball': await database.baseballPerformanceSummary(),
+        'note':
+            'ROI wird nur aus verifizierten Marktquoten und echten Einsätzen berechnet.',
+      });
+    });
+
     router.post('/api/admin/football/daily-scan', (Request request) async {
       if (!_isAdmin(request)) {
         return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
