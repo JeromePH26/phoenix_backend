@@ -54,7 +54,23 @@ class BaseballService {
       ttl: const Duration(hours: 2),
     );
 
-    final completed = results.where(_isCompleted).toList(growable: false);
+    var completed = results.where(_isCompleted).toList(growable: false);
+    var standings = _normaliseStandings(standingsRaw);
+    var standingsKind = 'Saisontabelle';
+    if (completed.isEmpty) {
+      final history = <Map<String, dynamic>>[];
+      for (var days = 0; days <= 16; days++) {
+        final day = requested.subtract(Duration(days: days));
+        final dayText =
+            '${day.year.toString().padLeft(4, '0')}-${day.month.toString().padLeft(2, '0')}-${day.day.toString().padLeft(2, '0')}';
+        history.addAll(await _gamesForDate(dayText));
+      }
+      completed = history.where(_isCompleted).toList(growable: false);
+    }
+    if (standings.isEmpty) {
+      standings = _formStandings(completed);
+      standingsKind = 'Formtabelle (letzte 16 Spieltage)';
+    }
     final analyses = <String, dynamic>{};
     for (final game in fixtures) {
       final id = game['id']?.toString();
@@ -66,7 +82,8 @@ class BaseballService {
       'league': 'MLB',
       'response': fixtures,
       'analyses': analyses,
-      'standings': _normaliseStandings(standingsRaw),
+      'standings': standings,
+      'standingsKind': standingsKind,
       'model': 'Phoenix MLB v1',
       'requestsUsedToday': _requestsToday,
       'dailySafetyLimit': _dailySafetyLimit,
@@ -117,7 +134,8 @@ class BaseballService {
     if (!isConfigured) throw StateError('API_BASEBALL_KEY fehlt.');
     _resetQuotaIfNeeded(now);
     if (_requestsToday >= _dailySafetyLimit) {
-      throw StateError('Baseball-Tageslimit zum Schutz des Free-Tarifs erreicht.');
+      throw StateError(
+          'Baseball-Tageslimit zum Schutz des Free-Tarifs erreicht.');
     }
     final uri = Uri.parse('$_baseUrl$path').replace(queryParameters: query);
     _requestsToday++;
@@ -127,7 +145,8 @@ class BaseballService {
     ).timeout(const Duration(seconds: 30));
     final decoded = jsonDecode(response.body);
     if (response.statusCode != 200 || decoded is! Map) {
-      throw StateError('Baseball-Anbieter antwortet mit ${response.statusCode}.');
+      throw StateError(
+          'Baseball-Anbieter antwortet mit ${response.statusCode}.');
     }
     final envelope = Map<String, dynamic>.from(decoded);
     final errors = envelope['errors'];
@@ -172,14 +191,14 @@ class BaseballService {
             .clamp(1.0, 9.0);
     final expectedAway = reliability == 0
         ? 4.3
-        : ((awayForm.runsFor + homeForm.runsAgainst) / 2)
-            .clamp(1.0, 9.0);
+        : ((awayForm.runsFor + homeForm.runsAgainst) / 2).clamp(1.0, 9.0);
     final pickHome = homeProbability >= awayProbability;
     final pickProbability = pickHome ? homeProbability : awayProbability;
     final pickTeam = (pickHome ? home['name'] : away['name'])?.toString() ?? '';
     final market = _moneylineOdds(fixture['id']?.toString() ?? '', odds);
     final marketOdd = pickHome ? market.$1 : market.$2;
-    final value = marketOdd == null ? null : (pickProbability * marketOdd - 1) * 100;
+    final value =
+        marketOdd == null ? null : (pickProbability * marketOdd - 1) * 100;
     final quality = (reliability * 100).round();
     final isValue = value != null && value >= 3 && quality >= 60;
 
@@ -197,7 +216,8 @@ class BaseballService {
       'marketOdds': marketOdd == null ? null : _decimal(marketOdd),
       'valuePercent': value == null ? null : _decimal(value),
       'isValueBet': isValue,
-      'recommendation': isValue ? '$pickTeam Sieg' : 'Kein bestätigter Value-Bet',
+      'recommendation':
+          isValue ? '$pickTeam Sieg' : 'Kein bestätigter Value-Bet',
       'confidence': _percent((pickProbability - 0.5).abs() * 2),
       'dataQuality': quality,
       'homeForm': homeForm.toJson(),
@@ -219,7 +239,8 @@ class BaseballService {
       final date = DateTime.tryParse(game['date']?.toString() ?? '');
       return cutoff == null || date == null || date.isBefore(cutoff);
     }).toList()
-      ..sort((a, b) => (b['date']?.toString() ?? '').compareTo(a['date']?.toString() ?? ''));
+      ..sort((a, b) =>
+          (b['date']?.toString() ?? '').compareTo(a['date']?.toString() ?? ''));
     var wins = 0;
     var runsFor = 0.0;
     var runsAgainst = 0.0;
@@ -252,7 +273,8 @@ class BaseballService {
     double? home;
     double? away;
     for (final row in odds) {
-      final linked = _map(row['game'])['id']?.toString() ?? row['id']?.toString();
+      final linked =
+          _map(row['game'])['id']?.toString() ?? row['id']?.toString();
       if (linked != gameId) continue;
       final bookmakers = row['bookmakers'];
       if (bookmakers is! List) continue;
@@ -278,7 +300,8 @@ class BaseballService {
     return (home, away);
   }
 
-  List<Map<String, dynamic>> _normaliseStandings(List<Map<String, dynamic>> rows) {
+  List<Map<String, dynamic>> _normaliseStandings(
+      List<Map<String, dynamic>> rows) {
     final output = <Map<String, dynamic>>[];
     void visit(Object? value) {
       if (value is List) {
@@ -286,7 +309,8 @@ class BaseballService {
       } else if (value is Map) {
         final row = Map<String, dynamic>.from(value);
         final team = _map(row['team']);
-        if (team.isNotEmpty && (row.containsKey('position') || row.containsKey('rank'))) {
+        if (team.isNotEmpty &&
+            (row.containsKey('position') || row.containsKey('rank'))) {
           final games = _map(row['games']);
           final points = _map(row['points']);
           output.add({
@@ -305,8 +329,60 @@ class BaseballService {
         }
       }
     }
+
     visit(rows);
     return output;
+  }
+
+  List<Map<String, dynamic>> _formStandings(
+    List<Map<String, dynamic>> games,
+  ) {
+    final teams = <String, Map<String, dynamic>>{};
+    for (final game in games) {
+      final pair = _map(game['teams']);
+      final scores = _map(game['scores']);
+      final homeScore = _number(_map(scores['home'])['total']);
+      final awayScore = _number(_map(scores['away'])['total']);
+      final home = _map(pair['home']);
+      final away = _map(pair['away']);
+      for (final entry in [
+        (home, homeScore, awayScore),
+        (away, awayScore, homeScore),
+      ]) {
+        final team = entry.$1;
+        final id = team['id']?.toString() ?? team['name']?.toString() ?? '';
+        final row = teams.putIfAbsent(
+            id,
+            () => {
+                  'teamId': team['id'],
+                  'team': team['name'],
+                  'logo': team['logo'],
+                  'played': 0,
+                  'wins': 0,
+                  'losses': 0,
+                  'runsFor': 0.0,
+                  'runsAgainst': 0.0,
+                });
+        row['played'] = (row['played'] as int) + 1;
+        row['runsFor'] = (row['runsFor'] as num) + entry.$2;
+        row['runsAgainst'] = (row['runsAgainst'] as num) + entry.$3;
+        if (entry.$2 > entry.$3) {
+          row['wins'] = (row['wins'] as int) + 1;
+        } else {
+          row['losses'] = (row['losses'] as int) + 1;
+        }
+      }
+    }
+    final rows = teams.values.toList()
+      ..sort((a, b) {
+        final aRate = (a['wins'] as int) / math.max(1, a['played'] as int);
+        final bRate = (b['wins'] as int) / math.max(1, b['played'] as int);
+        return bRate.compareTo(aRate);
+      });
+    for (var index = 0; index < rows.length; index++) {
+      rows[index]['position'] = index + 1;
+    }
+    return rows;
   }
 
   bool _isCompleted(Map<String, dynamic> game) {
@@ -316,13 +392,16 @@ class BaseballService {
 
   int _seasonFrom(List<Map<String, dynamic>> rows, int fallback) {
     if (rows.isEmpty) return fallback;
-    return int.tryParse(_map(rows.first['league'])['season']?.toString() ?? '') ?? fallback;
+    return int.tryParse(
+            _map(rows.first['league'])['season']?.toString() ?? '') ??
+        fallback;
   }
 
   static Map<String, dynamic> _map(Object? value) =>
       value is Map ? Map<String, dynamic>.from(value) : <String, dynamic>{};
-  static double _number(Object? value) =>
-      value is num ? value.toDouble() : double.tryParse(value?.toString() ?? '') ?? 0;
+  static double _number(Object? value) => value is num
+      ? value.toDouble()
+      : double.tryParse(value?.toString() ?? '') ?? 0;
   static double _percent(double value) => (value * 1000).round() / 10;
   static double _decimal(double value) => (value * 100).round() / 100;
 
@@ -338,7 +417,11 @@ class BaseballService {
 }
 
 class _TeamForm {
-  const _TeamForm({required this.games, required this.wins, required this.runsFor, required this.runsAgainst});
+  const _TeamForm(
+      {required this.games,
+      required this.wins,
+      required this.runsFor,
+      required this.runsAgainst});
   final int games;
   final int wins;
   final double runsFor;
