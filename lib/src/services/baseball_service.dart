@@ -200,9 +200,8 @@ class BaseballService {
         (homeForm.runDifference - awayForm.runDifference) * 0.10 +
         0.14;
     final rawHome = 1 / (1 + math.exp(-logit));
-    final homeProbability =
+    final formHomeProbability =
         (0.5 + (rawHome - 0.5) * reliability).clamp(0.18, 0.82);
-    final awayProbability = 1 - homeProbability;
     final expectedHome = reliability == 0
         ? 4.5
         : ((homeForm.runsFor + awayForm.runsAgainst) / 2 + 0.15)
@@ -210,6 +209,18 @@ class BaseballService {
     final expectedAway = reliability == 0
         ? 4.3
         : ((awayForm.runsFor + homeForm.runsAgainst) / 2).clamp(1.0, 9.0);
+    final quality = (reliability * 85).round();
+    final simulation = _simulate(
+      expectedHome: expectedHome,
+      expectedAway: expectedAway,
+      formHomeProbability: formHomeProbability,
+      dataQuality: quality,
+      seed: int.tryParse(fixture['id']?.toString() ?? '') ??
+          fixture['id'].toString().hashCode,
+    );
+    final homeProbability =
+        simulation.probabilities['home_win'] ?? formHomeProbability.toDouble();
+    final awayProbability = 1 - homeProbability;
     final pickHome = homeProbability >= awayProbability;
     final pickProbability = pickHome ? homeProbability : awayProbability;
     final pickTeam = (pickHome ? home['name'] : away['name'])?.toString() ?? '';
@@ -217,7 +228,6 @@ class BaseballService {
     final marketOdd = pickHome ? market.$1 : market.$2;
     final value =
         marketOdd == null ? null : (pickProbability * marketOdd - 1) * 100;
-    final quality = (reliability * 100).round();
     final isValue = value != null && value >= 3 && quality >= 60;
 
     return {
@@ -238,10 +248,132 @@ class BaseballService {
           isValue ? '$pickTeam Sieg' : 'Kein bestätigter Value-Bet',
       'confidence': _percent((pickProbability - 0.5).abs() * 2),
       'dataQuality': quality,
+      'simulationRuns': simulation.runs,
+      'simulationStability': simulation.stability,
+      'simulationLow': _percent(simulation.low),
+      'simulationHigh': _percent(simulation.high),
+      'markets': simulation.markets,
       'homeForm': homeForm.toJson(),
       'awayForm': awayForm.toJson(),
-      'method': 'Letzte 10 MLB-Spiele, Run-Differenz und Heimvorteil',
+      'method':
+          '100.000 Monte-Carlo-Simulationen · letzte 10 Spiele · Run-Differenz · Heimvorteil',
     };
+  }
+
+  _MlbSimulation _simulate({
+    required double expectedHome,
+    required double expectedAway,
+    required double formHomeProbability,
+    required int dataQuality,
+    required int seed,
+  }) {
+    const runs = 100000;
+    const batches = 20;
+    const batchSize = runs ~/ batches;
+    final random = math.Random(seed);
+    final counts = <String, int>{};
+    final batchHome = <double>[];
+    var homeInBatch = 0;
+    final uncertainty = (0.12 + (100 - dataQuality.clamp(0, 100)) / 100 * 0.22)
+        .clamp(0.12, 0.34);
+
+    void hit(String key, bool value) {
+      if (value) counts[key] = (counts[key] ?? 0) + 1;
+    }
+
+    for (var i = 0; i < runs; i++) {
+      final homeLambda = _varyRunRate(expectedHome, uncertainty, random);
+      final awayLambda = _varyRunRate(expectedAway, uncertainty, random);
+      final homeRuns = _poisson(homeLambda, random);
+      final awayRuns = _poisson(awayLambda, random);
+      final total = homeRuns + awayRuns;
+      final homeWin = homeRuns == awayRuns
+          ? random.nextDouble() < formHomeProbability
+          : homeRuns > awayRuns;
+      if (homeWin) homeInBatch++;
+      hit('home_win', homeWin);
+      hit('away_win', !homeWin);
+      hit('over_65', total >= 7);
+      hit('under_65', total <= 6);
+      hit('over_75', total >= 8);
+      hit('under_75', total <= 7);
+      hit('over_85', total >= 9);
+      hit('under_85', total <= 8);
+      hit('over_95', total >= 10);
+      hit('under_95', total <= 9);
+      hit('home_minus_15', homeRuns - awayRuns >= 2);
+      hit('away_minus_15', awayRuns - homeRuns >= 2);
+      hit('home_over_35', homeRuns >= 4);
+      hit('home_over_45', homeRuns >= 5);
+      hit('away_over_35', awayRuns >= 4);
+      hit('away_over_45', awayRuns >= 5);
+      if ((i + 1) % batchSize == 0) {
+        batchHome.add(homeInBatch / batchSize);
+        homeInBatch = 0;
+      }
+    }
+    final probabilities = counts.map(
+      (key, value) => MapEntry(key, value / runs),
+    );
+    batchHome.sort();
+    final low = batchHome[1];
+    final high = batchHome[18];
+    final stability = (100 - (high - low) * 500).round().clamp(0, 100);
+    const labels = <String, String>{
+      'home_win': 'Heimsieg',
+      'away_win': 'Auswärtssieg',
+      'over_65': 'Über 6,5 Runs',
+      'under_65': 'Unter 6,5 Runs',
+      'over_75': 'Über 7,5 Runs',
+      'under_75': 'Unter 7,5 Runs',
+      'over_85': 'Über 8,5 Runs',
+      'under_85': 'Unter 8,5 Runs',
+      'over_95': 'Über 9,5 Runs',
+      'under_95': 'Unter 9,5 Runs',
+      'home_minus_15': 'Heimteam -1,5',
+      'away_minus_15': 'Auswärtsteam -1,5',
+      'home_over_35': 'Heimteam über 3,5 Runs',
+      'home_over_45': 'Heimteam über 4,5 Runs',
+      'away_over_35': 'Auswärtsteam über 3,5 Runs',
+      'away_over_45': 'Auswärtsteam über 4,5 Runs',
+    };
+    final markets = probabilities.entries
+        .map((entry) => {
+              'key': entry.key,
+              'name': labels[entry.key] ?? entry.key,
+              'probability': _percent(entry.value),
+              'fairOdds': _decimal(1 / entry.value),
+            })
+        .toList()
+      ..sort((a, b) =>
+          (b['probability'] as double).compareTo(a['probability'] as double));
+    return _MlbSimulation(
+      runs: runs,
+      probabilities: probabilities,
+      stability: stability,
+      low: low,
+      high: high,
+      markets: markets,
+    );
+  }
+
+  double _varyRunRate(double base, double sigma, math.Random random) {
+    final u1 = math.max(random.nextDouble(), 1e-12);
+    final u2 = random.nextDouble();
+    final normal = math.sqrt(-2 * math.log(u1)) * math.cos(2 * math.pi * u2);
+    return (base * math.exp(normal * sigma - 0.5 * sigma * sigma))
+        .clamp(0.2, 12.0);
+  }
+
+  int _poisson(double lambda, math.Random random) {
+    final limit = math.exp(-lambda);
+    var product = 1.0;
+    var k = 0;
+    do {
+      k++;
+      product *= random.nextDouble();
+    } while (product > limit && k < 30);
+    return k - 1;
   }
 
   _TeamForm _teamForm(
@@ -423,6 +555,23 @@ class _TeamForm {
         'runsAgainst': BaseballService._decimal(runsAgainst),
         'runDifference': BaseballService._decimal(runDifference),
       };
+}
+
+class _MlbSimulation {
+  const _MlbSimulation({
+    required this.runs,
+    required this.probabilities,
+    required this.stability,
+    required this.low,
+    required this.high,
+    required this.markets,
+  });
+  final int runs;
+  final Map<String, double> probabilities;
+  final int stability;
+  final double low;
+  final double high;
+  final List<Map<String, dynamic>> markets;
 }
 
 class _BaseballCacheEntry {
