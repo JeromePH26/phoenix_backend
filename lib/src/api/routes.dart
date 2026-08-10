@@ -947,6 +947,7 @@ class ApiRoutes {
           a.confidence,
           a.recommendation,
           a.payload AS analysis_payload,
+          p.availability AS phase_two_availability,
           a.analyzed_at
         FROM latest_job j
         INNER JOIN football_phase_two_results p
@@ -977,11 +978,34 @@ class ApiRoutes {
             if (value is Map) {
               return Map<String, Object?>.from(value);
             }
+            if (value is String && value.trim().isNotEmpty) {
+              try {
+                final decoded = jsonDecode(value);
+                if (decoded is Map) return Map<String, Object?>.from(decoded);
+              } catch (_) {
+                // Beschädigte historische JSON-Werte dürfen die Spielansicht
+                // nicht blockieren; in diesem Fall lädt die App wie bisher nach.
+              }
+            }
             return <String, Object?>{};
           }
 
           final rawMatch = mapValue(values.remove('raw_json'));
           final analysis = mapValue(values.remove('analysis_payload'));
+          final phaseTwoAvailability =
+              mapValue(values.remove('phase_two_availability'));
+          final existingPhaseTwo = mapValue(analysis['phaseTwo']);
+          final enrichedAnalysis = <String, Object?>{
+            ...analysis,
+            'phaseTwo': <String, Object?>{
+              ...existingPhaseTwo,
+              // Der Scan hat diese Rohdaten bereits kontrolliert und in der
+              // Datenbank gespeichert. Sie müssen an die App ausgeliefert
+              // werden, damit Tabelle, Form und H2H sofort sichtbar sind,
+              // ohne parallele Nachlade-Requests an den Free-Tarif.
+              'availability': phaseTwoAvailability,
+            },
+          };
 
           return <String, Object?>{
             ...rawMatch,
@@ -1000,7 +1024,7 @@ class ApiRoutes {
             'homeGoals': values['home_goals'],
             'awayGoals': values['away_goals'],
             'analysis': {
-              ...analysis,
+              ...enrichedAnalysis,
               'modelVersion': values['model_version']?.toString() ?? '',
               'dataQuality': values['data_quality'],
               'confidence': values['confidence'],
