@@ -254,7 +254,7 @@ class BaseballService {
       final teams = _map(game['teams']);
       bool matches(Map<String, dynamic> team) =>
           team['id']?.toString() == teamId ||
-          team['name']?.toString().toLowerCase() == teamName.toLowerCase();
+          _teamKey(team['name']) == _teamKey(teamName);
       final plays =
           matches(_map(teams['home'])) || matches(_map(teams['away']));
       if (!plays) return false;
@@ -271,7 +271,7 @@ class BaseballService {
       final teams = _map(game['teams']);
       final homeTeam = _map(teams['home']);
       final isHome = homeTeam['id']?.toString() == teamId ||
-          homeTeam['name']?.toString().toLowerCase() == teamName.toLowerCase();
+          _teamKey(homeTeam['name']) == _teamKey(teamName);
       final scores = _map(game['scores']);
       final homeScore = _number(_map(scores['home'])['total']);
       final awayScore = _number(_map(scores['away'])['total']);
@@ -340,7 +340,7 @@ class BaseballService {
         (away, awayScore, homeScore),
       ]) {
         final team = entry.$1;
-        final id = team['id']?.toString() ?? team['name']?.toString() ?? '';
+        final id = _teamKey(team['name']);
         final row = teams.putIfAbsent(
             id,
             () => {
@@ -382,6 +382,9 @@ class BaseballService {
 
   static Map<String, dynamic> _map(Object? value) =>
       value is Map ? Map<String, dynamic>.from(value) : <String, dynamic>{};
+  static String _teamKey(Object? value) =>
+      value?.toString().toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '') ??
+      '';
   static double _number(Object? value) => value is num
       ? value.toDouble()
       : double.tryParse(value?.toString() ?? '') ?? 0;
