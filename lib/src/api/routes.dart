@@ -147,7 +147,7 @@ class ApiRoutes {
     router.get('/api/football/analyses/today', (Request request) async {
       final quality =
           int.tryParse(request.url.queryParameters['minimumQuality'] ?? '') ??
-              60;
+              0;
       final date = _berlinNow();
 
       try {
@@ -183,7 +183,7 @@ class ApiRoutes {
 
       final quality =
           int.tryParse(request.url.queryParameters['minimumQuality'] ?? '') ??
-              50;
+              0;
 
       try {
         final matches = await _preparedFootballAnalyses(
@@ -845,6 +845,12 @@ class ApiRoutes {
       '/players',
       '/players/squads',
       '/teams/statistics',
+      '/teams',
+      '/leagues',
+      '/coachs',
+      '/transfers',
+      '/trophies',
+      '/sidelined',
       '/odds',
     };
     final normalized = path.startsWith('/') ? path : '/$path';
@@ -853,7 +859,10 @@ class ApiRoutes {
 
   Future<List<Map<String, Object?>>> _preparedFootballAnalyses({
     required DateTime date,
-    int minimumDataQuality = 60,
+    // Die Pipeline speichert bewusst alle Whitelist-Spiele. Auch Spiele mit
+    // dünner Datenlage müssen an die App gelangen; dort wird die Qualität
+    // sichtbar bewertet, statt die Analyse vollständig verschwinden zu lassen.
+    int minimumDataQuality = 0,
   }) async {
     final db = await database.connection();
     final safeQuality = minimumDataQuality.clamp(0, 100);

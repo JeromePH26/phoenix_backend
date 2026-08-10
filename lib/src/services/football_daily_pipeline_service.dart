@@ -274,6 +274,7 @@ class FootballDailyPipelineService {
         },
         'fairOdds': fairOdds,
         'marketOddsByKey': {
+          ..._map(selection['marketOddsByKey']),
           if (_string(phoenixTip['marketKey']).isNotEmpty)
             _string(phoenixTip['marketKey']):
                 _map(selection['value'])['marketOdds'],

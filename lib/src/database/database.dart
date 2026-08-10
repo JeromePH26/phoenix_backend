@@ -320,7 +320,7 @@ class PhoenixDatabase {
     ''');
 
     // PHÖNIX feste Wettbewerbs-Whitelist:
-    // 14 nationale Ligen, 11 nationale Pokale und 3 UEFA-Wettbewerbe.
+    // 15 nationale Ligen, 11 nationale Pokale und 3 UEFA-Wettbewerbe.
     // Bereits vorhandene Datensätze werden auf whitelist aktualisiert.
     await db.execute(r'''
       INSERT INTO football_leagues (
@@ -343,6 +343,7 @@ class PhoenixDatabase {
         ('94',  'Primeira Liga',               'Portugal',    'men', 1, 'whitelist', 'approved', NOW()),
         ('103', 'Eliteserien',                 'Norway',      'men', 1, 'whitelist', 'approved', NOW()),
         ('113', 'Allsvenskan',                 'Sweden',      'men', 1, 'whitelist', 'approved', NOW()),
+        ('119', 'Superliga',                   'Denmark',     'men', 1, 'whitelist', 'approved', NOW()),
         ('135', 'Serie A',                     'Italy',       'men', 1, 'whitelist', 'approved', NOW()),
         ('140', 'La Liga',                     'Spain',       'men', 1, 'whitelist', 'approved', NOW()),
         ('144', 'Jupiler Pro League',          'Belgium',     'men', 1, 'whitelist', 'approved', NOW()),
@@ -795,12 +796,20 @@ class PhoenixDatabase {
     final db = await connection();
     final rows = await db.execute('''
       SELECT DISTINCT id, name, kind FROM (
-        SELECT home_team_id AS id, home_team_name AS name, 'team' AS kind
-        FROM football_matches
+        SELECT m.home_team_id AS id, m.home_team_name AS name, 'team' AS kind
+        FROM football_matches m
+        INNER JOIN football_leagues l ON l.league_id = m.league_id
+        WHERE l.manual_status = 'whitelist'
         UNION ALL
-        SELECT away_team_id, away_team_name, 'team' FROM football_matches
+        SELECT m.away_team_id, m.away_team_name, 'team'
+        FROM football_matches m
+        INNER JOIN football_leagues l ON l.league_id = m.league_id
+        WHERE l.manual_status = 'whitelist'
         UNION ALL
-        SELECT league_id, league_name, 'league' FROM football_matches
+        SELECT m.league_id, m.league_name, 'league'
+        FROM football_matches m
+        INNER JOIN football_leagues l ON l.league_id = m.league_id
+        WHERE l.manual_status = 'whitelist'
       ) entities
       WHERE id <> '' AND name <> ''
     ''');
@@ -907,6 +916,20 @@ class PhoenixDatabase {
              league_ids, league_names, published_at
       FROM news_articles
       WHERE published_at >= NOW() - (@hours * INTERVAL '1 hour')
+        AND (
+          EXISTS (
+            SELECT 1 FROM football_leagues l
+            WHERE l.manual_status = 'whitelist'
+              AND league_ids ? l.league_id
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM football_matches m
+            INNER JOIN football_leagues l ON l.league_id = m.league_id
+            WHERE l.manual_status = 'whitelist'
+              AND (team_ids ? m.home_team_id OR team_ids ? m.away_team_id)
+          )
+        )
         AND (@teamId = '' OR team_ids ? @teamId)
         AND (@leagueId = '' OR league_ids ? @leagueId)
         AND (@category = '' OR category = @category)

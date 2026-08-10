@@ -41,36 +41,39 @@ class FootballService {
     );
     final rows = decoded['response'];
     if (rows is! List) return const [];
-    return rows.whereType<Map>().map((raw) {
-      final row = Map<String, dynamic>.from(raw);
-      final fixture = _map(row['fixture']);
-      final league = _map(row['league']);
-      final teams = _map(row['teams']);
-      final goals = _map(row['goals']);
-      final home = _map(teams['home']);
-      final away = _map(teams['away']);
-      final status = _map(fixture['status']);
-      return <String, Object?>{
-        'id': fixture['id']?.toString() ?? '',
-        'kickoff': fixture['date']?.toString() ?? '',
-        'status': status['short']?.toString() ?? 'NS',
-        'leagueId': league['id']?.toString() ?? '',
-        'season': _seasonForMatch(league, date),
-        'league': league['name']?.toString() ?? '',
-        'country': league['country']?.toString() ?? '',
-        'leagueLogo': league['logo']?.toString() ?? '',
-        'homeTeamId': home['id']?.toString() ?? '',
-        'homeTeam': home['name']?.toString() ?? '',
-        'homeLogo': home['logo']?.toString() ?? '',
-        'awayTeamId': away['id']?.toString() ?? '',
-        'awayTeam': away['name']?.toString() ?? '',
-        'awayLogo': away['logo']?.toString() ?? '',
-        'homeGoals': goals['home'],
-        'awayGoals': goals['away'],
-      };
-    }).where((row) => (row['id'] as String).isNotEmpty).toList();
+    return rows
+        .whereType<Map>()
+        .map((raw) {
+          final row = Map<String, dynamic>.from(raw);
+          final fixture = _map(row['fixture']);
+          final league = _map(row['league']);
+          final teams = _map(row['teams']);
+          final goals = _map(row['goals']);
+          final home = _map(teams['home']);
+          final away = _map(teams['away']);
+          final status = _map(fixture['status']);
+          return <String, Object?>{
+            'id': fixture['id']?.toString() ?? '',
+            'kickoff': fixture['date']?.toString() ?? '',
+            'status': status['short']?.toString() ?? 'NS',
+            'leagueId': league['id']?.toString() ?? '',
+            'season': _seasonForMatch(league, date),
+            'league': league['name']?.toString() ?? '',
+            'country': league['country']?.toString() ?? '',
+            'leagueLogo': league['logo']?.toString() ?? '',
+            'homeTeamId': home['id']?.toString() ?? '',
+            'homeTeam': home['name']?.toString() ?? '',
+            'homeLogo': home['logo']?.toString() ?? '',
+            'awayTeamId': away['id']?.toString() ?? '',
+            'awayTeam': away['name']?.toString() ?? '',
+            'awayLogo': away['logo']?.toString() ?? '',
+            'homeGoals': goals['home'],
+            'awayGoals': goals['away'],
+          };
+        })
+        .where((row) => (row['id'] as String).isNotEmpty)
+        .toList();
   }
-
 
   Future<Map<String, Object?>> coverageForFixture({
     required String fixtureId,
@@ -91,15 +94,25 @@ class FootballService {
     Future<void> checkList(
       String key,
       String path,
-      Map<String, String> query,
-    ) async {
+      Map<String, String> query, {
+      bool retainRows = true,
+    }) async {
       try {
         final decoded = await _get(path, query);
         final rows = _responseRows(decoded);
         result[key] = rows.isNotEmpty;
         result['${key}Count'] = rows.length;
+        // Nicht nur die Verfügbarkeit merken: Diese Rohdaten werden später
+        // in der veröffentlichten Analyse benötigt, damit die App Tabelle,
+        // Form, H2H, Verletzungen und Aufstellungen wirklich anzeigen kann.
+        if (retainRows) {
+          result['${key}Data'] = rows;
+        }
       } catch (error) {
         result[key] = false;
+        if (retainRows) {
+          result['${key}Data'] = <Object?>[];
+        }
         result['${key}Error'] = error.toString();
       }
 
@@ -110,7 +123,9 @@ class FootballService {
       final fixtures = _map(statistics['fixtures']);
       final played = _map(fixtures['played']);
       final total = played['total'];
-      return total is num ? total.round() : int.tryParse(total?.toString() ?? '') ?? 0;
+      return total is num
+          ? total.round()
+          : int.tryParse(total?.toString() ?? '') ?? 0;
     }
 
     Future<Map<String, dynamic>> fetchStatistics(
@@ -164,12 +179,9 @@ class FootballService {
           final fixtures = _map(statistics['fixtures']);
 
           result['${prefix}Played'] = fixtures['played'];
-          result['${prefix}GoalsForAverageTotal'] =
-              goalsForAverage['total'];
-          result['${prefix}GoalsForAverageHome'] =
-              goalsForAverage['home'];
-          result['${prefix}GoalsForAverageAway'] =
-              goalsForAverage['away'];
+          result['${prefix}GoalsForAverageTotal'] = goalsForAverage['total'];
+          result['${prefix}GoalsForAverageHome'] = goalsForAverage['home'];
+          result['${prefix}GoalsForAverageAway'] = goalsForAverage['away'];
           result['${prefix}GoalsAgainstAverageTotal'] =
               goalsAgainstAverage['total'];
           result['${prefix}GoalsAgainstAverageHome'] =
@@ -222,11 +234,18 @@ class FootballService {
       'odds',
       '/odds',
       {'fixture': fixtureId},
+      retainRows: false,
     );
 
     await checkList(
       'injuries',
       '/injuries',
+      {'fixture': fixtureId},
+    );
+
+    await checkList(
+      'lineups',
+      '/fixtures/lineups',
       {'fixture': fixtureId},
     );
 
@@ -261,7 +280,6 @@ class FootballService {
         .map((row) => Map<String, Object?>.from(row))
         .toList();
   }
-
 
   /// Zentraler, begrenzter API-Football-Zugriff für die PHÖNIX-App.
   ///
@@ -383,7 +401,6 @@ class FootballService {
     return const Duration(minutes: 5);
   }
 
-
   Future<Map<String, Object?>> liveSnapshot(String fixtureId) async {
     final normalized = fixtureId.trim();
     if (normalized.isEmpty) {
@@ -462,8 +479,7 @@ class FootballService {
     events.sort((a, b) {
       final minute = (b['minute'] as int).compareTo(a['minute'] as int);
       if (minute != 0) return minute;
-      return (b['extraMinute'] as int)
-          .compareTo(a['extraMinute'] as int);
+      return (b['extraMinute'] as int).compareTo(a['extraMinute'] as int);
     });
 
     final statRows = _responseRows(responses[2]).map(_map).toList();
@@ -616,11 +632,8 @@ class FootballService {
   int? _integer(Object? value) {
     if (value is int) return value;
     if (value is num) return value.round();
-    final normalized = value
-        ?.toString()
-        .replaceAll('%', '')
-        .replaceAll(',', '.')
-        .trim();
+    final normalized =
+        value?.toString().replaceAll('%', '').replaceAll(',', '.').trim();
     return int.tryParse(normalized ?? '') ??
         double.tryParse(normalized ?? '')?.round();
   }
@@ -628,15 +641,9 @@ class FootballService {
   double? _decimal(Object? value) {
     if (value is num) return value.toDouble();
     return double.tryParse(
-      value
-              ?.toString()
-              .replaceAll('%', '')
-              .replaceAll(',', '.')
-              .trim() ??
-          '',
+      value?.toString().replaceAll('%', '').replaceAll(',', '.').trim() ?? '',
     );
   }
-
 
   int _seasonForMatch(Map<String, dynamic> league, DateTime fixtureDate) {
     final rawSeason = league['season'];
@@ -654,11 +661,9 @@ class FootballService {
   Map<String, dynamic> _map(Object? value) =>
       value is Map ? Map<String, dynamic>.from(value) : <String, dynamic>{};
 
-  String _day(DateTime value) =>
-      '${value.year.toString().padLeft(4, '0')}-'
+  String _day(DateTime value) => '${value.year.toString().padLeft(4, '0')}-'
       '${value.month.toString().padLeft(2, '0')}-'
       '${value.day.toString().padLeft(2, '0')}';
 
   void close() => _client.close();
 }
-

@@ -33,11 +33,23 @@ class FootballValueService {
       final phoenixTip = _map(selection['phoenixTip']);
       final marketKey = _string(phoenixTip['marketKey']);
       final fairOdds = _number(phoenixTip['fairOdds']);
+      final rawOdds = await football.oddsForFixture(fixtureId);
+      final marketOddsByKey = <String, Object?>{};
+      final allMarkets = selection['allMarkets'];
+      if (allMarkets is List) {
+        for (final rawMarket in allMarkets.whereType<Map>()) {
+          final key = _string(rawMarket['key']);
+          if (key.isEmpty) continue;
+          final best = _oddsForMarket(rawOdds, key).best;
+          if (best != null && best > 1) marketOddsByKey[key] = best;
+        }
+      }
 
       if (selection['qualifiesForTip'] != true || marketKey.isEmpty) {
         final updated = <String, Object?>{
           ...selection,
           'modelVersion': modelVersion,
+          'marketOddsByKey': marketOddsByKey,
           'value': {
             'status': 'no_estimate',
             'marketOdds': null,
@@ -68,7 +80,6 @@ class FootballValueService {
         continue;
       }
 
-      final rawOdds = await football.oddsForFixture(fixtureId);
       final oddsSummary = _oddsForMarket(
         rawOdds,
         marketKey,
@@ -131,6 +142,7 @@ class FootballValueService {
       final updated = <String, Object?>{
         ...selection,
         'modelVersion': modelVersion,
+        'marketOddsByKey': marketOddsByKey,
         'value': {
           'status': hasRequiredData ? 'checked' : 'odds_unavailable',
           'marketOdds': marketOdds,

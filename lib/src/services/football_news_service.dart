@@ -23,21 +23,46 @@ class FootballNewsService {
   DateTime? _lastRefresh;
   bool _refreshing = false;
 
-  static const _sources = [
+  static const List<
+      ({
+        String name,
+        String site,
+        String feed,
+        String? fixedLeagueId,
+        String? fixedLeagueName,
+        bool footballOnly,
+      })> _sources = [
     (
       name: 'Quelle www.kicker.de',
       site: 'https://www.kicker.de',
       feed: 'https://newsfeed.kicker.de/news/aktuell',
+      fixedLeagueId: null,
+      fixedLeagueName: null,
+      footballOnly: false,
     ),
     (
       name: 'Sportschau',
       site: 'https://www.sportschau.de',
-      feed: 'https://www.sportschau.de/index~rss2.xml'
+      feed: 'https://www.sportschau.de/index~rss2.xml',
+      fixedLeagueId: null,
+      fixedLeagueName: null,
+      footballOnly: false,
     ),
     (
       name: 'Tagesschau Sport',
       site: 'https://www.tagesschau.de/sport',
-      feed: 'https://www.tagesschau.de/sport/index~rss2.xml'
+      feed: 'https://www.tagesschau.de/sport/index~rss2.xml',
+      fixedLeagueId: null,
+      fixedLeagueName: null,
+      footballOnly: false,
+    ),
+    (
+      name: '3. Liga Online',
+      site: 'https://www.liga3-online.de',
+      feed: 'https://www.liga3-online.de/feed/',
+      fixedLeagueId: '80',
+      fixedLeagueName: '3. Liga',
+      footballOnly: true,
     ),
   ];
 
@@ -78,16 +103,23 @@ class FootballNewsService {
             if (title.isEmpty || link.isEmpty) continue;
             final summary = _clean(_text(item, 'description'));
             final haystack = '$title $summary'.toLowerCase();
-            if (!_isFootball(haystack)) continue;
-            final published =
-                _date(_text(item, 'pubDate')) ?? DateTime.now().toUtc();
-            if (DateTime.now().toUtc().difference(published) >
-                const Duration(days: 14)) continue;
+            if (!source.footballOnly && !_isFootball(haystack)) continue;
+            final published = _date(_text(item, 'pubDate'));
+            if (published == null) continue;
+            final age = DateTime.now().toUtc().difference(published);
+            if (age.isNegative && age.abs() > const Duration(hours: 2)) {
+              continue;
+            }
+            if (age > const Duration(days: 7)) continue;
 
             final teamIds = <String>[];
             final teamNames = <String>[];
-            final leagueIds = <String>[];
-            final leagueNames = <String>[];
+            final leagueIds = <String>[
+              if (source.fixedLeagueId != null) source.fixedLeagueId!,
+            ];
+            final leagueNames = <String>[
+              if (source.fixedLeagueName != null) source.fixedLeagueName!,
+            ];
             for (final entity in entities) {
               final name = entity['name']!;
               if (name.length < 4 || !haystack.contains(name.toLowerCase()))
@@ -100,6 +132,10 @@ class FootballNewsService {
                 leagueNames.add(name);
               }
             }
+            // PHÖNIX-News gehören ausschließlich zu den freigegebenen Ligen.
+            // Allgemeine WM-, Nationalmannschafts- und sonstige Fremdbeiträge
+            // ohne Whitelist-Zuordnung werden nicht gespeichert.
+            if (teamIds.isEmpty && leagueIds.isEmpty) continue;
             final category = _category(haystack);
             final importance = _importance(
               haystack: haystack,
