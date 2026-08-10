@@ -33,13 +33,10 @@ class BaseballService {
   Future<Map<String, dynamic>> mlbOverview(String date) async {
     final fixtures = await _gamesForDate(date);
     final requested = DateTime.tryParse(date) ?? DateTime.now();
-    final history = <Map<String, dynamic>>[];
-    for (var days = 0; days <= 8; days++) {
-      final day = requested.subtract(Duration(days: days));
-      final dayText =
-          '${day.year.toString().padLeft(4, '0')}-${day.month.toString().padLeft(2, '0')}-${day.day.toString().padLeft(2, '0')}';
-      history.addAll(await _gamesForDate(dayText));
-    }
+    final history = <Map<String, dynamic>>[
+      ...fixtures,
+      ...await _officialMlbHistory(requested),
+    ];
     final completed = history.where(_isCompleted).toList(growable: false);
     final standings = _formStandings(completed);
     const standingsKind = 'Formtabelle (letzte 8 Spieltage)';
@@ -122,6 +119,58 @@ class BaseballService {
     return rows;
   }
 
+  Future<List<Map<String, dynamic>>> _officialMlbHistory(DateTime end) async {
+    final start = end.subtract(const Duration(days: 14));
+    String day(DateTime value) =>
+        '${value.year.toString().padLeft(4, '0')}-${value.month.toString().padLeft(2, '0')}-${value.day.toString().padLeft(2, '0')}';
+    final cacheKey = 'official-mlb-${day(end)}';
+    final now = DateTime.now().toUtc();
+    final cached = _cache[cacheKey];
+    if (cached != null && now.isBefore(cached.expiresAt)) return cached.rows;
+    final uri = Uri.https('statsapi.mlb.com', '/api/v1/schedule', {
+      'sportId': '1',
+      'startDate': day(start),
+      'endDate': day(end),
+    });
+    final response =
+        await _client.get(uri).timeout(const Duration(seconds: 30));
+    if (response.statusCode != 200) return const [];
+    final decoded = jsonDecode(response.body);
+    if (decoded is! Map || decoded['dates'] is! List) return const [];
+    final rows = <Map<String, dynamic>>[];
+    for (final date in (decoded['dates'] as List).whereType<Map>()) {
+      final games = date['games'];
+      if (games is! List) continue;
+      for (final raw in games.whereType<Map>()) {
+        final game = Map<String, dynamic>.from(raw);
+        final teams = _map(game['teams']);
+        final home = _map(teams['home']);
+        final away = _map(teams['away']);
+        final homeTeam = _map(home['team']);
+        final awayTeam = _map(away['team']);
+        final state = _map(game['status'])['abstractGameState']?.toString();
+        rows.add({
+          'id': game['gamePk'],
+          'date': game['gameDate'],
+          'status': {'short': state == 'Final' ? 'FT' : state},
+          'teams': {
+            'home': {'id': homeTeam['id'], 'name': homeTeam['name']},
+            'away': {'id': awayTeam['id'], 'name': awayTeam['name']},
+          },
+          'scores': {
+            'home': {'total': home['score']},
+            'away': {'total': away['score']},
+          },
+        });
+      }
+    }
+    _cache[cacheKey] = _BaseballCacheEntry(
+      rows: rows,
+      expiresAt: now.add(const Duration(hours: 12)),
+    );
+    return rows;
+  }
+
   Map<String, dynamic> _analyse(
     Map<String, dynamic> fixture,
     List<Map<String, dynamic>> completed,
@@ -133,8 +182,18 @@ class BaseballService {
     final homeId = home['id']?.toString() ?? '';
     final awayId = away['id']?.toString() ?? '';
     final cutoff = DateTime.tryParse(fixture['date']?.toString() ?? '');
-    final homeForm = _teamForm(homeId, completed, cutoff);
-    final awayForm = _teamForm(awayId, completed, cutoff);
+    final homeForm = _teamForm(
+      homeId,
+      home['name']?.toString() ?? '',
+      completed,
+      cutoff,
+    );
+    final awayForm = _teamForm(
+      awayId,
+      away['name']?.toString() ?? '',
+      completed,
+      cutoff,
+    );
     final sample = math.min(homeForm.games, awayForm.games);
     final reliability = (sample / 10).clamp(0.0, 1.0);
     final logit = (homeForm.winRate - awayForm.winRate) * 2.4 +
@@ -187,13 +246,17 @@ class BaseballService {
 
   _TeamForm _teamForm(
     String teamId,
+    String teamName,
     List<Map<String, dynamic>> games,
     DateTime? cutoff,
   ) {
     final relevant = games.where((game) {
       final teams = _map(game['teams']);
-      final plays = _map(teams['home'])['id']?.toString() == teamId ||
-          _map(teams['away'])['id']?.toString() == teamId;
+      bool matches(Map<String, dynamic> team) =>
+          team['id']?.toString() == teamId ||
+          team['name']?.toString().toLowerCase() == teamName.toLowerCase();
+      final plays =
+          matches(_map(teams['home'])) || matches(_map(teams['away']));
       if (!plays) return false;
       final date = DateTime.tryParse(game['date']?.toString() ?? '');
       return cutoff == null || date == null || date.isBefore(cutoff);
@@ -206,7 +269,9 @@ class BaseballService {
     final selected = relevant.take(10).toList(growable: false);
     for (final game in selected) {
       final teams = _map(game['teams']);
-      final isHome = _map(teams['home'])['id']?.toString() == teamId;
+      final homeTeam = _map(teams['home']);
+      final isHome = homeTeam['id']?.toString() == teamId ||
+          homeTeam['name']?.toString().toLowerCase() == teamName.toLowerCase();
       final scores = _map(game['scores']);
       final homeScore = _number(_map(scores['home'])['total']);
       final awayScore = _number(_map(scores['away'])['total']);
