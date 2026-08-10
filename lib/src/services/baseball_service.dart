@@ -9,7 +9,6 @@ class BaseballService {
 
   static const _baseUrl = 'https://v1.baseball.api-sports.io';
   static const _dailySafetyLimit = 90;
-  static const _mlbLeagueId = '1';
 
   final String apiKey;
   final http.Client _client;
@@ -34,48 +33,21 @@ class BaseballService {
   Future<Map<String, dynamic>> mlbOverview(String date) async {
     final fixtures = await _gamesForDate(date);
     final requested = DateTime.tryParse(date) ?? DateTime.now();
-    final season = _seasonFrom(fixtures, requested.year);
-    final results = await _safeRows(
-      '/games',
-      {'league': _mlbLeagueId, 'season': '$season'},
-      cacheKey: 'mlb-season-$season',
-      ttl: const Duration(hours: 8),
-    );
-    final standingsRaw = await _safeRows(
-      '/standings',
-      {'league': _mlbLeagueId, 'season': '$season'},
-      cacheKey: 'mlb-standings-$season',
-      ttl: const Duration(hours: 6),
-    );
-    final oddsRaw = await _safeRows(
-      '/odds',
-      {'league': _mlbLeagueId, 'season': '$season', 'date': date},
-      cacheKey: 'mlb-odds-$date',
-      ttl: const Duration(hours: 2),
-    );
-
-    var completed = results.where(_isCompleted).toList(growable: false);
-    var standings = _normaliseStandings(standingsRaw);
-    var standingsKind = 'Saisontabelle';
-    if (completed.isEmpty) {
-      final history = <Map<String, dynamic>>[];
-      for (var days = 0; days <= 16; days++) {
-        final day = requested.subtract(Duration(days: days));
-        final dayText =
-            '${day.year.toString().padLeft(4, '0')}-${day.month.toString().padLeft(2, '0')}-${day.day.toString().padLeft(2, '0')}';
-        history.addAll(await _gamesForDate(dayText));
-      }
-      completed = history.where(_isCompleted).toList(growable: false);
+    final history = <Map<String, dynamic>>[];
+    for (var days = 0; days <= 8; days++) {
+      final day = requested.subtract(Duration(days: days));
+      final dayText =
+          '${day.year.toString().padLeft(4, '0')}-${day.month.toString().padLeft(2, '0')}-${day.day.toString().padLeft(2, '0')}';
+      history.addAll(await _gamesForDate(dayText));
     }
-    if (standings.isEmpty) {
-      standings = _formStandings(completed);
-      standingsKind = 'Formtabelle (letzte 16 Spieltage)';
-    }
+    final completed = history.where(_isCompleted).toList(growable: false);
+    final standings = _formStandings(completed);
+    const standingsKind = 'Formtabelle (letzte 8 Spieltage)';
     final analyses = <String, dynamic>{};
     for (final game in fixtures) {
       final id = game['id']?.toString();
       if (id == null || id.isEmpty) continue;
-      analyses[id] = _analyse(game, completed, oddsRaw);
+      analyses[id] = _analyse(game, completed, const []);
     }
     return {
       'date': date,
@@ -107,19 +79,6 @@ class BaseballService {
       final league = _map(row['league']);
       return league['name']?.toString().trim().toUpperCase() == 'MLB';
     }).toList(growable: false);
-  }
-
-  Future<List<Map<String, dynamic>>> _safeRows(
-    String path,
-    Map<String, String> query, {
-    required String cacheKey,
-    required Duration ttl,
-  }) async {
-    try {
-      return await _rows(path, query, cacheKey: cacheKey, ttl: ttl);
-    } catch (_) {
-      return const [];
-    }
   }
 
   Future<List<Map<String, dynamic>>> _rows(
@@ -300,40 +259,6 @@ class BaseballService {
     return (home, away);
   }
 
-  List<Map<String, dynamic>> _normaliseStandings(
-      List<Map<String, dynamic>> rows) {
-    final output = <Map<String, dynamic>>[];
-    void visit(Object? value) {
-      if (value is List) {
-        for (final item in value) visit(item);
-      } else if (value is Map) {
-        final row = Map<String, dynamic>.from(value);
-        final team = _map(row['team']);
-        if (team.isNotEmpty &&
-            (row.containsKey('position') || row.containsKey('rank'))) {
-          final games = _map(row['games']);
-          final points = _map(row['points']);
-          output.add({
-            'position': row['position'] ?? row['rank'],
-            'teamId': team['id'],
-            'team': team['name'],
-            'logo': team['logo'],
-            'played': games['played'] ?? row['played'],
-            'wins': games['win'] ?? games['wins'] ?? row['wins'],
-            'losses': games['lose'] ?? games['losses'] ?? row['losses'],
-            'runsFor': points['for'] ?? row['runsFor'],
-            'runsAgainst': points['against'] ?? row['runsAgainst'],
-          });
-        } else {
-          for (final child in row.values) visit(child);
-        }
-      }
-    }
-
-    visit(rows);
-    return output;
-  }
-
   List<Map<String, dynamic>> _formStandings(
     List<Map<String, dynamic>> games,
   ) {
@@ -388,13 +313,6 @@ class BaseballService {
   bool _isCompleted(Map<String, dynamic> game) {
     final short = _map(game['status'])['short']?.toString().toUpperCase() ?? '';
     return const {'FT', 'AET', 'AP'}.contains(short);
-  }
-
-  int _seasonFrom(List<Map<String, dynamic>> rows, int fallback) {
-    if (rows.isEmpty) return fallback;
-    return int.tryParse(
-            _map(rows.first['league'])['season']?.toString() ?? '') ??
-        fallback;
   }
 
   static Map<String, dynamic> _map(Object? value) =>
