@@ -3,6 +3,8 @@ import 'dart:math' as math;
 
 import 'package:http/http.dart' as http;
 
+import '../database/database.dart';
+
 /// Gemeinsame, sparsame Analysebasis fuer API-Sports-Teamspielprodukte.
 ///
 /// Pro Produkt werden hoechstens 90 von 100 Free-Plan-Anfragen pro UTC-Tag
@@ -13,6 +15,7 @@ class ApiSportsTeamEngine {
     required this.sport,
     required this.baseUrl,
     required this.apiKey,
+    this.database,
     http.Client? client,
   }) : _client = client ?? http.Client();
 
@@ -22,6 +25,7 @@ class ApiSportsTeamEngine {
   final String sport;
   final String baseUrl;
   final String apiKey;
+  final PhoenixDatabase? database;
   final http.Client _client;
   final Map<String, _SportCacheEntry> _cache = {};
   DateTime? _quotaDay;
@@ -71,7 +75,21 @@ class ApiSportsTeamEngine {
           '$sport-Tageslimit zum Schutz des Free-Tarifs erreicht.');
     }
 
-    _requestsToday++;
+    final store = database;
+    if (store != null && store.isConfigured) {
+      final persistedRequests = await store.consumeApiSportsRequest(
+        apiName: sport,
+        safetyLimit: dailySafetyLimit,
+      );
+      if (persistedRequests == null) {
+        throw StateError(
+          '$sport-Tageslimit zum Schutz des Free-Tarifs erreicht.',
+        );
+      }
+      _requestsToday = math.max(_requestsToday, persistedRequests);
+    } else {
+      _requestsToday++;
+    }
     final response = await _client.get(
       Uri.parse('$baseUrl/games').replace(queryParameters: {'date': day}),
       headers: {'x-apisports-key': apiKey},

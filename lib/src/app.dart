@@ -55,41 +55,49 @@ class PhoenixBackend {
         sport: 'AFL',
         baseUrl: 'https://v1.afl.api-sports.io',
         apiKey: config.apiSportsKeyFor('AFL'),
+        database: database,
       ),
       'basketball': ApiSportsTeamEngine(
         sport: 'Basketball',
         baseUrl: 'https://v1.basketball.api-sports.io',
         apiKey: config.apiSportsKeyFor('BASKETBALL'),
+        database: database,
       ),
       'handball': ApiSportsTeamEngine(
         sport: 'Handball',
         baseUrl: 'https://v1.handball.api-sports.io',
         apiKey: config.apiSportsKeyFor('HANDBALL'),
+        database: database,
       ),
       'hockey': ApiSportsTeamEngine(
         sport: 'Hockey',
         baseUrl: 'https://v1.hockey.api-sports.io',
         apiKey: config.apiSportsKeyFor('HOCKEY'),
+        database: database,
       ),
       'nba': ApiSportsTeamEngine(
         sport: 'NBA',
         baseUrl: 'https://v2.nba.api-sports.io',
         apiKey: config.apiSportsKeyFor('NBA'),
+        database: database,
       ),
       'nfl': ApiSportsTeamEngine(
         sport: 'NFL',
         baseUrl: 'https://v1.american-football.api-sports.io',
         apiKey: config.apiSportsKeyFor('NFL'),
+        database: database,
       ),
       'rugby': ApiSportsTeamEngine(
         sport: 'Rugby',
         baseUrl: 'https://v1.rugby.api-sports.io',
         apiKey: config.apiSportsKeyFor('RUGBY'),
+        database: database,
       ),
       'volleyball': ApiSportsTeamEngine(
         sport: 'Volleyball',
         baseUrl: 'https://v1.volleyball.api-sports.io',
         apiKey: config.apiSportsKeyFor('VOLLEYBALL'),
+        database: database,
       ),
     };
     final tennis = TennisService(

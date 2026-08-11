@@ -48,6 +48,19 @@ class PhoenixDatabase {
       )
     ''');
 
+    // API-Sports Free-Plan: produktbezogen 100 Requests/Tag. Dieser Zaehler
+    // bleibt ueber Redeployments erhalten und laesst bewusst zehn Requests
+    // Reserve fuer manuelle Diagnoseaufrufe im Dashboard.
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS api_sports_daily_usage (
+        api_name TEXT NOT NULL,
+        usage_date DATE NOT NULL,
+        requests INTEGER NOT NULL DEFAULT 0,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (api_name, usage_date)
+      )
+    ''');
+
     await db.execute('''
       CREATE TABLE IF NOT EXISTS football_matches (
         id TEXT PRIMARY KEY,
@@ -999,6 +1012,31 @@ class PhoenixDatabase {
               'publishedAt': (row[13] as DateTime).toUtc().toIso8601String(),
             })
         .toList(growable: false);
+  }
+
+  /// Reserviert genau einen Request aus dem produktbezogenen Tagesbudget.
+  /// Null bedeutet: Die Schutzgrenze wurde bereits erreicht.
+  Future<int?> consumeApiSportsRequest({
+    required String apiName,
+    required int safetyLimit,
+  }) async {
+    final db = await connection();
+    final rows = await db.execute(
+      Sql.named('''
+        INSERT INTO api_sports_daily_usage (api_name, usage_date, requests)
+        VALUES (@apiName, (NOW() AT TIME ZONE 'UTC')::DATE, 1)
+        ON CONFLICT (api_name, usage_date) DO UPDATE
+        SET requests = api_sports_daily_usage.requests + 1,
+            updated_at = NOW()
+        WHERE api_sports_daily_usage.requests < @safetyLimit
+        RETURNING requests
+      '''),
+      parameters: {
+        'apiName': apiName.toLowerCase(),
+        'safetyLimit': safetyLimit.clamp(1, 100),
+      },
+    );
+    return rows.isEmpty ? null : rows.first[0] as int?;
   }
 
   Future<bool> ping() async {
