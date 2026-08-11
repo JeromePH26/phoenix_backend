@@ -153,6 +153,25 @@ class FootballResultSettlementService {
         return homeScore > awayScore && total > 1.5 ? 'won' : 'lost';
       case 'comboawayover15':
         return awayScore > homeScore && total > 1.5 ? 'won' : 'lost';
+      // Nur für bereits gespeicherte historische Tipps. Neue Scans erzeugen
+      // keine asiatischen Handicaps mehr, ihre Auswertung darf jedoch nicht
+      // verfälscht oder offen gelassen werden.
+      case 'ahhomeminus05':
+        return goalDifference >= 1 ? 'won' : 'lost';
+      case 'ahhomeplus05':
+        return goalDifference >= 0 ? 'won' : 'lost';
+      case 'ahhomeminus15':
+        return goalDifference >= 2 ? 'won' : 'lost';
+      case 'ahhomeplus15':
+        return goalDifference >= -1 ? 'won' : 'lost';
+      case 'ahawayminus05':
+        return goalDifference <= -1 ? 'won' : 'lost';
+      case 'ahawayplus05':
+        return goalDifference <= 0 ? 'won' : 'lost';
+      case 'ahawayminus15':
+        return goalDifference <= -2 ? 'won' : 'lost';
+      case 'ahawayplus15':
+        return goalDifference <= 1 ? 'won' : 'lost';
       case 'ehhomeminus1':
         return goalDifference >= 2 ? 'won' : 'lost';
       case 'ehdrawminus1':
