@@ -401,11 +401,13 @@ class FootballValueService {
             _isExactGoalsOverUnderMarket(betName) &&
             _isExactLine(valueLabel, over: false, line: 5.5);
       case 'dnbHome':
-        return betName.contains('draw no bet') &&
-            _containsAny(valueLabel, ['home', '1']);
+        return fullTimeMarket &&
+            _isDrawNoBetMarket(betName) &&
+            _isDrawNoBetSelection(valueLabel, home: true);
       case 'dnbAway':
-        return betName.contains('draw no bet') &&
-            _containsAny(valueLabel, ['away', '2']);
+        return fullTimeMarket &&
+            _isDrawNoBetMarket(betName) &&
+            _isDrawNoBetSelection(valueLabel, home: false);
       case 'ehHomeMinus1':
         return _isEuropeanHandicap(betName) &&
             _isEuropeanHandicapValue(valueLabel, side: 'home', line: -1);
@@ -503,6 +505,8 @@ class FootballValueService {
     return betName.contains('full time') ||
         betName.contains('match') ||
         betName.contains('double chance') ||
+        betName.contains('draw no bet') ||
+        betName == 'dnb' ||
         betName == 'goals over/under' ||
         betName == 'over/under' ||
         betName == 'both teams score' ||
@@ -520,6 +524,16 @@ class FootballValueService {
       value == 'match result';
 
   bool _isDoubleChanceMarket(String value) => value.contains('double chance');
+
+  bool _isDrawNoBetMarket(String value) =>
+      value.contains('draw no bet') || value == 'dnb';
+
+  bool _isDrawNoBetSelection(String value, {required bool home}) {
+    final normalized = value.toLowerCase().trim();
+    return home
+        ? normalized == 'home' || normalized == 'home team' || normalized == '1'
+        : normalized == 'away' || normalized == 'away team' || normalized == '2';
+  }
 
   bool _isExactGoalsOverUnderMarket(String value) =>
       value == 'goals over/under' ||
