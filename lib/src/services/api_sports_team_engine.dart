@@ -39,8 +39,11 @@ class ApiSportsTeamEngine {
   int get requestsToday => _requestsToday;
 
   Future<Map<String, dynamic>> overview(String date) async {
-    final requested = DateTime.tryParse(date)?.toUtc();
-    if (requested == null) throw StateError('Ungueltiges Datum.');
+    final parsed = DateTime.tryParse(date);
+    if (parsed == null) throw StateError('Ungueltiges Datum.');
+    // Ein YYYY-MM-DD ist ein Kalendertag, kein Zeitpunkt in lokaler Zeitzone.
+    // Andernfalls verschiebt Berlin den Wert beim toUtc() um einen Tag.
+    final requested = DateTime.utc(parsed.year, parsed.month, parsed.day);
 
     final fixtures = await _gamesForDay(requested);
     final history = <Map<String, dynamic>>[];
