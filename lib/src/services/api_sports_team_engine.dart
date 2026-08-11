@@ -9,7 +9,8 @@ import '../database/database.dart';
 ///
 /// Pro Produkt werden hoechstens 90 von 100 Free-Plan-Anfragen pro UTC-Tag
 /// verwendet. Eine Tagesuebersicht benoetigt im Normalfall nur die heutigen
-/// Spiele und acht gecachte Spieltage fuer die Formberechnung.
+/// Spiele sowie den einen im Free-Plan verfuegbaren Vortag fuer eine erste
+/// Formberechnung.
 class ApiSportsTeamEngine {
   ApiSportsTeamEngine({
     required this.sport,
@@ -20,7 +21,10 @@ class ApiSportsTeamEngine {
   }) : _client = client ?? http.Client();
 
   static const dailySafetyLimit = 90;
-  static const historyDays = 8;
+  // Die anderen API-Sports-Free-Produkte erlauben bei date= nur gestern,
+  // heute und morgen. Historische Teamdaten werden sportweise separat
+  // ergaenzt; diese Basisschicht fragt nie ausserhalb des Freifensters ab.
+  static const historyDays = 1;
 
   final String sport;
   final String baseUrl;
