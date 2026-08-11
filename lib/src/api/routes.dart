@@ -19,6 +19,7 @@ import '../services/football_result_settlement_service.dart';
 import '../services/football_daily_pipeline_service.dart';
 import '../services/football_service.dart';
 import '../services/baseball_service.dart';
+import '../services/api_sports_team_engine.dart';
 import '../services/football_asset_service.dart';
 import '../services/football_news_service.dart';
 import '../services/tennis_service.dart';
@@ -29,6 +30,7 @@ class ApiRoutes {
     required this.database,
     required this.football,
     required this.baseball,
+    required this.teamSports,
     required this.tennis,
     required this.news,
   });
@@ -37,6 +39,7 @@ class ApiRoutes {
   final PhoenixDatabase database;
   final FootballService football;
   final BaseballService baseball;
+  final Map<String, ApiSportsTeamEngine> teamSports;
   final TennisService tennis;
   final FootballNewsService news;
 
@@ -67,9 +70,53 @@ class ApiRoutes {
         'providers': {
           'football': football.isConfigured,
           'baseball': baseball.isConfigured,
+          'apiSports': {
+            for (final entry in teamSports.entries)
+              entry.key: {
+                'configured': entry.value.isConfigured,
+                'requestsUsedToday': entry.value.requestsToday,
+                'dailySafetyLimit': ApiSportsTeamEngine.dailySafetyLimit,
+              },
+          },
           'tennis': tennis.isConfigured,
         },
       });
+    });
+
+    router.get('/api/sports/catalog', (Request request) {
+      return jsonResponse({
+        'dailySafetyLimit': ApiSportsTeamEngine.dailySafetyLimit,
+        'sports': teamSports.entries
+            .map(
+              (entry) => {
+                'id': entry.key,
+                'configured': entry.value.isConfigured,
+                'requestsUsedToday': entry.value.requestsToday,
+              },
+            )
+            .toList(growable: false),
+      });
+    });
+
+    router.get('/api/sports/<sport>/overview', (
+      Request request,
+      String sport,
+    ) async {
+      final engine = teamSports[sport.trim().toLowerCase()];
+      if (engine == null) {
+        return jsonResponse({'error': 'Unbekannte Team-Sportart.'},
+            statusCode: 404);
+      }
+      final date = request.url.queryParameters['date']?.trim() ?? '';
+      if (!RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(date)) {
+        return jsonResponse({'error': 'Datum muss YYYY-MM-DD sein.'},
+            statusCode: 400);
+      }
+      try {
+        return jsonResponse(await engine.overview(date));
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 503);
+      }
     });
 
     router.get('/api/baseball/mlb/games', (Request request) async {

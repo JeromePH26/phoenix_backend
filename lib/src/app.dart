@@ -13,6 +13,7 @@ import 'http/phoenix_api_guard.dart';
 import 'http/tennis_analysis_api.dart';
 import 'services/football_service.dart';
 import 'services/baseball_service.dart';
+import 'services/api_sports_team_engine.dart';
 import 'services/firebase_push_service.dart';
 import 'services/football_favorite_live_monitor.dart';
 import 'services/football_news_service.dart';
@@ -25,6 +26,7 @@ class PhoenixBackend {
     required this.handler,
     required this.football,
     required this.baseball,
+    required this.teamSports,
     required this.tennis,
     required this.favoriteLiveMonitor,
     required this.news,
@@ -35,6 +37,7 @@ class PhoenixBackend {
   final Handler handler;
   final FootballService football;
   final BaseballService baseball;
+  final Map<String, ApiSportsTeamEngine> teamSports;
   final TennisService tennis;
   final FootballFavoriteLiveMonitor favoriteLiveMonitor;
   final FootballNewsService news;
@@ -47,6 +50,48 @@ class PhoenixBackend {
       apiKey: config.apiBaseballKey,
       database: database,
     );
+    final teamSports = <String, ApiSportsTeamEngine>{
+      'afl': ApiSportsTeamEngine(
+        sport: 'AFL',
+        baseUrl: 'https://v1.afl.api-sports.io',
+        apiKey: config.apiSportsKeyFor('AFL'),
+      ),
+      'basketball': ApiSportsTeamEngine(
+        sport: 'Basketball',
+        baseUrl: 'https://v1.basketball.api-sports.io',
+        apiKey: config.apiSportsKeyFor('BASKETBALL'),
+      ),
+      'handball': ApiSportsTeamEngine(
+        sport: 'Handball',
+        baseUrl: 'https://v1.handball.api-sports.io',
+        apiKey: config.apiSportsKeyFor('HANDBALL'),
+      ),
+      'hockey': ApiSportsTeamEngine(
+        sport: 'Hockey',
+        baseUrl: 'https://v1.hockey.api-sports.io',
+        apiKey: config.apiSportsKeyFor('HOCKEY'),
+      ),
+      'nba': ApiSportsTeamEngine(
+        sport: 'NBA',
+        baseUrl: 'https://v2.nba.api-sports.io',
+        apiKey: config.apiSportsKeyFor('NBA'),
+      ),
+      'nfl': ApiSportsTeamEngine(
+        sport: 'NFL',
+        baseUrl: 'https://v1.american-football.api-sports.io',
+        apiKey: config.apiSportsKeyFor('NFL'),
+      ),
+      'rugby': ApiSportsTeamEngine(
+        sport: 'Rugby',
+        baseUrl: 'https://v1.rugby.api-sports.io',
+        apiKey: config.apiSportsKeyFor('RUGBY'),
+      ),
+      'volleyball': ApiSportsTeamEngine(
+        sport: 'Volleyball',
+        baseUrl: 'https://v1.volleyball.api-sports.io',
+        apiKey: config.apiSportsKeyFor('VOLLEYBALL'),
+      ),
+    };
     final tennis = TennisService(
       apiKey: config.sportradarTennisApiKey,
       accessLevel: config.sportradarAccessLevel,
@@ -77,6 +122,7 @@ class PhoenixBackend {
       database: database,
       football: football,
       baseball: baseball,
+      teamSports: teamSports,
       tennis: tennis,
       news: news,
     );
@@ -118,6 +164,7 @@ class PhoenixBackend {
       handler: pipeline,
       football: football,
       baseball: baseball,
+      teamSports: teamSports,
       tennis: tennis,
       favoriteLiveMonitor: favoriteLiveMonitor,
       news: news,
