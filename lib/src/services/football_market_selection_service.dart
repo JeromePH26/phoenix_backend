@@ -90,14 +90,12 @@ class FootballMarketSelectionService {
         'dcX2': 'Doppelte Chance X2',
         'dnbHome': 'Draw No Bet Heim',
         'dnbAway': 'Draw No Bet Auswärts',
-        'ahHomeMinus05': 'Heim -0,5',
-        'ahHomePlus05': 'Heim +0,5',
-        'ahHomeMinus15': 'Heim -1,5',
-        'ahHomePlus15': 'Heim +1,5',
-        'ahAwayMinus05': 'Auswärts -0,5',
-        'ahAwayPlus05': 'Auswärts +0,5',
-        'ahAwayMinus15': 'Auswärts -1,5',
-        'ahAwayPlus15': 'Auswärts +1,5',
+        'ehHomeMinus1': 'Europäisches Handicap: Heim -1',
+        'ehDrawMinus1': 'Europäisches Handicap: Unentschieden -1',
+        'ehAwayPlus1': 'Europäisches Handicap: Auswärts +1',
+        'ehHomeMinus2': 'Europäisches Handicap: Heim -2',
+        'ehDrawMinus2': 'Europäisches Handicap: Unentschieden -2',
+        'ehAwayPlus2': 'Europäisches Handicap: Auswärts +2',
         'combo1xUnder35': '1X & unter 3,5 Tore',
         'comboX2Under35': 'X2 & unter 3,5 Tore',
         'combo1xOver15': '1X & über 1,5 Tore',
@@ -294,17 +292,13 @@ class FootballMarketSelectionService {
       'over15',
       'dc1x',
       'dcX2',
-      'ahHomePlus05',
-      'ahAwayPlus05',
-      'ahHomePlus15',
-      'ahAwayPlus15',
     }.contains(key)) {
       specificityAdjustment = -0.075;
     } else if (key == 'dc12' || key == 'under45') {
       specificityAdjustment = -0.04;
     } else if (key.startsWith('combo')) {
       specificityAdjustment = 0.055;
-    } else if (key.contains('Minus15')) {
+    } else if (key.startsWith('eh')) {
       specificityAdjustment = 0.045;
     } else if (const {
       'homeWin',

@@ -406,30 +406,24 @@ class FootballValueService {
       case 'dnbAway':
         return betName.contains('draw no bet') &&
             _containsAny(valueLabel, ['away', '2']);
-      case 'ahHomeMinus05':
-        return _isAsianHandicap(betName) &&
-            _isHandicap(valueLabel, home: true, line: -0.5);
-      case 'ahHomePlus05':
-        return _isAsianHandicap(betName) &&
-            _isHandicap(valueLabel, home: true, line: 0.5);
-      case 'ahHomeMinus15':
-        return _isAsianHandicap(betName) &&
-            _isHandicap(valueLabel, home: true, line: -1.5);
-      case 'ahHomePlus15':
-        return _isAsianHandicap(betName) &&
-            _isHandicap(valueLabel, home: true, line: 1.5);
-      case 'ahAwayMinus05':
-        return _isAsianHandicap(betName) &&
-            _isHandicap(valueLabel, home: false, line: -0.5);
-      case 'ahAwayPlus05':
-        return _isAsianHandicap(betName) &&
-            _isHandicap(valueLabel, home: false, line: 0.5);
-      case 'ahAwayMinus15':
-        return _isAsianHandicap(betName) &&
-            _isHandicap(valueLabel, home: false, line: -1.5);
-      case 'ahAwayPlus15':
-        return _isAsianHandicap(betName) &&
-            _isHandicap(valueLabel, home: false, line: 1.5);
+      case 'ehHomeMinus1':
+        return _isEuropeanHandicap(betName) &&
+            _isEuropeanHandicapValue(valueLabel, side: 'home', line: -1);
+      case 'ehDrawMinus1':
+        return _isEuropeanHandicap(betName) &&
+            _isEuropeanHandicapValue(valueLabel, side: 'draw', line: -1);
+      case 'ehAwayPlus1':
+        return _isEuropeanHandicap(betName) &&
+            _isEuropeanHandicapValue(valueLabel, side: 'away', line: 1);
+      case 'ehHomeMinus2':
+        return _isEuropeanHandicap(betName) &&
+            _isEuropeanHandicapValue(valueLabel, side: 'home', line: -2);
+      case 'ehDrawMinus2':
+        return _isEuropeanHandicap(betName) &&
+            _isEuropeanHandicapValue(valueLabel, side: 'draw', line: -2);
+      case 'ehAwayPlus2':
+        return _isEuropeanHandicap(betName) &&
+            _isEuropeanHandicapValue(valueLabel, side: 'away', line: 2);
       case 'combo1xUnder35':
         return _isCombination(
           betName,
@@ -551,21 +545,28 @@ class FootballValueService {
       value == 'both teams to score' ||
       value == 'btts';
 
-  bool _isAsianHandicap(String value) => value.contains('asian handicap');
+  bool _isEuropeanHandicap(String value) =>
+      value.contains('handicap') && !value.contains('asian');
 
-  bool _isHandicap(
+  bool _isEuropeanHandicapValue(
     String value, {
-    required bool home,
-    required double line,
+    required String side,
+    required int line,
   }) {
-    final sideMatches = home
-        ? _containsAny(value, ['home', '1 '])
-        : _containsAny(value, ['away', '2 ']);
+    final normalized = value
+        .toLowerCase()
+        .replaceAll(',', '.')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    final sideMatches = switch (side) {
+      'home' => RegExp(r'(^|\s)(home|1)(?=\s|$)').hasMatch(normalized),
+      'away' => RegExp(r'(^|\s)(away|2)(?=\s|$)').hasMatch(normalized),
+      'draw' => RegExp(r'(^|\s)(draw|x)(?=\s|$)').hasMatch(normalized),
+      _ => false,
+    };
     if (!sideMatches) return false;
-    final normalized = value.replaceAll(',', '.');
-    final lineText =
-        line >= 0 ? '+${line.toStringAsFixed(1)}' : line.toStringAsFixed(1);
-    return normalized.contains(lineText);
+    final signedLine = line > 0 ? '+$line' : '$line';
+    return normalized.contains(signedLine);
   }
 
   bool _isCombination(

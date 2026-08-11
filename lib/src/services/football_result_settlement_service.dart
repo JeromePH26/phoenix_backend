@@ -153,21 +153,17 @@ class FootballResultSettlementService {
         return homeScore > awayScore && total > 1.5 ? 'won' : 'lost';
       case 'comboawayover15':
         return awayScore > homeScore && total > 1.5 ? 'won' : 'lost';
-      case 'ahhomeminus05':
-        return goalDifference >= 1 ? 'won' : 'lost';
-      case 'ahhomeplus05':
-        return goalDifference >= 0 ? 'won' : 'lost';
-      case 'ahhomeminus15':
+      case 'ehhomeminus1':
         return goalDifference >= 2 ? 'won' : 'lost';
-      case 'ahhomeplus15':
-        return goalDifference >= -1 ? 'won' : 'lost';
-      case 'ahawayminus05':
-        return goalDifference <= -1 ? 'won' : 'lost';
-      case 'ahawayplus05':
+      case 'ehdrawminus1':
+        return goalDifference == 1 ? 'won' : 'lost';
+      case 'ehawayplus1':
         return goalDifference <= 0 ? 'won' : 'lost';
-      case 'ahawayminus15':
-        return goalDifference <= -2 ? 'won' : 'lost';
-      case 'ahawayplus15':
+      case 'ehhomeminus2':
+        return goalDifference >= 3 ? 'won' : 'lost';
+      case 'ehdrawminus2':
+        return goalDifference == 2 ? 'won' : 'lost';
+      case 'ehawayplus2':
         return goalDifference <= 1 ? 'won' : 'lost';
       case 'dnbhome':
         return goalDifference > 0

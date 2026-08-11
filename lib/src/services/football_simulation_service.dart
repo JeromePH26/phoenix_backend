@@ -135,14 +135,15 @@ class FootballSimulationService {
       hit('dcX2', draw || awayWin);
       hit('dnbHome', homeWin);
       hit('dnbAway', awayWin);
-      hit('ahHomeMinus05', homeWin);
-      hit('ahHomePlus05', homeWin || draw);
-      hit('ahHomeMinus15', homeGoals - awayGoals >= 2);
-      hit('ahHomePlus15', homeGoals - awayGoals >= -1);
-      hit('ahAwayMinus05', awayWin);
-      hit('ahAwayPlus05', awayWin || draw);
-      hit('ahAwayMinus15', awayGoals - homeGoals >= 2);
-      hit('ahAwayPlus15', awayGoals - homeGoals >= -1);
+      final goalDifference = homeGoals - awayGoals;
+      // Europäisches Handicap ist ein Dreiweg-Markt. Für jede Linie sind
+      // Heimsieg, Handicap-Remis und Auswärtssieg getrennte Quotenausgänge.
+      hit('ehHomeMinus1', goalDifference >= 2);
+      hit('ehDrawMinus1', goalDifference == 1);
+      hit('ehAwayPlus1', goalDifference <= 0);
+      hit('ehHomeMinus2', goalDifference >= 3);
+      hit('ehDrawMinus2', goalDifference == 2);
+      hit('ehAwayPlus2', goalDifference <= 1);
       hit('combo1xUnder35', (homeWin || draw) && total <= 3);
       hit('comboX2Under35', (awayWin || draw) && total <= 3);
       hit('combo1xOver15', (homeWin || draw) && total >= 2);
