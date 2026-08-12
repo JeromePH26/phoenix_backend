@@ -961,8 +961,11 @@ class PhoenixDatabase {
              league_ids, league_names, published_at
       FROM news_articles
       WHERE published_at >= NOW() - (@hours * INTERVAL '1 hour')
-        AND (title || ' ' || summary) !~* '(^|[^[:alnum:]])wm([^[:alnum:]]|\$)'
-        AND LOWER(title || ' ' || summary) NOT LIKE ALL (ARRAY[
+        -- Die gespeicherten Spalten heißen title_de/summary_de. Die alten
+        -- Namen führten hier zu PostgreSQL-Fehlern und damit zu HTTP 500 für
+        -- den kompletten News-Tab, noch bevor die Artikel ausgeliefert wurden.
+        AND (title_de || ' ' || summary_de) !~* '(^|[^[:alnum:]])wm([^[:alnum:]]|\$)'
+        AND LOWER(title_de || ' ' || summary_de) NOT LIKE ALL (ARRAY[
           '%weltmeisterschaft%', '%world cup%', '%klub-wm%',
           '%club world cup%', '%nationalmannschaft%', '%nationalteam%'
         ])
