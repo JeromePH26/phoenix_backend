@@ -3,89 +3,45 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
-import 'package:http/http.dart' as http;
-import 'package:xml/xml.dart';
 
 import '../database/database.dart';
 import 'firebase_push_service.dart';
+import 'football_service.dart';
+import 'phoenix_editorial_composer.dart';
 
+/// Own, fact-bound Phoenix reporting. External RSS content is deliberately not
+/// used here: every article is generated from stored match/analysis data or a
+/// confirmed API-Football transfer response.
 class FootballNewsService {
   FootballNewsService({
     required this.database,
     required this.push,
-    http.Client? client,
-  }) : _client = client ?? http.Client();
+    required this.football,
+    PhoenixEditorialComposer? composer,
+  }) : _composer = composer ?? const PhoenixEditorialComposer();
 
   final PhoenixDatabase database;
   final FirebasePushService push;
-  final http.Client _client;
+  final FootballService football;
+  final PhoenixEditorialComposer _composer;
   Timer? _timer;
   DateTime? _lastRefresh;
+  DateTime? _lastTransferSync;
   bool _refreshing = false;
-
-  static const List<
-      ({
-        String name,
-        String site,
-        String feed,
-        String? fixedLeagueId,
-        String? fixedLeagueName,
-        bool footballOnly,
-      })> _sources = [
-    (
-      name: 'Quelle www.kicker.de',
-      site: 'https://www.kicker.de',
-      feed: 'https://newsfeed.kicker.de/news/aktuell',
-      fixedLeagueId: null,
-      fixedLeagueName: null,
-      footballOnly: false,
-    ),
-    (
-      name: 'Sportschau',
-      site: 'https://www.sportschau.de',
-      feed: 'https://www.sportschau.de/index~rss2.xml',
-      fixedLeagueId: null,
-      fixedLeagueName: null,
-      footballOnly: false,
-    ),
-    (
-      name: 'Tagesschau Sport',
-      site: 'https://www.tagesschau.de/sport',
-      feed: 'https://www.tagesschau.de/sport/index~rss2.xml',
-      fixedLeagueId: null,
-      fixedLeagueName: null,
-      footballOnly: false,
-    ),
-    (
-      name: '3. Liga Online',
-      site: 'https://www.liga3-online.de',
-      feed: 'https://www.liga3-online.de/feed/',
-      fixedLeagueId: '80',
-      fixedLeagueName: '3. Liga',
-      footballOnly: true,
-    ),
-    (
-      name: 'RevierSport',
-      site: 'https://www.reviersport.de',
-      feed:
-          'https://news.google.com/rss/search?q=site%3Areviersport.de%20Fu%C3%9Fball&hl=de&gl=DE&ceid=DE%3Ade',
-      fixedLeagueId: null,
-      fixedLeagueName: null,
-      footballOnly: true,
-    ),
-  ];
 
   void start() {
     if (_timer != null) return;
     _timer = Timer.periodic(
-        const Duration(minutes: 20), (_) => unawaited(refresh()));
+      const Duration(minutes: 15),
+      (_) => unawaited(refresh()),
+    );
     unawaited(refresh());
   }
 
   Future<void> refreshIfStale() async {
     final last = _lastRefresh;
     if (last == null ||
-        DateTime.now().difference(last) > const Duration(minutes: 15)) {
+        DateTime.now().difference(last) > const Duration(minutes: 12)) {
       await refresh();
     }
   }
@@ -94,220 +50,277 @@ class FootballNewsService {
     if (_refreshing || !database.isConfigured) return;
     _refreshing = true;
     try {
-      final entities = await database.footballNewsEntities();
-      for (final source in _sources) {
-        try {
-          final response = await _client.get(
-            Uri.parse(source.feed),
-            headers: const {
-              'user-agent': 'PHOENIX-News/1.0',
-              'accept': 'application/rss+xml, application/xml'
-            },
-          );
-          if (response.statusCode != 200) continue;
-          final document = XmlDocument.parse(utf8.decode(response.bodyBytes));
-          for (final item in document.findAllElements('item').take(80)) {
-            final title = _text(item, 'title');
-            final link = _text(item, 'link');
-            if (title.isEmpty || link.isEmpty) continue;
-            final summary = _clean(_text(item, 'description'));
-            final haystack = '$title $summary'.toLowerCase();
-            if (!source.footballOnly && !_isFootball(haystack)) continue;
-            if (_isExcludedCompetition(haystack)) continue;
-            final published = _date(_text(item, 'pubDate'));
-            if (published == null) continue;
-            final age = DateTime.now().toUtc().difference(published);
-            if (age.isNegative && age.abs() > const Duration(hours: 2)) {
-              continue;
-            }
-            if (age > const Duration(days: 7)) continue;
-
-            final teamIds = <String>[];
-            final teamNames = <String>[];
-            final leagueIds = <String>[
-              if (source.fixedLeagueId != null) source.fixedLeagueId!,
-            ];
-            final leagueNames = <String>[
-              if (source.fixedLeagueName != null) source.fixedLeagueName!,
-            ];
-            for (final entity in entities) {
-              final name = entity['name']!;
-              if (name.length < 4 || !haystack.contains(name.toLowerCase()))
-                continue;
-              if (entity['kind'] == 'team') {
-                teamIds.add(entity['id']!);
-                teamNames.add(name);
-              } else {
-                leagueIds.add(entity['id']!);
-                leagueNames.add(name);
-              }
-            }
-            // PHÖNIX-News gehören ausschließlich zu den freigegebenen Ligen.
-            // Allgemeine WM-, Nationalmannschafts- und sonstige Fremdbeiträge
-            // ohne Whitelist-Zuordnung werden nicht gespeichert.
-            if (teamIds.isEmpty && leagueIds.isEmpty) continue;
-            final category = _category(haystack);
-            final importance = _importance(
-              haystack: haystack,
-              category: category,
-              officialTeams: teamIds.isNotEmpty,
-            );
-            final article = <String, dynamic>{
-              'id': sha256.convert(utf8.encode(link)).toString(),
-              'sourceName': source.name,
-              'sourceUrl': source.site,
-              'articleUrl': link,
-              'title': title,
-              'summary': summary.length > 420
-                  ? '${summary.substring(0, 417)}…'
-                  : summary,
-              'imageUrl': _image(item),
-              'category': category,
-              'importance': importance,
-              'teamIds': teamIds.toSet().toList(),
-              'teamNames': teamNames.toSet().toList(),
-              'leagueIds': leagueIds.toSet().toList(),
-              'leagueNames': leagueNames.toSet().toList(),
-              'publishedAt': published,
-            };
-            final inserted = await database.upsertNewsArticle(article);
-            if (inserted && importance >= 70 && push.isConfigured) {
-              await _notifyFavorites(article);
-            }
-          }
-        } catch (error) {
-          stderr.writeln('[NEWS] ${source.name}: $error');
+      final rows = await database.phoenixEditorialMatches();
+      final matches =
+          rows.map(_match).whereType<PhoenixEditorialMatch>().toList();
+      for (final match in matches) {
+        if (_isFinished(rows
+                .firstWhere(
+                    (row) => row['id']?.toString() == match.fixtureId)['status']
+                ?.toString() ??
+            '')) {
+          await _storeMatchArticle(match, review: true);
+        } else if (match.kickoff.isAfter(DateTime.now().toUtc()) &&
+            match.kickoff.isBefore(
+                DateTime.now().toUtc().add(const Duration(hours: 48)))) {
+          await _storeMatchArticle(match, review: false);
         }
       }
+      await _syncTransfersOncePerDay(matches);
       _lastRefresh = DateTime.now();
+    } catch (error, stackTrace) {
+      stderr.writeln('[PHOENIX NEWS] $error');
+      stderr.writeln(stackTrace);
     } finally {
       _refreshing = false;
     }
   }
 
-  String _text(XmlElement item, String name) =>
-      item.findElements(name).firstOrNull?.innerText.trim() ?? '';
-
-  String _clean(String value) => value
-      .replaceAll(RegExp(r'<[^>]+>'), ' ')
-      .replaceAll(RegExp(r'\s+'), ' ')
-      .trim();
-
-  DateTime? _date(String value) {
-    try {
-      return HttpDate.parse(value).toUtc();
-    } catch (_) {
-      return DateTime.tryParse(value)?.toUtc();
+  Future<void> _storeMatchArticle(
+    PhoenixEditorialMatch match, {
+    required bool review,
+  }) async {
+    final article = review
+        ? _composer.composeReview(match)
+        : _composer.composePreview(match);
+    final kind = article.kind;
+    final uri = 'phoenix://report/$kind/${match.fixtureId}';
+    final inserted = await database.upsertNewsArticle({
+      'id': _id(uri),
+      'sourceName': 'PHOENIX',
+      'sourceUrl': 'phoenix://reports',
+      'articleUrl': uri,
+      'title': article.title,
+      'summary': article.summary,
+      'body': article.body,
+      'articleType': kind,
+      'imageUrl': '',
+      'category': review ? 'match_report' : 'match_preview',
+      'importance': article.importance,
+      'teamIds': [match.homeTeamId, match.awayTeamId],
+      'teamNames': [match.homeTeam, match.awayTeam],
+      'leagueIds': [match.leagueId],
+      'leagueNames': [match.leagueName],
+      'publishedAt': review ? DateTime.now().toUtc() : match.kickoff.toUtc(),
+    });
+    if (inserted && article.importance >= 70 && push.isConfigured) {
+      await _notifyFavorites(
+        id: _id(uri),
+        title: article.title,
+        teamIds: [match.homeTeamId, match.awayTeamId],
+        leagueIds: [match.leagueId],
+      );
     }
   }
 
-  String _image(XmlElement item) {
-    for (final child in item.children.whereType<XmlElement>()) {
-      final url = child.getAttribute('url') ?? '';
-      final type = child.getAttribute('type') ?? '';
-      if (url.startsWith('http') &&
-          (type.startsWith('image/') || child.name.local == 'content'))
-        return url;
+  Future<void> _syncTransfersOncePerDay(
+    List<PhoenixEditorialMatch> matches,
+  ) async {
+    final now = DateTime.now().toUtc();
+    final last = _lastTransferSync;
+    if (last != null &&
+        last.year == now.year &&
+        last.month == now.month &&
+        last.day == now.day) {
+      return;
     }
-    return '';
+    _lastTransferSync = now;
+
+    final teams =
+        <String, ({String name, String leagueId, String leagueName})>{};
+    for (final match in matches) {
+      teams[match.homeTeamId] = (
+        name: match.homeTeam,
+        leagueId: match.leagueId,
+        leagueName: match.leagueName,
+      );
+      teams[match.awayTeamId] = (
+        name: match.awayTeam,
+        leagueId: match.leagueId,
+        leagueName: match.leagueName,
+      );
+    }
+
+    // One request per active whitelisted team per day. At the current league
+    // scope this stays far below the 7,500-request plan; failures are optional
+    // and never block match reports.
+    for (final entry in teams.entries) {
+      try {
+        final payload = await football.providerRequest(
+          path: '/transfers',
+          query: {'team': entry.key},
+        );
+        final response = payload['response'];
+        if (response is! List) continue;
+        for (final item in response.whereType<Map>()) {
+          await _storeRecentTransfers(
+            teamId: entry.key,
+            teamName: entry.value.name,
+            leagueId: entry.value.leagueId,
+            leagueName: entry.value.leagueName,
+            raw: Map<String, Object?>.from(item),
+          );
+        }
+      } catch (error) {
+        stderr.writeln('[PHOENIX TRANSFERS] ${entry.value.name}: $error');
+      }
+    }
   }
 
-  bool _isFootball(String text) => const [
-        'fußball',
-        'bundesliga',
-        'champions league',
-        'europa league',
-        'dfb',
-        'premier league',
-        'serie a',
-        'la liga',
-        'ligue 1',
-        'conference league',
-      ].any(text.contains);
-
-  bool _isExcludedCompetition(String text) {
-    return const [
-          'weltmeisterschaft',
-          'world cup',
-          'klub-wm',
-          'club world cup',
-          'frauen-wm',
-          'u17-wm',
-          'u-17-wm',
-          'u20-wm',
-          'u-20-wm',
-          'nationalmannschaft',
-          'nationalteam',
-        ].any(text.contains) ||
-        RegExp(r'(^|[^a-z0-9])wm([^a-z0-9]|$)').hasMatch(text);
+  Future<void> _storeRecentTransfers({
+    required String teamId,
+    required String teamName,
+    required String leagueId,
+    required String leagueName,
+    required Map<String, Object?> raw,
+  }) async {
+    final player = _map(raw['player']);
+    final playerId = player['id']?.toString() ?? '';
+    final playerName = player['name']?.toString().trim() ?? '';
+    final transfers = raw['transfers'];
+    if (playerId.isEmpty || playerName.isEmpty || transfers is! List) return;
+    for (final transferValue in transfers.whereType<Map>()) {
+      final transfer = Map<String, Object?>.from(transferValue);
+      final date =
+          DateTime.tryParse(transfer['date']?.toString() ?? '')?.toUtc();
+      if (date == null ||
+          DateTime.now().toUtc().difference(date) > const Duration(days: 14))
+        continue;
+      final teams = _map(transfer['teams']);
+      final incoming = _map(teams['in']);
+      final outgoing = _map(teams['out']);
+      final incomingId = incoming['id']?.toString() ?? '';
+      final outgoingId = outgoing['id']?.toString() ?? '';
+      final direction = incomingId == teamId
+          ? 'in'
+          : outgoingId == teamId
+              ? 'out'
+              : '';
+      if (direction.isEmpty) continue;
+      final article = _composer.composeTransfer(
+        teamName: teamName,
+        playerName: playerName,
+        direction: direction,
+        leagueName: leagueName,
+        transferId:
+            '$teamId-$playerId-${date.toIso8601String().substring(0, 10)}-$direction',
+      );
+      final uri =
+          'phoenix://transfer/$teamId/$playerId/${date.toIso8601String().substring(0, 10)}/$direction';
+      final inserted = await database.upsertNewsArticle({
+        'id': _id(uri),
+        'sourceName': 'PHOENIX',
+        'sourceUrl': 'phoenix://reports',
+        'articleUrl': uri,
+        'title': article.title,
+        'summary': article.summary,
+        'body': article.body,
+        'articleType': article.kind,
+        'imageUrl': '',
+        'category': 'transfer',
+        'importance': article.importance,
+        'teamIds': [teamId],
+        'teamNames': [teamName],
+        'leagueIds': [leagueId],
+        'leagueNames': [leagueName],
+        'publishedAt': date,
+      });
+      if (inserted && push.isConfigured) {
+        await _notifyFavorites(
+          id: _id(uri),
+          title: article.title,
+          teamIds: [teamId],
+          leagueIds: [leagueId],
+        );
+      }
+    }
   }
 
-  String _category(String text) {
-    if (const ['verletzt', 'verletzung', 'fällt aus', 'ausfall']
-        .any(text.contains)) return 'injury';
-    if (const ['aufstellung', 'startelf', 'kader'].any(text.contains))
-      return 'lineup';
-    if (const ['trainer', 'entlassen', 'rücktritt'].any(text.contains))
-      return 'coach';
-    if (const ['transfer', 'wechselt', 'verpflichtet'].any(text.contains))
-      return 'transfer';
-    if (const ['abgesagt', 'verschoben', 'spielverlegung'].any(text.contains))
-      return 'schedule';
-    return 'general';
+  PhoenixEditorialMatch? _match(Map<String, Object?> row) {
+    final id = row['id']?.toString() ?? '';
+    final leagueId = row['league_id']?.toString() ?? '';
+    final homeId = row['home_team_id']?.toString() ?? '';
+    final awayId = row['away_team_id']?.toString() ?? '';
+    final homeName = row['home_team_name']?.toString() ?? '';
+    final awayName = row['away_team_name']?.toString() ?? '';
+    final kickoff = row['kickoff_utc'] as DateTime?;
+    if (id.isEmpty ||
+        leagueId.isEmpty ||
+        homeId.isEmpty ||
+        awayId.isEmpty ||
+        homeName.isEmpty ||
+        awayName.isEmpty ||
+        kickoff == null) return null;
+    final payload = _map(row['analysis_payload']);
+    final probabilities = _map(payload['probabilities']);
+    return PhoenixEditorialMatch(
+      fixtureId: id,
+      leagueId: leagueId,
+      leagueName: row['league_name']?.toString() ?? '',
+      homeTeamId: homeId,
+      homeTeam: homeName,
+      awayTeamId: awayId,
+      awayTeam: awayName,
+      kickoff: kickoff.toUtc(),
+      homeGoals: _integerOrNull(row['home_goals']),
+      awayGoals: _integerOrNull(row['away_goals']),
+      homeProbability:
+          _probability(probabilities['home'] ?? probabilities['homeWin']),
+      drawProbability: _probability(probabilities['draw']),
+      awayProbability:
+          _probability(probabilities['away'] ?? probabilities['awayWin']),
+    );
   }
 
-  int _importance(
-      {required String haystack,
-      required String category,
-      required bool officialTeams}) {
-    var score = 42;
-    if (officialTeams) score += 12;
-    if (const {'injury', 'lineup', 'coach', 'schedule'}.contains(category))
-      score += 22;
-    if (const ['bestätigt', 'offiziell', 'fällt aus', 'entlassen']
-        .any(haystack.contains)) score += 14;
-    if (haystack.contains('gerücht') || haystack.contains('spekulation'))
-      score -= 20;
-    return score.clamp(0, 100);
-  }
-
-  Future<void> _notifyFavorites(Map<String, dynamic> article) async {
-    final teamIds = (article['teamIds'] as List).cast<String>();
-    final leagueIds = (article['leagueIds'] as List).cast<String>();
-    if (teamIds.isEmpty && leagueIds.isEmpty) return;
-
+  Future<void> _notifyFavorites({
+    required String id,
+    required String title,
+    required List<String> teamIds,
+    required List<String> leagueIds,
+  }) async {
     final targets = await database.newsPushTargets(
       teamIds: teamIds,
       leagueIds: leagueIds,
     );
     for (final target in targets) {
-      final installationId = target['installationId'] as String;
-      if (!await database.claimNewsPush(
-        article['id'] as String,
-        installationId,
-      )) {
-        continue;
-      }
+      final installationId = target['installationId']!;
+      if (!await database.claimNewsPush(id, installationId)) continue;
       try {
         await push.send(
-          token: target['pushToken'] as String,
-          title: 'PHÖNIX NEWS · Wichtig',
-          body: article['title'] as String,
+          token: target['pushToken']!,
+          title: 'PHOENIX · Bericht',
+          body: title,
           androidChannelId: 'phoenix_news_v1',
-          data: {
-            'type': 'news',
-            'articleId': article['id'] as String,
-            'articleUrl': article['articleUrl'] as String,
-          },
+          data: {'type': 'phoenix_report', 'articleId': id},
         );
       } catch (error) {
-        stderr.writeln('[NEWS PUSH] $installationId: $error');
+        stderr.writeln('[PHOENIX NEWS PUSH] $installationId: $error');
       }
     }
   }
 
+  bool _isFinished(String status) =>
+      const {'FT', 'AET', 'PEN', 'AWD', 'WO'}.contains(status.toUpperCase());
+
+  Map<String, Object?> _map(Object? value) =>
+      value is Map ? Map<String, Object?>.from(value) : <String, Object?>{};
+
+  int? _integerOrNull(Object? value) {
+    if (value is num) return value.toInt();
+    return int.tryParse(value?.toString() ?? '');
+  }
+
+  double? _probability(Object? value) {
+    final number = value is num
+        ? value.toDouble()
+        : double.tryParse(value?.toString() ?? '');
+    if (number == null || !number.isFinite) return null;
+    return number > 1 ? number / 100 : number.clamp(0, 1).toDouble();
+  }
+
+  String _id(String value) => sha256.convert(utf8.encode(value)).toString();
+
   void close() {
     _timer?.cancel();
-    _client.close();
   }
 }

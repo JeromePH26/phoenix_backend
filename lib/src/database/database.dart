@@ -629,6 +629,8 @@ class PhoenixDatabase {
         article_url TEXT NOT NULL UNIQUE,
         title_de TEXT NOT NULL,
         summary_de TEXT NOT NULL DEFAULT '',
+        body_de TEXT NOT NULL DEFAULT '',
+        article_type TEXT NOT NULL DEFAULT 'general',
         image_url TEXT NOT NULL DEFAULT '',
         category TEXT NOT NULL DEFAULT 'general',
         importance INTEGER NOT NULL DEFAULT 40,
@@ -639,6 +641,15 @@ class PhoenixDatabase {
         published_at TIMESTAMPTZ NOT NULL,
         fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
+    ''');
+
+    // Bestehende Railway-Datenbanken besitzen die News-Tabelle bereits.
+    // Die Felder werden deshalb separat ergänzt statt nur in CREATE TABLE
+    // definiert, damit der eigene Phoenix-Redaktionsbereich sofort migriert.
+    await db.execute('''
+      ALTER TABLE news_articles
+        ADD COLUMN IF NOT EXISTS body_de TEXT NOT NULL DEFAULT '',
+        ADD COLUMN IF NOT EXISTS article_type TEXT NOT NULL DEFAULT 'general'
     ''');
 
     await db.execute('''
@@ -873,20 +884,63 @@ class PhoenixDatabase {
         .toList(growable: false);
   }
 
+  /// Liefert ausschließlich Spiele aus freigegebenen Ligen, für die Phoenix
+  /// eigene Vor- oder Nachberichte erzeugen kann. Die neueste Analyse wird
+  /// optional zugeladen – ein Spiel ohne Analyse bleibt als Ergebnisbericht
+  /// nutzbar, bekommt aber keine erfundenen Wahrscheinlichkeiten.
+  Future<List<Map<String, Object?>>> phoenixEditorialMatches() async {
+    final db = await connection();
+    final rows = await db.execute('''
+      SELECT
+        m.id,
+        m.kickoff_utc,
+        m.status,
+        m.league_id,
+        m.league_name,
+        m.home_team_id,
+        m.home_team_name,
+        m.away_team_id,
+        m.away_team_name,
+        m.home_goals,
+        m.away_goals,
+        latest.payload AS analysis_payload
+      FROM football_matches m
+      INNER JOIN football_leagues l ON l.league_id = m.league_id
+      LEFT JOIN LATERAL (
+        SELECT a.payload
+        FROM analyses a
+        WHERE a.sport = 'football'
+          AND a.match_id = m.id
+          AND a.payload IS NOT NULL
+        ORDER BY a.analyzed_at DESC
+        LIMIT 1
+      ) latest ON TRUE
+      WHERE l.manual_status = 'whitelist'
+        AND m.kickoff_utc >= NOW() - INTERVAL '5 days'
+        AND m.kickoff_utc <= NOW() + INTERVAL '3 days'
+      ORDER BY m.kickoff_utc DESC
+    ''');
+    return rows
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList(growable: false);
+  }
+
   Future<bool> upsertNewsArticle(Map<String, Object?> article) async {
     final db = await connection();
     final rows = await db.execute(Sql.named('''
       INSERT INTO news_articles (
         id, source_name, source_url, article_url, title_de, summary_de,
-        image_url, category, importance, team_ids, team_names,
+        body_de, article_type, image_url, category, importance, team_ids, team_names,
         league_ids, league_names, published_at
       ) VALUES (
         @id, @sourceName, @sourceUrl, @articleUrl, @title, @summary,
-        @imageUrl, @category, @importance, @teamIds::jsonb, @teamNames::jsonb,
+        @body, @articleType, @imageUrl, @category, @importance, @teamIds::jsonb, @teamNames::jsonb,
         @leagueIds::jsonb, @leagueNames::jsonb, @publishedAt
       ) ON CONFLICT (article_url) DO UPDATE SET
         title_de = EXCLUDED.title_de,
         summary_de = EXCLUDED.summary_de,
+        body_de = EXCLUDED.body_de,
+        article_type = EXCLUDED.article_type,
         image_url = EXCLUDED.image_url,
         category = EXCLUDED.category,
         importance = EXCLUDED.importance,
@@ -904,6 +958,8 @@ class PhoenixDatabase {
       'articleUrl': article['articleUrl'],
       'title': article['title'],
       'summary': article['summary'],
+      'body': article['body'] ?? article['summary'] ?? '',
+      'articleType': article['articleType'] ?? article['category'] ?? 'general',
       'imageUrl': article['imageUrl'],
       'category': article['category'],
       'importance': article['importance'],
@@ -963,7 +1019,7 @@ class PhoenixDatabase {
     final db = await connection();
     final rows = await db.execute(Sql.named('''
       SELECT id, source_name, source_url, article_url, title_de, summary_de,
-             image_url, category, importance, team_ids, team_names,
+             body_de, article_type, image_url, category, importance, team_ids, team_names,
              league_ids, league_names, published_at
       FROM news_articles
       WHERE published_at >= NOW() - (@hours * INTERVAL '1 hour')
@@ -1011,14 +1067,16 @@ class PhoenixDatabase {
               'articleUrl': row[3],
               'title': row[4],
               'summary': row[5],
-              'imageUrl': row[6],
-              'category': row[7],
-              'importance': row[8],
-              'teamIds': row[9],
-              'teamNames': row[10],
-              'leagueIds': row[11],
-              'leagueNames': row[12],
-              'publishedAt': (row[13] as DateTime).toUtc().toIso8601String(),
+              'body': row[6],
+              'articleType': row[7],
+              'imageUrl': row[8],
+              'category': row[9],
+              'importance': row[10],
+              'teamIds': row[11],
+              'teamNames': row[12],
+              'leagueIds': row[13],
+              'leagueNames': row[14],
+              'publishedAt': (row[15] as DateTime).toUtc().toIso8601String(),
             })
         .toList(growable: false);
   }

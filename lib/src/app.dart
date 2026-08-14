@@ -54,7 +54,11 @@ class PhoenixBackend {
       football: football,
       push: push,
     );
-    final news = FootballNewsService(database: database, push: push);
+    final news = FootballNewsService(
+      database: database,
+      push: push,
+      football: football,
+    );
 
     if (database.isConfigured) {
       try {
