@@ -11,6 +11,7 @@ class FootballValueService {
   final FootballService football;
 
   static const modelVersion = 'value_check_v3_strict_full_time_odds';
+  static const double maximumRecommendedOdds = 4.0;
 
   Future<Map<String, Object?>> check({
     required int phaseTwoScanRunId,
@@ -126,6 +127,10 @@ class FootballValueService {
 
       final minimumOddsPassed =
           marketOdds != null && marketOdds >= minimumMarketOdds;
+      final recommendationOddsPassed =
+          marketOdds != null &&
+          marketOdds >= minimumMarketOdds &&
+          marketOdds <= maximumRecommendedOdds;
       final minimumValuePassed =
           valuePercent != null && valuePercent >= minimumValuePercent;
       final maximumValuePassed =
@@ -151,6 +156,7 @@ class FootballValueService {
           'deviggedMarketProbability': deviggedProbability,
           'fairOdds': fairOdds,
           'minimumMarketOdds': minimumMarketOdds,
+          'maximumRecommendedOdds': maximumRecommendedOdds,
           'minimumValuePercent': minimumValuePercent,
           'maximumAutomaticValuePercent': maximumAutomaticValuePercent,
           'maximumFairMarketDeviationPercent':
@@ -158,6 +164,7 @@ class FootballValueService {
           'valuePercent': valuePercent,
           'fairMarketDeviationPercent': fairMarketDeviationPercent,
           'minimumOddsPassed': minimumOddsPassed,
+          'recommendationOddsPassed': recommendationOddsPassed,
           'minimumValuePassed': minimumValuePassed,
           'maximumValuePassed': maximumValuePassed,
           'marketGuardPassed': marketGuardPassed,
@@ -172,7 +179,12 @@ class FootballValueService {
         },
         'display': {
           ..._map(selection['display']),
-          'showPhoenixTip': true,
+          // Value darf eine interne Kennzahl bleiben. Der sichtbare
+          // PHÖNIX-Tipp richtet sich nach Modell/Stabilität, wird aber nur
+          // mit einer plausiblen Vollzeitquote freigegeben. Damit kann z. B.
+          // eine 16.00 niemals als Standard-Tipp erscheinen.
+          'showPhoenixTip':
+              hasRequiredData && recommendationOddsPassed && marketGuardPassed,
           'showValueTip': isValueTip,
         },
       };

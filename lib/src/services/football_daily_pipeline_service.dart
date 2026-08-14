@@ -226,7 +226,11 @@ class FootballDailyPipelineService {
         100,
       );
 
-      final recommendation = _string(phoenixTip['market']);
+      final showPhoenixTip = _map(selection['display'])['showPhoenixTip'] ==
+          true;
+      final recommendation = showPhoenixTip
+          ? _string(phoenixTip['market'])
+          : '';
 
       final homeProbability = _probability(
         rawProbabilities['home'] ?? rawProbabilities['homeWin'],
