@@ -8,6 +8,7 @@ import '../database/database.dart';
 import 'firebase_push_service.dart';
 import 'football_service.dart';
 import 'phoenix_editorial_composer.dart';
+import 'football_season_projection_service.dart';
 
 /// Own, fact-bound Phoenix reporting. External RSS content is deliberately not
 /// used here: every article is generated from stored match/analysis data or a
@@ -27,6 +28,7 @@ class FootballNewsService {
   Timer? _timer;
   DateTime? _lastRefresh;
   DateTime? _lastTransferSync;
+  DateTime? _lastSeasonProjection;
   bool _refreshing = false;
 
   void start() {
@@ -67,12 +69,32 @@ class FootballNewsService {
         }
       }
       await _syncTransfersOncePerDay(matches);
+      await _refreshSeasonProjectionsOncePerDay();
       _lastRefresh = DateTime.now();
     } catch (error, stackTrace) {
       stderr.writeln('[PHOENIX NEWS] $error');
       stderr.writeln(stackTrace);
     } finally {
       _refreshing = false;
+    }
+  }
+
+  Future<void> _refreshSeasonProjectionsOncePerDay() async {
+    final now = DateTime.now().toUtc();
+    final last = _lastSeasonProjection;
+    if (last != null &&
+        last.year == now.year &&
+        last.month == now.month &&
+        last.day == now.day) {
+      return;
+    }
+    _lastSeasonProjection = now;
+    try {
+      await FootballSeasonProjectionService(
+              database: database, football: football)
+          .refresh();
+    } catch (error) {
+      stderr.writeln('[PHOENIX SEASON PROJECTIONS] $error');
     }
   }
 

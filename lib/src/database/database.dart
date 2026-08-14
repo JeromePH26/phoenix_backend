@@ -658,6 +658,19 @@ class PhoenixDatabase {
     ''');
 
     await db.execute('''
+      CREATE TABLE IF NOT EXISTS football_season_projections (
+        league_id TEXT NOT NULL REFERENCES football_leagues(league_id)
+          ON DELETE CASCADE,
+        season INTEGER NOT NULL,
+        model_version TEXT NOT NULL,
+        simulations INTEGER NOT NULL,
+        payload JSONB NOT NULL,
+        calculated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (league_id, season)
+      )
+    ''');
+
+    await db.execute('''
       INSERT INTO app_meta (key, value)
       VALUES ('schema_version', '5')
       ON CONFLICT (key) DO UPDATE
@@ -920,6 +933,70 @@ class PhoenixDatabase {
         AND m.kickoff_utc <= NOW() + INTERVAL '3 days'
       ORDER BY m.kickoff_utc DESC
     ''');
+    return rows
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList(growable: false);
+  }
+
+  Future<List<Map<String, String>>> seasonProjectionTargets(int season) async {
+    final db = await connection();
+    final rows = await db.execute(Sql.named('''
+      SELECT league_id, league_name, country
+      FROM football_leagues
+      WHERE manual_status = 'whitelist'
+        AND competition_level IS NOT NULL
+      ORDER BY country, competition_level, league_name
+    '''), parameters: {'season': season});
+    return rows
+        .map((row) => {
+              'leagueId': row[0].toString(),
+              'leagueName': row[1].toString(),
+              'country': row[2].toString(),
+            })
+        .toList(growable: false);
+  }
+
+  Future<void> saveSeasonProjection({
+    required String leagueId,
+    required int season,
+    required String modelVersion,
+    required int simulations,
+    required Map<String, Object?> payload,
+  }) async {
+    final db = await connection();
+    await db.execute(Sql.named('''
+      INSERT INTO football_season_projections (
+        league_id, season, model_version, simulations, payload, calculated_at
+      ) VALUES (
+        @leagueId, @season, @modelVersion, @simulations, @payload::jsonb, NOW()
+      ) ON CONFLICT (league_id, season) DO UPDATE SET
+        model_version = EXCLUDED.model_version,
+        simulations = EXCLUDED.simulations,
+        payload = EXCLUDED.payload,
+        calculated_at = NOW()
+    '''), parameters: {
+      'leagueId': leagueId,
+      'season': season,
+      'modelVersion': modelVersion,
+      'simulations': simulations,
+      'payload': jsonEncode(payload),
+    });
+  }
+
+  Future<List<Map<String, Object?>>> seasonProjections({
+    int? season,
+    String? leagueId,
+  }) async {
+    final db = await connection();
+    final rows = await db.execute(Sql.named('''
+      SELECT p.league_id, l.league_name, l.country, p.season, p.model_version,
+             p.simulations, p.payload, p.calculated_at
+      FROM football_season_projections p
+      INNER JOIN football_leagues l ON l.league_id = p.league_id
+      WHERE (@season IS NULL OR p.season = @season)
+        AND (@leagueId = '' OR p.league_id = @leagueId)
+      ORDER BY l.country, l.competition_level, l.league_name
+    '''), parameters: {'season': season, 'leagueId': leagueId ?? ''});
     return rows
         .map((row) => Map<String, Object?>.from(row.toColumnMap()))
         .toList(growable: false);

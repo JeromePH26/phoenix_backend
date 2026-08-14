@@ -20,6 +20,7 @@ import '../services/football_daily_pipeline_service.dart';
 import '../services/football_service.dart';
 import '../services/football_asset_service.dart';
 import '../services/football_news_service.dart';
+import '../services/football_season_projection_service.dart';
 import '../services/tennis_service.dart';
 
 class ApiRoutes {
@@ -142,6 +143,36 @@ class ApiRoutes {
           'important': query['important'] == 'true',
         },
       });
+    });
+
+    router.get('/api/football/season-projections', (Request request) async {
+      final query = request.url.queryParameters;
+      final season = int.tryParse(query['season'] ?? '');
+      final projections = await database.seasonProjections(
+        season: season,
+        leagueId: query['leagueId'],
+      );
+      return jsonResponse(
+          {'count': projections.length, 'projections': projections});
+    });
+
+    router.post('/api/admin/football/season-projections',
+        (Request request) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+      final season = int.tryParse(request.url.queryParameters['season'] ?? '');
+      final simulations =
+          int.tryParse(request.url.queryParameters['simulations'] ?? '') ??
+              10000;
+      try {
+        return jsonResponse(await FootballSeasonProjectionService(
+          database: database,
+          football: football,
+        ).refresh(season: season, simulations: simulations));
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
     });
 
     router.get('/api/football/analyses/today', (Request request) async {
