@@ -91,7 +91,10 @@ Future<void> _settleDate({
   final day = _day(date);
   final uri = config.uri(
     '/api/admin/football/settle',
-    {'date': day},
+    // Der Vortag wird erneut gegen die offiziellen Endstände abgeglichen.
+    // Dadurch werden auch Korrekturen an der Markt-Abrechnung automatisch
+    // auf bereits entschiedene Tipps angewandt.
+    {'date': day, 'reconcile': 'true'},
   );
 
   stdout.writeln('[PHOENIX CRON] Ergebnisabrechnung für $day ...');

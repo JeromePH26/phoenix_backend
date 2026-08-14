@@ -10,7 +10,7 @@ class FootballValueService {
   final PhoenixDatabase database;
   final FootballService football;
 
-  static const modelVersion = 'value_check_v2_market_guard';
+  static const modelVersion = 'value_check_v3_strict_full_time_odds';
 
   Future<Map<String, Object?>> check({
     required int phaseTwoScanRunId,
@@ -290,11 +290,19 @@ class FootballValueService {
     if (found.isEmpty) return const _OddsSummary();
     found.sort();
 
-    final best = found.last;
     final middle = found.length ~/ 2;
     final median = found.length.isOdd
         ? found[middle]
         : (found[middle - 1] + found[middle]) / 2;
+
+    // Ein einzelner verspätet aktualisierter Buchmacher kann eine völlig
+    // abweichende Quote liefern. Sie darf nicht als angebliche "beste Quote"
+    // in der App landen. Der höchste Wert innerhalb von 12 % des Marktmedians
+    // bleibt sichtbar, echte Ausreißer werden verworfen.
+    final plausible = found
+        .where((odd) => odd <= median * 1.12)
+        .toList(growable: false);
+    final best = plausible.isEmpty ? median : plausible.last;
 
     return _OddsSummary(
       best: _round(best),
@@ -314,15 +322,15 @@ class FootballValueService {
       case 'homeWin':
         return fullTimeMarket &&
             _isMatchWinner(betName) &&
-            _containsAny(valueLabel, ['home', '1', 'home win']);
+            _isMatchWinnerSelection(valueLabel, outcome: 'home');
       case 'draw':
         return fullTimeMarket &&
             _isMatchWinner(betName) &&
-            _containsAny(valueLabel, ['draw', 'x']);
+            _isMatchWinnerSelection(valueLabel, outcome: 'draw');
       case 'awayWin':
         return fullTimeMarket &&
             _isMatchWinner(betName) &&
-            _containsAny(valueLabel, ['away', '2', 'away win']);
+            _isMatchWinnerSelection(valueLabel, outcome: 'away');
       case 'homeOrDraw':
       case 'dc1x':
         return fullTimeMarket &&
@@ -409,22 +417,28 @@ class FootballValueService {
             _isDrawNoBetMarket(betName) &&
             _isDrawNoBetSelection(valueLabel, home: false);
       case 'ehHomeMinus1':
-        return _isEuropeanHandicap(betName) &&
+        return fullTimeMarket &&
+            _isEuropeanHandicap(betName) &&
             _isEuropeanHandicapValue(valueLabel, side: 'home', line: -1);
       case 'ehDrawMinus1':
-        return _isEuropeanHandicap(betName) &&
+        return fullTimeMarket &&
+            _isEuropeanHandicap(betName) &&
             _isEuropeanHandicapValue(valueLabel, side: 'draw', line: -1);
       case 'ehAwayPlus1':
-        return _isEuropeanHandicap(betName) &&
+        return fullTimeMarket &&
+            _isEuropeanHandicap(betName) &&
             _isEuropeanHandicapValue(valueLabel, side: 'away', line: 1);
       case 'ehHomeMinus2':
-        return _isEuropeanHandicap(betName) &&
+        return fullTimeMarket &&
+            _isEuropeanHandicap(betName) &&
             _isEuropeanHandicapValue(valueLabel, side: 'home', line: -2);
       case 'ehDrawMinus2':
-        return _isEuropeanHandicap(betName) &&
+        return fullTimeMarket &&
+            _isEuropeanHandicap(betName) &&
             _isEuropeanHandicapValue(valueLabel, side: 'draw', line: -2);
       case 'ehAwayPlus2':
-        return _isEuropeanHandicap(betName) &&
+        return fullTimeMarket &&
+            _isEuropeanHandicap(betName) &&
             _isEuropeanHandicapValue(valueLabel, side: 'away', line: 2);
       case 'combo1xUnder35':
         return _isCombination(
@@ -506,6 +520,8 @@ class FootballValueService {
         betName.contains('match') ||
         betName.contains('double chance') ||
         betName.contains('draw no bet') ||
+        betName.contains('european handicap') ||
+        (betName.contains('result') && betName.contains('total')) ||
         betName == 'dnb' ||
         betName == 'goals over/under' ||
         betName == 'over/under' ||
@@ -522,6 +538,16 @@ class FootballValueService {
       value == '1x2' ||
       value == 'full time result' ||
       value == 'match result';
+
+  bool _isMatchWinnerSelection(String value, {required String outcome}) {
+    final normalized = value.trim();
+    return switch (outcome) {
+      'home' => const {'home', 'home team', 'home win', '1'}.contains(normalized),
+      'draw' => const {'draw', 'x'}.contains(normalized),
+      'away' => const {'away', 'away team', 'away win', '2'}.contains(normalized),
+      _ => false,
+    };
+  }
 
   bool _isDoubleChanceMarket(String value) => value.contains('double chance');
 
@@ -589,6 +615,7 @@ class FootballValueService {
     required String result,
     required String total,
   }) {
+    if (!_isFullTimeMarket(betName)) return false;
     final joined = '$betName $valueLabel'.replaceAll(',', '.');
     final suitableMarket = joined.contains('result') ||
         joined.contains('double chance') ||

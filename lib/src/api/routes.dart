@@ -712,6 +712,8 @@ class ApiRoutes {
       }
       final value = request.url.queryParameters['date'];
       final date = value == null ? DateTime.now() : DateTime.tryParse(value);
+      final reconcile =
+          request.url.queryParameters['reconcile']?.toLowerCase() == 'true';
       if (date == null) {
         return jsonResponse({
           'error': 'Datum muss YYYY-MM-DD sein.',
@@ -722,7 +724,7 @@ class ApiRoutes {
           await FootballResultSettlementService(
             database: database,
             football: football,
-          ).settle(date: date),
+          ).settle(date: date, reconcile: reconcile),
         );
       } catch (error) {
         return jsonResponse({'error': error.toString()}, statusCode: 500);

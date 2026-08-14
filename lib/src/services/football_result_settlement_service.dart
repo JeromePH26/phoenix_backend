@@ -10,9 +10,15 @@ class FootballResultSettlementService {
   final PhoenixDatabase database;
   final FootballService football;
 
-  Future<Map<String, Object?>> settle({required DateTime date}) async {
+  Future<Map<String, Object?>> settle({
+    required DateTime date,
+    bool reconcile = false,
+  }) async {
     final matches = await football.matchesForDate(date);
-    final pending = await database.pendingFootballTips(date: date);
+    final pending = await database.footballTipsForSettlement(
+      date: date,
+      reconcile: reconcile,
+    );
 
     final matchById = <String, Map<String, Object?>>{};
     for (final match in matches) {
@@ -115,6 +121,7 @@ class FootballResultSettlementService {
     return {
       'status': 'completed',
       'date': date.toIso8601String().substring(0, 10),
+      'reconcile': reconcile,
       'pendingFound': pending.length,
       'settled': settled,
       'skipped': skipped,
@@ -135,7 +142,13 @@ class FootballResultSettlementService {
         .replaceAll('ü', 'u');
 
     final total = homeScore + awayScore;
-    final normalizedMarketKey = marketKey.toLowerCase();
+    // Historische Datensätze verwenden teils snake_case, neuere CamelCase.
+    // Für die Ergebnisabrechnung müssen beide Schreibweisen identisch sein;
+    // ansonsten konnte eine Kombiwette nach ihrem Toranteil statt als gesamte
+    // Kombination bewertet werden.
+    final normalizedMarketKey = marketKey
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9]'), '');
     final goalDifference = homeScore - awayScore;
 
     // Kombinations- und Handicapmärkte müssen vor den enthaltenen

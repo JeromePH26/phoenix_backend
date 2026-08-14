@@ -2084,8 +2084,9 @@ class PhoenixDatabase {
     );
   }
 
-  Future<List<Map<String, Object?>>> pendingFootballTips({
+  Future<List<Map<String, Object?>>> footballTipsForSettlement({
     DateTime? date,
+    bool reconcile = false,
   }) async {
     final db = await connection();
     final result = await db.execute(
@@ -2093,11 +2094,14 @@ class PhoenixDatabase {
         SELECT phase_two_scan_run_id, fixture_id, market_key, market_label,
                market_odds, assigned_units, payload
         FROM football_analysis_history
-        WHERE result_status = 'pending'
+        WHERE (@reconcile = TRUE OR result_status = 'pending')
           AND (@prediction_date IS NULL OR prediction_date = CAST(@prediction_date AS DATE))
         ORDER BY kickoff
       '''),
-      parameters: {'prediction_date': date?.toIso8601String().substring(0, 10)},
+      parameters: {
+        'prediction_date': date?.toIso8601String().substring(0, 10),
+        'reconcile': reconcile,
+      },
     );
     return result
         .map((row) => Map<String, Object?>.from(row.toColumnMap()))
