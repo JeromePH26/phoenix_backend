@@ -81,7 +81,11 @@ class FootballService {
     required int season,
     required String homeTeamId,
     required String awayTeamId,
-    Duration pauseBetweenCalls = const Duration(seconds: 4),
+    // Der Pro-Tarif erlaubt bis zu fünf Requests pro Sekunde. 300 ms Abstand
+    // hält den sequenziellen Scan bewusst darunter, ohne die tägliche Analyse
+    // mit der alten Free-Plan-Wartezeit von vier Sekunden pro Detail zu
+    // blockieren.
+    Duration pauseBetweenCalls = const Duration(milliseconds: 300),
   }) async {
     final result = <String, Object?>{};
 
@@ -98,7 +102,11 @@ class FootballService {
       bool retainRows = true,
     }) async {
       try {
-        final decoded = await _get(path, query);
+        // Tabellen werden pro Liga, Teamstatistiken und Quoten pro Fixture in
+        // derselben Scan-Instanz wiederverwendet. Das spart Requests und
+        // verhindert identische Doppelabfragen, wenn mehrere Spiele einer
+        // Liga am selben Tag stattfinden.
+        final decoded = await providerRequest(path: path, query: query);
         final rows = _responseRows(decoded);
         result[key] = rows.isNotEmpty;
         result['${key}Count'] = rows.length;
@@ -132,9 +140,9 @@ class FootballService {
       String teamId,
       int forSeason,
     ) async {
-      final decoded = await _get(
-        '/teams/statistics',
-        {
+      final decoded = await providerRequest(
+        path: '/teams/statistics',
+        query: {
           'league': leagueId,
           'season': forSeason.toString(),
           'team': teamId,
@@ -243,11 +251,12 @@ class FootballService {
       {'fixture': fixtureId},
     );
 
-    await checkList(
-      'lineups',
-      '/fixtures/lineups',
-      {'fixture': fixtureId},
-    );
+    // Aufstellungen sind vor dem Anpfiff fast immer leer und der
+    // entsprechende UI-Bereich ist aktuell deaktiviert. Der Abruf würde je
+    // Spiel nur Zeit und einen API-Request verbrauchen.
+    result['lineups'] = false;
+    result['lineupsCount'] = 0;
+    result['lineupsData'] = <Object?>[];
 
     await checkList(
       'h2h',
@@ -270,9 +279,9 @@ class FootballService {
   Future<List<Map<String, Object?>>> oddsForFixture(
     String fixtureId,
   ) async {
-    final decoded = await _get(
-      '/odds',
-      {'fixture': fixtureId},
+    final decoded = await providerRequest(
+      path: '/odds',
+      query: {'fixture': fixtureId},
     );
 
     return _responseRows(decoded)
