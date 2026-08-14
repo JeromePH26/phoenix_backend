@@ -364,7 +364,7 @@ class PhoenixDatabase {
     ''');
 
     // PHÖNIX feste Wettbewerbs-Whitelist:
-    // 16 nationale Ligen, 11 nationale Pokale und 3 UEFA-Wettbewerbe.
+    // 22 nationale Ligen, 11 nationale Pokale und 3 UEFA-Wettbewerbe.
     // Bereits vorhandene Datensätze werden auf whitelist aktualisiert.
     await db.execute(r'''
       INSERT INTO football_leagues (
@@ -379,6 +379,7 @@ class PhoenixDatabase {
       )
       VALUES
         ('39',  'Premier League',              'England',     'men', 1, 'whitelist', 'approved', NOW()),
+        ('40',  'Championship',                'England',     'men', 2, 'whitelist', 'approved', NOW()),
         ('61',  'Ligue 1',                     'France',      'men', 1, 'whitelist', 'approved', NOW()),
         ('78',  'Bundesliga',                  'Germany',     'men', 1, 'whitelist', 'approved', NOW()),
         ('79',  '2. Bundesliga',               'Germany',     'men', 2, 'whitelist', 'approved', NOW()),
@@ -390,9 +391,13 @@ class PhoenixDatabase {
         ('119', 'Superliga',                   'Denmark',     'men', 1, 'whitelist', 'approved', NOW()),
         ('135', 'Serie A',                     'Italy',       'men', 1, 'whitelist', 'approved', NOW()),
         ('140', 'La Liga',                     'Spain',       'men', 1, 'whitelist', 'approved', NOW()),
+        ('141', 'Segunda Division',            'Spain',       'men', 2, 'whitelist', 'approved', NOW()),
         ('144', 'Jupiler Pro League',          'Belgium',     'men', 1, 'whitelist', 'approved', NOW()),
+        ('203', 'Süper Lig',                   'Turkey',      'men', 1, 'whitelist', 'approved', NOW()),
         ('244', 'Veikkausliiga',               'Finland',     'men', 1, 'whitelist', 'approved', NOW()),
         ('207', 'Super League',                 'Switzerland', 'men', 1, 'whitelist', 'approved', NOW()),
+        ('210', 'HNL',                          'Croatia',     'men', 1, 'whitelist', 'approved', NOW()),
+        ('218', '2. Liga',                      'Austria',     'men', 2, 'whitelist', 'approved', NOW()),
         ('253', 'Major League Soccer',          'USA',         'men', 1, 'whitelist', 'approved', NOW()),
 
         ('45',  'FA Cup',                      'England',     'men', NULL, 'whitelist', 'approved', NOW()),
@@ -402,6 +407,7 @@ class PhoenixDatabase {
         ('90',  'KNVB Beker',                  'Netherlands', 'men', NULL, 'whitelist', 'approved', NOW()),
         ('96',  'Taça de Portugal',            'Portugal',    'men', NULL, 'whitelist', 'approved', NOW()),
         ('104', 'NM Cupen',                    'Norway',      'men', NULL, 'whitelist', 'approved', NOW()),
+        ('106', 'Ekstraklasa',                 'Poland',      'men', 1, 'whitelist', 'approved', NOW()),
         ('137', 'Coppa Italia',                'Italy',       'men', NULL, 'whitelist', 'approved', NOW()),
         ('143', 'Copa del Rey',                'Spain',       'men', NULL, 'whitelist', 'approved', NOW()),
         ('147', 'Belgian Cup',                 'Belgium',     'men', NULL, 'whitelist', 'approved', NOW()),
