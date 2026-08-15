@@ -2,6 +2,7 @@ import 'dart:io';
 
 import '../database/database.dart';
 import 'football_engine_input_service.dart';
+import 'football_daily_combo_service.dart';
 import 'football_market_selection_service.dart';
 import 'football_phase_one_scan_service.dart';
 import 'football_phase_two_scan_service.dart';
@@ -139,7 +140,7 @@ class FootballDailyPipelineService {
           await FootballMarketSelectionService(database: database).select(
         phaseTwoScanRunId: phaseTwoId,
         limit: effectiveLimit,
-        minimumProbability: 60,
+        minimumProbability: 68,
       );
 
       final selected = _integer(marketResult['processed']);
@@ -166,6 +167,7 @@ class FootballDailyPipelineService {
       await _step(jobId, 'publishing');
       final publishResult = await _publishAnalyses(
         phaseTwoScanRunId: phaseTwoId,
+        date: date,
       );
 
       await _finish(
@@ -190,6 +192,7 @@ class FootballDailyPipelineService {
 
   Future<Map<String, Object?>> _publishAnalyses({
     required int phaseTwoScanRunId,
+    required DateTime date,
   }) async {
     final rows = await database.finalizationCandidates(
       phaseTwoScanRunId: phaseTwoScanRunId,
@@ -197,6 +200,7 @@ class FootballDailyPipelineService {
 
     var processed = 0;
     var published = 0;
+    final publishedAnalyses = <Map<String, Object?>>[];
 
     for (final row in rows) {
       processed++;
@@ -226,11 +230,12 @@ class FootballDailyPipelineService {
         100,
       );
 
-      final showPhoenixTip = _map(selection['display'])['showPhoenixTip'] ==
-          true;
-      final recommendation = showPhoenixTip
-          ? _string(phoenixTip['market'])
-          : '';
+      // Every complete model run receives one stable PHOENIX top pick. The
+      // display guard still controls value/odds messaging, but it must not
+      // erase the model selection: otherwise the app shows a pick that cannot
+      // be persisted, settled or included in the long-term hit-rate.
+      final recommendation = _string(phoenixTip['market']);
+      final marketKey = _string(phoenixTip['marketKey']);
 
       final homeProbability = _probability(
         rawProbabilities['home'] ?? rawProbabilities['homeWin'],
@@ -262,6 +267,16 @@ class FootballDailyPipelineService {
         'baseConfidence': baseConfidence,
         'contextConfidenceDelta': contextConfidenceDelta,
         'recommendation': recommendation,
+        'topTip': {
+          'marketKey': marketKey,
+          'market': recommendation,
+          'probability': phoenixTip['probability'],
+          'fairOdds': phoenixTip['fairOdds'],
+        },
+        'tracking': {
+          'isPhoenixTopTip': recommendation.isNotEmpty,
+          'roiRequiresVerifiedMarketOdds': true,
+        },
         'probabilities': {
           ...rawProbabilities.map(
             (key, value) => MapEntry(key, _probability(value)),
@@ -279,9 +294,8 @@ class FootballDailyPipelineService {
         'fairOdds': fairOdds,
         'marketOddsByKey': {
           ..._map(selection['marketOddsByKey']),
-          if (_string(phoenixTip['marketKey']).isNotEmpty)
-            _string(phoenixTip['marketKey']):
-                _map(selection['value'])['marketOdds'],
+          if (marketKey.isNotEmpty)
+            marketKey: _map(selection['value'])['marketOdds'],
         },
         'goalExpectations': simulation['goalExpectations'],
         'topScorelines': simulation['topScorelines'],
@@ -321,9 +335,17 @@ class FootballDailyPipelineService {
       );
 
       published++;
+      publishedAnalyses.add(analysisPayload);
     }
 
-    return {'processed': processed, 'published': published};
+    final dailyCombo = await FootballDailyComboService(database: database)
+        .buildAndSave(date: date, analyses: publishedAnalyses);
+
+    return {
+      'processed': processed,
+      'published': published,
+      'dailyComboCreated': dailyCombo != null,
+    };
   }
 
   Future<void> _finish({

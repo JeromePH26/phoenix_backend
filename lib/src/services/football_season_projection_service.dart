@@ -78,9 +78,37 @@ class FootballSeasonProjectionService {
           path: '/fixtures',
           query: {'league': leagueId, 'season': '$season', 'status': 'NS'}),
     ]);
-    final standings = _standings(responses[0]);
-    if (standings.length < 4) return null;
     final fixtures = _fixtures(responses[1]);
+    final standings = _standings(responses[0]);
+    if (standings.length < 4) {
+      final teams = _scheduledTeams(fixtures);
+      if (teams.length < 4) return null;
+      return {
+        'leagueId': leagueId,
+        'leagueName': leagueName,
+        'country': country,
+        'season': season,
+        'modelVersion': modelVersion,
+        'simulations': 0,
+        'remainingFixtures': fixtures.length,
+        'seasonState': 'preseason',
+        'table': [
+          for (var index = 0; index < teams.length; index++)
+            {
+              'teamId': teams[index].id,
+              'teamName': teams[index].name,
+              'teamLogo': teams[index].logo,
+              'currentPoints': 0,
+              'currentGoalDifference': 0,
+              'played': 0,
+              'projectedPosition': index + 1,
+              'projectedPoints': 0,
+              'projectedGoalDifference': 0,
+              'positionProbabilities': const <double>[],
+            },
+        ],
+      };
+    }
     final table =
         _simulate(standings, fixtures, simulations, '$leagueId-$season');
     return {
@@ -88,6 +116,7 @@ class FootballSeasonProjectionService {
       'leagueName': leagueName,
       'country': country,
       'season': season,
+      'seasonState': 'active',
       'modelVersion': modelVersion,
       'simulations': simulations,
       'remainingFixtures': fixtures.length,
@@ -144,11 +173,38 @@ class FootballSeasonProjectionService {
               ? Map<String, dynamic>.from(teams['away'] as Map)
               : const <String, dynamic>{};
           return _Fixture(
-              home['id']?.toString() ?? '', away['id']?.toString() ?? '');
+            home: _SeasonTeam(
+              id: home['id']?.toString() ?? '',
+              name: home['name']?.toString() ?? '',
+              logo: home['logo']?.toString() ?? '',
+              points: 0,
+              goalDifference: 0,
+              played: 0,
+            ),
+            away: _SeasonTeam(
+              id: away['id']?.toString() ?? '',
+              name: away['name']?.toString() ?? '',
+              logo: away['logo']?.toString() ?? '',
+              points: 0,
+              goalDifference: 0,
+              played: 0,
+            ),
+          );
         })
-        .where(
-            (fixture) => fixture.homeId.isNotEmpty && fixture.awayId.isNotEmpty)
+        .where((fixture) =>
+            fixture.home.id.isNotEmpty && fixture.away.id.isNotEmpty)
         .toList();
+  }
+
+  List<_SeasonTeam> _scheduledTeams(List<_Fixture> fixtures) {
+    final uniqueTeams = <String, _SeasonTeam>{};
+    for (final fixture in fixtures) {
+      uniqueTeams.putIfAbsent(fixture.home.id, () => fixture.home);
+      uniqueTeams.putIfAbsent(fixture.away.id, () => fixture.away);
+    }
+    final teams = uniqueTeams.values.toList()
+      ..sort((a, b) => a.name.compareTo(b.name));
+    return teams;
   }
 
   List<Map<String, Object?>> _simulate(List<_SeasonTeam> base,
@@ -166,8 +222,8 @@ class FootballSeasonProjectionService {
         for (final team in base) team.id: team.goalDifference
       };
       for (final fixture in fixtures) {
-        final home = teamsById[fixture.homeId];
-        final away = teamsById[fixture.awayId];
+        final home = teamsById[fixture.home.id];
+        final away = teamsById[fixture.away.id];
         if (home == null || away == null) continue;
         final probability = _homeWinProbability(home, away);
         final draw = _drawProbability(home, away);
@@ -277,6 +333,6 @@ class _SeasonTeam {
 }
 
 class _Fixture {
-  const _Fixture(this.homeId, this.awayId);
-  final String homeId, awayId;
+  const _Fixture({required this.home, required this.away});
+  final _SeasonTeam home, away;
 }

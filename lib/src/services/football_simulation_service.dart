@@ -169,6 +169,14 @@ class FootballSimulationService {
       for (final entry in extendedCounts.entries)
         entry.key: entry.value / simulations,
     };
+    // A Draw-No-Bet wager is void on a draw. Its quoted win probability and
+    // fair odds must therefore be conditional on the match not finishing
+    // level, rather than using the raw 1X2 win probability.
+    final noDrawProbability = homeWinProbability + awayWinProbability;
+    extendedProbabilities['dnbHome'] =
+        noDrawProbability > 0 ? homeWinProbability / noDrawProbability : 0;
+    extendedProbabilities['dnbAway'] =
+        noDrawProbability > 0 ? awayWinProbability / noDrawProbability : 0;
 
     final aiContext = _map(input['aiContext']);
     final normalized = _map(input['normalized']);

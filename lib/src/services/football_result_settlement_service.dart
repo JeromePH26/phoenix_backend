@@ -70,7 +70,7 @@ class FootballResultSettlementService {
           payload['marketLabel']?.toString() ??
           '';
 
-      final resultStatus = _grade(
+      final resultStatus = gradeMarket(
         marketKey: marketKey,
         marketLabel: marketLabel,
         homeScore: homeScore,
@@ -118,6 +118,76 @@ class FootballResultSettlementService {
       });
     }
 
+    final comboResults = <Map<String, Object?>>[];
+    for (final combo in await database.footballDailyCombosForSettlement(
+      date: date,
+      reconcile: reconcile,
+    )) {
+      final payload = _map(combo['payload']);
+      final legs = payload['legs'] is List ? payload['legs'] as List : const [];
+      if (legs.isEmpty) {
+        continue;
+      }
+
+      final grades = <String>[];
+      var allFixturesFinished = true;
+      for (final rawLeg in legs) {
+        final leg = _map(rawLeg);
+        final fixtureId = leg['fixtureId']?.toString() ?? '';
+        final match = matchById[fixtureId];
+        if (match == null) {
+          allFixturesFinished = false;
+          break;
+        }
+        final fixture = _map(match['fixture']);
+        final status = _map(fixture['status']);
+        final shortStatus = status['short']?.toString().toUpperCase() ??
+            match['status']?.toString().toUpperCase() ??
+            '';
+        if (!_isFinished(shortStatus)) {
+          allFixturesFinished = false;
+          break;
+        }
+        final goals = _map(match['goals']);
+        final grade = gradeMarket(
+          marketKey: leg['marketKey']?.toString() ?? '',
+          marketLabel: leg['market']?.toString() ?? '',
+          homeScore: _integer(goals['home'] ?? match['homeGoals']),
+          awayScore: _integer(goals['away'] ?? match['awayGoals']),
+        );
+        if (grade == 'unsupported') {
+          allFixturesFinished = false;
+          break;
+        }
+        grades.add(grade);
+      }
+      if (!allFixturesFinished) continue;
+
+      final resultStatus = grades.any((grade) => grade == 'lost')
+          ? 'lost'
+          : grades.any((grade) => grade == 'push')
+              ? 'push'
+              : 'won';
+      final units = _number(combo['assigned_units']) ?? 1;
+      final odds = _number(combo['combined_odds']) ?? 0;
+      final profitUnits = switch (resultStatus) {
+        'won' => units * (odds - 1),
+        'lost' => -units,
+        _ => 0.0,
+      };
+      await database.settleFootballDailyCombo(
+        date: date,
+        resultStatus: resultStatus,
+        profitUnits: profitUnits,
+      );
+      comboResults.add({
+        'status': resultStatus,
+        'assignedUnits': units,
+        'profitUnits': profitUnits,
+        'legs': grades.length,
+      });
+    }
+
     return {
       'status': 'completed',
       'date': date.toIso8601String().substring(0, 10),
@@ -126,11 +196,13 @@ class FootballResultSettlementService {
       'settled': settled,
       'skipped': skipped,
       'results': results,
+      'dailyCombos': comboResults,
       'performance': await database.footballPerformanceSummary(),
+      'dailyComboPerformance': await database.footballDailyComboPerformance(),
     };
   }
 
-  String _grade({
+  static String gradeMarket({
     required String marketKey,
     required String marketLabel,
     required int homeScore,
@@ -146,10 +218,17 @@ class FootballResultSettlementService {
     // Für die Ergebnisabrechnung müssen beide Schreibweisen identisch sein;
     // ansonsten konnte eine Kombiwette nach ihrem Toranteil statt als gesamte
     // Kombination bewertet werden.
-    final normalizedMarketKey = marketKey
-        .toLowerCase()
-        .replaceAll(RegExp(r'[^a-z0-9]'), '');
+    final normalizedMarketKey =
+        marketKey.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
     final goalDifference = homeScore - awayScore;
+
+    // Older snapshots can contain a provider display label instead of the
+    // internal key. Settle European handicaps before their 1X2 text is read.
+    final historicalHandicap = _gradeHistoricalEuropeanHandicap(
+      key,
+      goalDifference,
+    );
+    if (historicalHandicap != null) return historicalHandicap;
 
     // Kombinations- und Handicapmärkte müssen vor den enthaltenen
     // Einzelbegriffen (z. B. 1X oder Heimsieg) ausgewertet werden.
@@ -276,7 +355,33 @@ class FootballResultSettlementService {
     return 'unsupported';
   }
 
-  double? _extractLine(String value, List<String> prefixes) {
+  static String? _gradeHistoricalEuropeanHandicap(
+    String value,
+    int goalDifference,
+  ) {
+    if (!value.contains('handicap')) return null;
+    final compact = value.replaceAll(RegExp(r'[^a-z0-9+-.]'), '');
+    final line = RegExp(r'([+-])([0-9]+)').firstMatch(compact);
+    if (line == null) return null;
+    final amount = int.tryParse(line.group(2) ?? '');
+    if (amount == null || amount <= 0) return null;
+    final sign = line.group(1);
+    if (compact.contains('heim') || compact.contains('home')) {
+      if (sign == '-') return goalDifference >= amount + 1 ? 'won' : 'lost';
+      return goalDifference >= 1 - amount ? 'won' : 'lost';
+    }
+    if (compact.contains('auswart') || compact.contains('away')) {
+      if (sign == '+') return goalDifference <= amount - 1 ? 'won' : 'lost';
+      return goalDifference <= -amount - 1 ? 'won' : 'lost';
+    }
+    if (compact.contains('unentschieden') || compact.contains('draw')) {
+      final target = sign == '-' ? amount : -amount;
+      return goalDifference == target ? 'won' : 'lost';
+    }
+    return null;
+  }
+
+  static double? _extractLine(String value, List<String> prefixes) {
     for (final prefix in prefixes) {
       final index = value.indexOf(prefix);
       if (index == -1) continue;
@@ -289,7 +394,7 @@ class FootballResultSettlementService {
     return null;
   }
 
-  bool _containsAny(String value, List<String> needles) =>
+  static bool _containsAny(String value, List<String> needles) =>
       needles.any(value.contains);
 
   bool _isFinished(String status) =>

@@ -213,6 +213,24 @@ class PhoenixDatabase {
       )
     ''');
 
+    // A daily combo is a reproducible snapshot, not a recalculated client
+    // suggestion. Its legs and quote source remain fixed after publication.
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS football_daily_combos (
+        combo_date DATE PRIMARY KEY,
+        combined_odds DOUBLE PRECISION NOT NULL,
+        combined_probability DOUBLE PRECISION NOT NULL,
+        uses_model_odds BOOLEAN NOT NULL DEFAULT FALSE,
+        result_status TEXT NOT NULL DEFAULT 'pending',
+        assigned_units DOUBLE PRECISION NOT NULL DEFAULT 0,
+        profit_units DOUBLE PRECISION,
+        settled_at TIMESTAMPTZ,
+        payload JSONB NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    ''');
+
     await db.execute('''
       CREATE TABLE IF NOT EXISTS football_phase_two_results (
         scan_run_id BIGINT NOT NULL,
@@ -956,6 +974,158 @@ class PhoenixDatabase {
         .toList(growable: false);
   }
 
+  Future<void> saveFootballDailyCombo({
+    required DateTime date,
+    required double combinedOdds,
+    required double combinedProbability,
+    required bool usesModelOdds,
+    required Map<String, Object?> payload,
+  }) async {
+    final db = await connection();
+    await db.execute(Sql.named('''
+      INSERT INTO football_daily_combos (
+        combo_date, combined_odds, combined_probability, uses_model_odds,
+        assigned_units, payload
+      ) VALUES (
+        CAST(@date AS DATE), @combined_odds, @combined_probability,
+        @uses_model_odds, @assigned_units, CAST(@payload AS JSONB)
+      )
+      ON CONFLICT (combo_date) DO UPDATE SET
+        combined_odds = EXCLUDED.combined_odds,
+        combined_probability = EXCLUDED.combined_probability,
+        uses_model_odds = EXCLUDED.uses_model_odds,
+        assigned_units = EXCLUDED.assigned_units,
+        payload = EXCLUDED.payload,
+        updated_at = NOW()
+      WHERE football_daily_combos.result_status = 'pending'
+    '''), parameters: {
+      'date': date.toUtc().toIso8601String().substring(0, 10),
+      'combined_odds': combinedOdds,
+      'combined_probability': combinedProbability,
+      'uses_model_odds': usesModelOdds,
+      'assigned_units': usesModelOdds ? 0.0 : 1.0,
+      'payload': jsonEncode(payload),
+    });
+  }
+
+  Future<Map<String, Object?>?> footballDailyCombo(DateTime date) async {
+    final db = await connection();
+    final rows = await db.execute(Sql.named('''
+      SELECT combo_date, combined_odds, combined_probability, uses_model_odds,
+             result_status, assigned_units, profit_units, settled_at, payload
+      FROM football_daily_combos
+      WHERE combo_date = CAST(@date AS DATE)
+    '''), parameters: {
+      'date': date.toUtc().toIso8601String().substring(0, 10),
+    });
+    if (rows.isEmpty) return null;
+    return Map<String, Object?>.from(rows.first.toColumnMap());
+  }
+
+  Future<List<Map<String, Object?>>> footballDailyCombosForSettlement({
+    required DateTime date,
+    bool reconcile = false,
+  }) async {
+    final db = await connection();
+    final rows = await db.execute(Sql.named('''
+      SELECT combo_date, combined_odds, assigned_units, payload
+      FROM football_daily_combos
+      WHERE combo_date = CAST(@date AS DATE)
+        AND (@reconcile = TRUE OR result_status = 'pending')
+    '''), parameters: {
+      'date': date.toUtc().toIso8601String().substring(0, 10),
+      'reconcile': reconcile,
+    });
+    return rows
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList(growable: false);
+  }
+
+  Future<void> settleFootballDailyCombo({
+    required DateTime date,
+    required String resultStatus,
+    required double profitUnits,
+  }) async {
+    final db = await connection();
+    await db.execute(Sql.named('''
+      UPDATE football_daily_combos
+      SET result_status = @result_status,
+          profit_units = @profit_units,
+          settled_at = NOW(),
+          updated_at = NOW()
+      WHERE combo_date = CAST(@date AS DATE)
+    '''), parameters: {
+      'date': date.toUtc().toIso8601String().substring(0, 10),
+      'result_status': resultStatus,
+      'profit_units': profitUnits,
+    });
+  }
+
+  Future<Map<String, Object?>> footballDailyComboPerformance() async {
+    final db = await connection();
+    final rows = await db.execute('''
+      SELECT COUNT(*) AS total,
+             COUNT(*) FILTER (WHERE result_status IN ('won', 'lost')) AS settled,
+             COUNT(*) FILTER (WHERE result_status = 'won') AS won,
+             COUNT(*) FILTER (WHERE result_status = 'lost') AS lost,
+             COALESCE(SUM(assigned_units) FILTER (WHERE result_status IN ('won', 'lost')), 0) AS staked_units,
+             COALESCE(SUM(profit_units) FILTER (WHERE result_status IN ('won', 'lost')), 0) AS profit_units
+      FROM football_daily_combos
+    ''');
+    final values = Map<String, Object?>.from(rows.first.toColumnMap());
+    final number =
+        (String key) => double.tryParse(values[key]?.toString() ?? '') ?? 0;
+    final integer =
+        (String key) => int.tryParse(values[key]?.toString() ?? '') ?? 0;
+    final won = integer('won');
+    final lost = integer('lost');
+    final staked = number('staked_units');
+    final profit = number('profit_units');
+    return {
+      'total': integer('total'),
+      'settled': integer('settled'),
+      'won': won,
+      'lost': lost,
+      'hitRatePercent': won + lost == 0 ? 0 : won / (won + lost) * 100,
+      'stakedUnits': staked,
+      'profitUnits': profit,
+      'roiPercent': staked == 0 ? 0 : profit / staked * 100,
+    };
+  }
+
+  /// Coverage report for every manually whitelisted competition. It makes
+  /// missing fixtures, analyses and low-quality scans visible before they turn
+  /// into empty app sections.
+  Future<List<Map<String, Object?>>> footballWhitelistCoverage({
+    required DateTime date,
+  }) async {
+    final db = await connection();
+    final day = date.toUtc().toIso8601String().substring(0, 10);
+    final rows = await db.execute(Sql.named('''
+      SELECT
+        l.league_id,
+        l.league_name,
+        l.country,
+        l.competition_level,
+        COUNT(DISTINCT m.id)::INTEGER AS fixture_count,
+        COUNT(DISTINCT a.match_id)::INTEGER AS analysis_count,
+        COALESCE(ROUND(AVG(a.data_quality)), 0)::INTEGER AS average_quality
+      FROM football_leagues l
+      LEFT JOIN football_matches m
+        ON m.league_id = l.league_id
+       AND m.kickoff_utc >= CAST(@day AS DATE)
+       AND m.kickoff_utc < CAST(@day AS DATE) + INTERVAL '1 day'
+      LEFT JOIN analyses a
+        ON a.sport = 'football' AND a.match_id = m.id
+      WHERE l.manual_status = 'whitelist'
+      GROUP BY l.league_id, l.league_name, l.country, l.competition_level
+      ORDER BY l.competition_level NULLS LAST, l.country, l.league_name
+    '''), parameters: {'day': day});
+    return rows
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList(growable: false);
+  }
+
   Future<void> saveSeasonProjection({
     required String leagueId,
     required int season,
@@ -1089,6 +1259,7 @@ class PhoenixDatabase {
     String? teamId,
     String? leagueId,
     String? category,
+    String? sourceName,
     bool importantOnly = false,
     int hours = 168,
     int limit = 80,
@@ -1125,6 +1296,7 @@ class PhoenixDatabase {
         AND (@teamId = '' OR team_ids ? @teamId)
         AND (@leagueId = '' OR league_ids ? @leagueId)
         AND (@category = '' OR category = @category)
+        AND (@sourceName = '' OR source_name = @sourceName)
         AND (@importantOnly = FALSE OR importance >= 70)
       ORDER BY importance DESC, published_at DESC
       LIMIT @limit
@@ -1133,6 +1305,7 @@ class PhoenixDatabase {
       'teamId': teamId ?? '',
       'leagueId': leagueId ?? '',
       'category': category ?? '',
+      'sourceName': sourceName ?? '',
       'importantOnly': importantOnly,
       'limit': limit.clamp(1, 100),
     });
@@ -2176,16 +2349,21 @@ class PhoenixDatabase {
     final tip = _jsonMap(payload['phoenixTip']);
     final selection = _jsonMap(payload['selection']);
     final value = _jsonMap(selection['value']);
-    final rawMarketOdds = value['marketOdds'];
+    final marketKey = tip['marketKey']?.toString() ?? '';
+    final oddsByKey = _jsonMap(payload['marketOddsByKey']);
+    final rawMarketOdds = oddsByKey[marketKey] ?? value['marketOdds'];
     final marketOdds = rawMarketOdds is num
         ? rawMarketOdds.toDouble()
         : double.tryParse(rawMarketOdds?.toString() ?? '');
-    // A flat one-unit stake keeps ROI comparable. Only value tips that passed
-    // all guards count as bets; every other prediction remains in history.
-    final assignedUnits =
-        value['isValueTip'] == true && marketOdds != null && marketOdds > 1
-            ? 1.0
-            : 0.0;
+    // New PHOENIX top tips get one comparable unit only when the same market
+    // has a verified, practice-safe bookmaker quote. Model-only selections
+    // remain in history but cannot distort ROI with a synthetic price.
+    final assignedUnits = marketKey.isNotEmpty &&
+            marketOdds != null &&
+            marketOdds >= 1.20 &&
+            marketOdds <= 4.0
+        ? 1.0
+        : 0.0;
     final kickoff = DateTime.tryParse(payload['kickoff']?.toString() ?? '');
     final predictionDate =
         kickoff?.toUtc().toIso8601String().substring(0, 10) ??
@@ -2212,7 +2390,7 @@ class PhoenixDatabase {
         'prediction_date': predictionDate,
         'kickoff': kickoff?.toUtc().toIso8601String() ?? '',
         'model_version': modelVersion,
-        'market_key': tip['marketKey']?.toString() ?? '',
+        'market_key': marketKey,
         'market_label': tip['market']?.toString() ?? '',
         'model_probability': tip['probability'],
         'fair_odds': tip['fairOdds'],
@@ -2247,6 +2425,53 @@ class PhoenixDatabase {
     return result
         .map((row) => Map<String, Object?>.from(row.toColumnMap()))
         .toList();
+  }
+
+  /// Immutable PHÖNIX recommendations for the in-app history. The app must
+  /// read these server snapshots instead of its device cache so settled tips
+  /// remain visible after reinstalling or changing phones.
+  Future<List<Map<String, Object?>>> footballHistory({
+    required DateTime since,
+    int limit = 500,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT phase_two_scan_run_id, fixture_id, prediction_date, kickoff,
+               market_key, market_label, model_probability, fair_odds,
+               market_odds, data_quality, confidence, result_status,
+               home_score, away_score, profit_units, settled_at, created_at,
+               COALESCE(payload->>'homeTeam', payload #>> '{selection,homeTeam}', '')
+                 AS home_team,
+               COALESCE(payload->>'awayTeam', payload #>> '{selection,awayTeam}', '')
+                 AS away_team,
+               COALESCE(payload->>'league', payload #>> '{selection,league}', '')
+                 AS league
+        FROM football_analysis_history
+        WHERE prediction_date >= CAST(@since AS DATE)
+        ORDER BY kickoff DESC NULLS LAST, created_at DESC
+        LIMIT @limit
+      '''),
+      parameters: {
+        'since': since.toUtc().toIso8601String().substring(0, 10),
+        'limit': limit.clamp(1, 500),
+      },
+    );
+    return result.map((row) {
+      final value = Map<String, Object?>.from(row.toColumnMap());
+      for (final key in const [
+        'prediction_date',
+        'kickoff',
+        'settled_at',
+        'created_at',
+      ]) {
+        final timestamp = value[key];
+        if (timestamp is DateTime) {
+          value[key] = timestamp.toUtc().toIso8601String();
+        }
+      }
+      return value;
+    }).toList(growable: false);
   }
 
   Future<void> settleFootballTip({

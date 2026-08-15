@@ -5,12 +5,12 @@ class FootballMarketSelectionService {
 
   final PhoenixDatabase database;
 
-  static const modelVersion = 'market_selection_trust_v4_balanced_markets';
+  static const modelVersion = 'market_selection_trust_v6_68_core_markets';
 
   Future<Map<String, Object?>> select({
     required int phaseTwoScanRunId,
     int? limit,
-    double minimumProbability = 0,
+    double minimumProbability = 0.68,
   }) async {
     final rows = await database.simulationRowsForSelection(
       phaseTwoScanRunId: phaseTwoScanRunId,
@@ -90,12 +90,6 @@ class FootballMarketSelectionService {
         'dcX2': 'Doppelte Chance X2',
         'dnbHome': 'Draw No Bet Heim',
         'dnbAway': 'Draw No Bet Auswärts',
-        'ehHomeMinus1': 'Europäisches Handicap: Heim -1',
-        'ehDrawMinus1': 'Europäisches Handicap: Unentschieden -1',
-        'ehAwayPlus1': 'Europäisches Handicap: Auswärts +1',
-        'ehHomeMinus2': 'Europäisches Handicap: Heim -2',
-        'ehDrawMinus2': 'Europäisches Handicap: Unentschieden -2',
-        'ehAwayPlus2': 'Europäisches Handicap: Auswärts +2',
         'combo1xUnder35': '1X & unter 3,5 Tore',
         'comboX2Under35': 'X2 & unter 3,5 Tore',
         'combo1xOver15': '1X & über 1,5 Tore',
@@ -126,15 +120,59 @@ class FootballMarketSelectionService {
       // Extrem sichere Linien wie Über 0,5 oder Unter 5,5 haben fast immer
       // unspielbar kleine Quoten. Sie bleiben in der Marktübersicht, dürfen
       // aber nicht automatisch jeden sinnvolleren Pick verdrängen.
+      const topTipKeys = <String>{
+        'homeWin',
+        'draw',
+        'awayWin',
+        'over25',
+        'under25',
+        'bttsYes',
+        'bttsNo',
+        'dnbHome',
+        'dnbAway',
+      };
       final selectable = candidates.where((candidate) {
+        final key = _string(candidate['key']);
         final probability = _asProbability(candidate['probability']);
         final fair = _number(candidate['fairOdds']) ?? 0;
-        return probability >= minimumProbabilityDecimal.clamp(0.0, 1.0) &&
-            probability <= 0.82 &&
+        final isContradictoryDraw = key == 'draw' &&
+            probability <
+                _asProbability(
+                    probabilities['homeWin'] ?? probabilities['home']) &&
+            probability <
+                _asProbability(
+                    probabilities['awayWin'] ?? probabilities['away']);
+        return topTipKeys.contains(key) &&
+            !isContradictoryDraw &&
+            probability >= minimumProbabilityDecimal.clamp(0.0, 1.0) &&
             fair >= 1.20;
       }).toList(growable: false);
+      final fallbackCore = candidates.where((candidate) {
+        final key = _string(candidate['key']);
+        final probability = _asProbability(candidate['probability']);
+        final isContradictoryDraw = key == 'draw' &&
+            probability <
+                _asProbability(
+                    probabilities['homeWin'] ?? probabilities['home']) &&
+            probability <
+                _asProbability(
+                    probabilities['awayWin'] ?? probabilities['away']);
+        return topTipKeys.contains(key) && !isContradictoryDraw;
+      }).toList(growable: false);
       final ranked = List<Map<String, Object?>>.from(
-        selectable.isNotEmpty ? selectable : candidates,
+        selectable.isNotEmpty
+            ? selectable
+            : fallbackCore.isNotEmpty
+                ? fallbackCore
+                : candidates.where((candidate) {
+                    final key = _string(candidate['key']);
+                    return !const <String>{
+                      'over45',
+                      'under45',
+                      'over55',
+                      'under55',
+                    }.contains(key);
+                  }).toList(growable: false),
       )..sort((a, b) {
           final scoreA = _selectionScore(a);
           final scoreB = _selectionScore(b);
@@ -298,8 +336,6 @@ class FootballMarketSelectionService {
       specificityAdjustment = -0.04;
     } else if (key.startsWith('combo')) {
       specificityAdjustment = 0.055;
-    } else if (key.startsWith('eh')) {
-      specificityAdjustment = 0.045;
     } else if (const {
       'homeWin',
       'draw',

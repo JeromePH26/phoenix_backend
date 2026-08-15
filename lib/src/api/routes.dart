@@ -145,6 +145,23 @@ class ApiRoutes {
       });
     });
 
+    // This feed is intentionally limited to reports generated from PHÖNIX
+    // match data; imported publisher articles stay on the legacy endpoint.
+    router.get('/api/phoenix/reports', (Request request) async {
+      await news.refreshIfStale();
+      final query = request.url.queryParameters;
+      final articles = await database.newsArticles(
+        teamId: query['teamId'],
+        leagueId: query['leagueId'],
+        category: query['category'],
+        importantOnly: query['important'] == 'true',
+        sourceName: 'PHOENIX',
+        hours: int.tryParse(query['hours'] ?? '') ?? 336,
+        limit: int.tryParse(query['limit'] ?? '') ?? 100,
+      );
+      return jsonResponse({'count': articles.length, 'articles': articles});
+    });
+
     router.get('/api/football/season-projections', (Request request) async {
       final query = request.url.queryParameters;
       final season = int.tryParse(query['season'] ?? '');
@@ -154,6 +171,55 @@ class ApiRoutes {
       );
       return jsonResponse(
           {'count': projections.length, 'projections': projections});
+    });
+
+    router.get('/api/football/daily-combo', (Request request) async {
+      final requested = request.url.queryParameters['date'];
+      final date =
+          requested == null ? DateTime.now() : DateTime.tryParse(requested);
+      if (date == null) {
+        return jsonResponse(
+          {'error': 'Datum muss YYYY-MM-DD sein.'},
+          statusCode: 400,
+        );
+      }
+      final combo = await database.footballDailyCombo(date);
+      return jsonResponse({'combo': combo});
+    });
+
+    router.get('/api/admin/football/data-coverage', (Request request) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+      final requested = request.url.queryParameters['date'];
+      final date =
+          requested == null ? DateTime.now() : DateTime.tryParse(requested);
+      if (date == null) {
+        return jsonResponse(
+          {'error': 'Datum muss YYYY-MM-DD sein.'},
+          statusCode: 400,
+        );
+      }
+      final leagues = await database.footballWhitelistCoverage(date: date);
+      final fixtures = leagues.fold<int>(
+        0,
+        (sum, league) =>
+            sum + ((league['fixture_count'] as num?)?.toInt() ?? 0),
+      );
+      final analyses = leagues.fold<int>(
+        0,
+        (sum, league) =>
+            sum + ((league['analysis_count'] as num?)?.toInt() ?? 0),
+      );
+      return jsonResponse({
+        'date': date.toIso8601String().substring(0, 10),
+        'fixtures': fixtures,
+        'analyses': analyses,
+        'coveragePercent': fixtures == 0
+            ? 0
+            : double.parse((analyses / fixtures * 100).toStringAsFixed(1)),
+        'leagues': leagues,
+      });
     });
 
     router.post('/api/admin/football/season-projections',
@@ -549,7 +615,7 @@ class ApiRoutes {
       final minimumProbability = double.tryParse(
             request.url.queryParameters['minimumProbability'] ?? '',
           ) ??
-          55.0;
+          68.0;
 
       if (phaseTwoScanRunId == null) {
         return jsonResponse({
@@ -763,12 +829,34 @@ class ApiRoutes {
     });
 
     router.get('/api/football/performance', (Request request) async {
-      return jsonResponse(await database.footballPerformanceSummary());
+      final performance = await database.footballPerformanceSummary();
+      return jsonResponse({
+        ...performance,
+        'dailyCombo': await database.footballDailyComboPerformance(),
+      });
+    });
+
+    router.get('/api/football/history', (Request request) async {
+      final query = request.url.queryParameters;
+      final since = DateTime.tryParse(query['since'] ?? '') ??
+          DateTime.now().toUtc().subtract(const Duration(days: 8));
+      final history = await database.footballHistory(
+        since: since,
+        limit: int.tryParse(query['limit'] ?? '') ?? 500,
+      );
+      return jsonResponse({
+        'since': since.toUtc().toIso8601String().substring(0, 10),
+        'count': history.length,
+        'history': history,
+      });
     });
 
     router.get('/api/performance', (Request request) async {
       return jsonResponse({
-        'football': await database.footballPerformanceSummary(),
+        'football': {
+          ...await database.footballPerformanceSummary(),
+          'dailyCombo': await database.footballDailyComboPerformance(),
+        },
         'baseball': await database.baseballPerformanceSummary(),
         'note':
             'ROI wird nur aus verifizierten Marktquoten und echten Einsätzen berechnet.',
