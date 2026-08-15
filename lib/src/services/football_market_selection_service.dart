@@ -5,7 +5,7 @@ class FootballMarketSelectionService {
 
   final PhoenixDatabase database;
 
-  static const modelVersion = 'market_selection_trust_v6_68_core_markets';
+  static const modelVersion = 'market_selection_v7_meaningful_markets';
 
   Future<Map<String, Object?>> select({
     required int phaseTwoScanRunId,
@@ -75,27 +75,13 @@ class FootballMarketSelectionService {
       ];
 
       const extendedMarkets = <String, String>{
-        'over05': 'Über 0,5 Tore',
-        'under05': 'Unter 0,5 Tore',
-        'over15': 'Über 1,5 Tore',
-        'under15': 'Unter 1,5 Tore',
         'over35': 'Über 3,5 Tore',
         'under35': 'Unter 3,5 Tore',
-        'over45': 'Über 4,5 Tore',
-        'under45': 'Unter 4,5 Tore',
-        'over55': 'Über 5,5 Tore',
-        'under55': 'Unter 5,5 Tore',
         'dc1x': 'Doppelte Chance 1X',
         'dc12': 'Doppelte Chance 12',
         'dcX2': 'Doppelte Chance X2',
         'dnbHome': 'Draw No Bet Heim',
         'dnbAway': 'Draw No Bet Auswärts',
-        'combo1xUnder35': '1X & unter 3,5 Tore',
-        'comboX2Under35': 'X2 & unter 3,5 Tore',
-        'combo1xOver15': '1X & über 1,5 Tore',
-        'comboX2Over15': 'X2 & über 1,5 Tore',
-        'comboHomeOver15': 'Heimsieg & über 1,5 Tore',
-        'comboAwayOver15': 'Auswärtssieg & über 1,5 Tore',
       };
       for (final market in extendedMarkets.entries) {
         candidates.add(
@@ -130,6 +116,11 @@ class FootballMarketSelectionService {
         'bttsNo',
         'dnbHome',
         'dnbAway',
+        'dc1x',
+        'dc12',
+        'dcX2',
+        'over35',
+        'under35',
       };
       final selectable = candidates.where((candidate) {
         final key = _string(candidate['key']);

@@ -2,7 +2,6 @@ import 'dart:io';
 
 import '../database/database.dart';
 import 'football_engine_input_service.dart';
-import 'football_daily_combo_service.dart';
 import 'football_market_selection_service.dart';
 import 'football_phase_one_scan_service.dart';
 import 'football_phase_two_scan_service.dart';
@@ -200,7 +199,6 @@ class FootballDailyPipelineService {
 
     var processed = 0;
     var published = 0;
-    final publishedAnalyses = <Map<String, Object?>>[];
 
     for (final row in rows) {
       processed++;
@@ -335,16 +333,14 @@ class FootballDailyPipelineService {
       );
 
       published++;
-      publishedAnalyses.add(analysisPayload);
     }
-
-    final dailyCombo = await FootballDailyComboService(database: database)
-        .buildAndSave(date: date, analyses: publishedAnalyses);
 
     return {
       'processed': processed,
       'published': published,
-      'dailyComboCreated': dailyCombo != null,
+      // Kombinations-Tipps sind bewusst deaktiviert. PHÖNIX veröffentlicht
+      // nur einzelne, nachvollziehbare Märkte.
+      'dailyComboCreated': false,
     };
   }
 

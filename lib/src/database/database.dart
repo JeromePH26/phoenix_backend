@@ -87,6 +87,21 @@ class PhoenixDatabase {
       ON football_matches (kickoff_utc)
     ''');
 
+    // Originalwappen werden einmalig beim ersten Abruf gespeichert. Dadurch
+    // laden Tabellen und Teamvergleiche keine Bilddateien erneut von der
+    // Sportdaten-API und bleiben auch bei späteren API-Aussetzern sichtbar.
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS football_assets (
+        asset_type TEXT NOT NULL,
+        asset_id TEXT NOT NULL,
+        source_url TEXT NOT NULL DEFAULT '',
+        mime_type TEXT NOT NULL,
+        content BYTEA NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (asset_type, asset_id)
+      )
+    ''');
+
     await db.execute('''
       CREATE TABLE IF NOT EXISTS tennis_matches (
         id TEXT PRIMARY KEY,
@@ -694,6 +709,50 @@ class PhoenixDatabase {
       ON CONFLICT (key) DO UPDATE
       SET value = EXCLUDED.value, updated_at = NOW()
     ''');
+  }
+
+  Future<Map<String, Object?>?> footballAsset({
+    required String type,
+    required String id,
+  }) async {
+    final db = await connection();
+    final rows = await db.execute(Sql.named('''
+      SELECT mime_type, encode(content, 'base64') AS content_base64
+      FROM football_assets
+      WHERE asset_type = @type AND asset_id = @id
+    '''), parameters: {'type': type, 'id': id});
+    return rows.isEmpty
+        ? null
+        : Map<String, Object?>.from(rows.first.toColumnMap());
+  }
+
+  Future<void> saveFootballAsset({
+    required String type,
+    required String id,
+    required String sourceUrl,
+    required String mimeType,
+    required List<int> bytes,
+  }) async {
+    final db = await connection();
+    await db.execute(Sql.named('''
+      INSERT INTO football_assets (
+        asset_type, asset_id, source_url, mime_type, content, updated_at
+      ) VALUES (
+        @type, @id, @source_url, @mime_type,
+        decode(@content_base64, 'base64'), NOW()
+      )
+      ON CONFLICT (asset_type, asset_id) DO UPDATE SET
+        source_url = EXCLUDED.source_url,
+        mime_type = EXCLUDED.mime_type,
+        content = EXCLUDED.content,
+        updated_at = NOW()
+    '''), parameters: {
+      'type': type,
+      'id': id,
+      'source_url': sourceUrl,
+      'mime_type': mimeType,
+      'content_base64': base64Encode(bytes),
+    });
   }
 
   Future<void> registerPushDevice({

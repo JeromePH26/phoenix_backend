@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:http/http.dart' as http;
 import 'package:shelf/shelf.dart';
 
@@ -34,17 +36,27 @@ class FootballAssetService {
       return Response.badRequest(body: 'Ungültige Bild-ID.');
     }
 
+    final cached = await database.footballAsset(
+      type: normalizedType,
+      id: normalizedId,
+    );
+    if (cached != null) {
+      final encoded = cached['content_base64']?.toString() ?? '';
+      final mimeType = cached['mime_type']?.toString() ?? '';
+      if (encoded.isNotEmpty && mimeType.startsWith('image/')) {
+        return _imageResponse(base64Decode(encoded), mimeType);
+      }
+    }
+
     final source = sourceUrl?.trim() ?? '';
     final uri = Uri.tryParse(source);
-    if (uri == null ||
-        uri.scheme != 'https' ||
-        !_isAllowedHost(uri.host)) {
+    if (uri == null || uri.scheme != 'https' || !_isAllowedHost(uri.host)) {
       return Response.badRequest(body: 'Bildquelle ist nicht freigegeben.');
     }
 
-    final upstream = await _client
-        .get(uri, headers: const {'accept': 'image/*'})
-        .timeout(const Duration(seconds: 20));
+    final upstream = await _client.get(uri, headers: const {
+      'accept': 'image/*'
+    }).timeout(const Duration(seconds: 20));
 
     if (upstream.statusCode < 200 || upstream.statusCode >= 300) {
       return Response(
@@ -61,8 +73,13 @@ class FootballAssetService {
       return Response.badRequest(body: 'Ungültige oder zu große Bilddatei.');
     }
 
-    // PhoenixDatabase besitzt aktuell keine Methoden zum Lesen oder Speichern
-    // von Football-Assets. Das Bild wird deshalb direkt ausgeliefert.
+    await database.saveFootballAsset(
+      type: normalizedType,
+      id: normalizedId,
+      sourceUrl: source,
+      mimeType: mimeType,
+      bytes: bytes,
+    );
     return _imageResponse(bytes, mimeType);
   }
 
@@ -91,8 +108,7 @@ class FootballAssetService {
     }
 
     final normalizedPath = path.toLowerCase();
-    if (normalizedPath.endsWith('.jpg') ||
-        normalizedPath.endsWith('.jpeg')) {
+    if (normalizedPath.endsWith('.jpg') || normalizedPath.endsWith('.jpeg')) {
       return 'image/jpeg';
     }
     if (normalizedPath.endsWith('.webp')) return 'image/webp';
