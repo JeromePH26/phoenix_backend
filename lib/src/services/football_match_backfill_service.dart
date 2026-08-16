@@ -184,10 +184,15 @@ class FootballMatchBackfillService {
 
   bool _looksRateLimited(String message) {
     final value = message.toLowerCase();
+    // API-Football meldet ein ausgeschöpftes Tageskontingent oft als HTTP 200
+    // mit einem "errors"-Feld im Body statt eines echten 429 - z. B. "You
+    // have reached the request limit for the day". Beide Formen müssen den
+    // Batch stoppen.
     return value.contains('429') ||
         value.contains('rate limit') ||
         value.contains('too many requests') ||
-        value.contains('quota');
+        value.contains('quota') ||
+        value.contains('request limit');
   }
 
   int? _int(Object? value) {

@@ -874,6 +874,22 @@ class ApiRoutes {
       }, statusCode: 202);
     });
 
+    // Rein lesende Kontrollzahlen (dieselben Kennzahlen wie die manuelle
+    // SQL-Kontrolle nach einem Backfill-Lauf), damit sie ohne direkten
+    // Datenbankzugriff abgerufen werden können.
+    router.get('/api/admin/football/matches/settle/coverage', (
+      Request request,
+    ) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+      try {
+        return jsonResponse(await database.footballMatchResultCoverage());
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
     router.get('/api/admin/football/matches/settle/<jobId|[0-9]+>', (
       Request request,
       String jobId,

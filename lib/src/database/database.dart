@@ -2558,6 +2558,44 @@ class PhoenixDatabase {
     return Map<String, Object?>.from(result.first.toColumnMap());
   }
 
+  /// Read-only Kontrollzahlen für den Phase-2-Ergebnis-Backfill. Rein
+  /// lesend, keine Schreiboperation.
+  Future<Map<String, Object?>> footballMatchResultCoverage() async {
+    final db = await connection();
+    final counts = await db.execute('''
+      SELECT
+        COUNT(*) FILTER (
+          WHERE raw_json->'phaseTwo' IS NOT NULL
+            AND raw_json->>'homeGoals' IS NOT NULL
+            AND raw_json->>'awayGoals' IS NOT NULL
+        ) AS phase2_mit_ergebnis,
+        COUNT(*) FILTER (
+          WHERE COALESCE((raw_json#>>'{phaseTwo,dataQuality}')::int, 0) >= 40
+            AND raw_json->>'homeGoals' IS NOT NULL
+            AND raw_json->>'awayGoals' IS NOT NULL
+        ) AS qualitaet40_mit_ergebnis,
+        COUNT(*) FILTER (
+          WHERE COALESCE((raw_json#>>'{phaseTwo,dataQuality}')::int, 0) >= 50
+            AND raw_json->>'homeGoals' IS NOT NULL
+            AND raw_json->>'awayGoals' IS NOT NULL
+        ) AS qualitaet50_mit_ergebnis
+      FROM football_matches
+    ''');
+    final stillOpen = await db.execute('''
+      SELECT COUNT(*) AS weiterhin_offen
+      FROM football_matches
+      WHERE raw_json->'phaseTwo' IS NOT NULL
+        AND kickoff_utc < NOW() - INTERVAL '4 hours'
+        AND (
+          raw_json->>'homeGoals' IS NULL
+          OR raw_json->>'awayGoals' IS NULL
+        )
+    ''');
+    final row = Map<String, Object?>.from(counts.first.toColumnMap());
+    row['weiterhin_offen'] = stillOpen.first[0];
+    return row;
+  }
+
   /// Liefert den stabilen, zuletzt gespeicherten Spielplan einer Tages- und
   /// Liga-Whitelist. Phase-1-Datensätze ergänzen dabei Spiele, die bewusst
   /// keine Analyse erhalten haben (live, beendet, abgesagt oder ohne Details).
