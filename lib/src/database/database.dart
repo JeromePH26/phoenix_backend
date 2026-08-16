@@ -703,9 +703,35 @@ class PhoenixDatabase {
       )
     ''');
 
+    // Verfolgt Backfill- und wiederkehrende Ergebnis-Abgleichläufe für
+    // football_matches. Getrennt von football_daily_pipeline_jobs, weil hier
+    // weder Phasen noch Simulationen anfallen, nur ein Batch-Fortschritt.
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS football_match_settlement_jobs (
+        id BIGSERIAL PRIMARY KEY,
+        status TEXT NOT NULL DEFAULT 'running',
+        min_hours_since_kickoff INTEGER NOT NULL,
+        batch_size INTEGER NOT NULL,
+        checked INTEGER NOT NULL DEFAULT 0,
+        settled INTEGER NOT NULL DEFAULT 0,
+        pending INTEGER NOT NULL DEFAULT 0,
+        failed INTEGER NOT NULL DEFAULT 0,
+        error TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        completed_at TIMESTAMPTZ
+      )
+    ''');
+
+    // Beschleunigt die wiederkehrende Suche nach noch offenen Spielen, ohne
+    // bei jedem Lauf die gesamte football_matches-Tabelle zu scannen.
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_football_matches_status
+      ON football_matches (status, kickoff_utc)
+    ''');
+
     await db.execute('''
       INSERT INTO app_meta (key, value)
-      VALUES ('schema_version', '5')
+      VALUES ('schema_version', '6')
       ON CONFLICT (key) DO UPDATE
       SET value = EXCLUDED.value, updated_at = NOW()
     ''');
@@ -2374,6 +2400,149 @@ class PhoenixDatabase {
         'raw_json': jsonEncode(payload),
       },
     );
+  }
+
+  /// Analysierte, aber noch nicht final abgerechnete Spiele: Phase-2-Daten
+  /// liegen vor, der Anstoß ist alt genug für ein Endergebnis, und der
+  /// gespeicherte Status ist noch nicht final. Dieselbe Abfrage bedient sowohl
+  /// den einmaligen Backfill als auch den wiederkehrenden Tages-Check, damit
+  /// beide denselben "offen"-Begriff verwenden (Status, nicht Tore-NULL -
+  /// ein 0:0-Endstand hat sonst fälschlich weiter als offen gegolten).
+  Future<List<Map<String, Object?>>> footballMatchResultCandidates({
+    required int minHoursSinceKickoff,
+    required int limit,
+  }) async {
+    final db = await connection();
+    final rows = await db.execute(
+      Sql.named('''
+        SELECT id, status
+        FROM football_matches
+        WHERE raw_json ? 'phaseTwo'
+          AND id <> ''
+          AND kickoff_utc <= NOW() - make_interval(hours => @hours)
+          AND status NOT IN ('FT','AET','PEN','AWD','WO','CANC','ABD')
+        ORDER BY kickoff_utc ASC
+        LIMIT @limit
+      '''),
+      parameters: {
+        'hours': minHoursSinceKickoff.clamp(0, 24 * 30),
+        'limit': limit.clamp(1, 200),
+      },
+    );
+    return rows
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  /// Schreibt ausschließlich Ergebnis-/Statusfelder für ein bereits
+  /// gespeichertes Spiel. `raw_json` wird gezielt per JSONB-Merge ergänzt
+  /// (`||`), niemals ersetzt - alle Pre-Match-Blöcke (phaseOne, phaseTwo,
+  /// Quoten, Formdaten, H2H, Gemini-Kontext, ...) bleiben unangetastet.
+  /// `jsonb_strip_nulls` verhindert, dass ein noch fehlendes Tor-Feld (z. B.
+  /// bei abgesagten Spielen) einen zuvor gültigen Wert mit NULL überschreibt.
+  Future<void> settleFootballMatchResult({
+    required String fixtureId,
+    required String status,
+    int? homeGoals,
+    int? awayGoals,
+  }) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        UPDATE football_matches SET
+          status = @status,
+          home_goals = @home_goals,
+          away_goals = @away_goals,
+          raw_json = raw_json || jsonb_strip_nulls(jsonb_build_object(
+            'status', @status,
+            'homeGoals', @home_goals,
+            'awayGoals', @away_goals
+          )),
+          updated_at = NOW()
+        WHERE id = @id
+      '''),
+      parameters: {
+        'id': fixtureId,
+        'status': status,
+        'home_goals': homeGoals,
+        'away_goals': awayGoals,
+      },
+    );
+  }
+
+  Future<int> createFootballMatchSettlementJob({
+    required int minHoursSinceKickoff,
+    required int batchSize,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        INSERT INTO football_match_settlement_jobs (
+          min_hours_since_kickoff, batch_size
+        ) VALUES (@hours, @batch_size)
+        RETURNING id
+      '''),
+      parameters: {
+        'hours': minHoursSinceKickoff,
+        'batch_size': batchSize,
+      },
+    );
+    return result.first[0] as int;
+  }
+
+  Future<void> updateFootballMatchSettlementJob({
+    required int jobId,
+    required String status,
+    int? checked,
+    int? settled,
+    int? pending,
+    int? failed,
+    Object? error,
+    bool completed = false,
+  }) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        UPDATE football_match_settlement_jobs SET
+          status = @status,
+          checked = COALESCE(@checked, checked),
+          settled = COALESCE(@settled, settled),
+          pending = COALESCE(@pending, pending),
+          failed = COALESCE(@failed, failed),
+          error = @error,
+          completed_at = CASE WHEN @completed THEN NOW() ELSE completed_at END
+        WHERE id = @job_id
+      '''),
+      parameters: {
+        'job_id': jobId,
+        'status': status,
+        'checked': checked,
+        'settled': settled,
+        'pending': pending,
+        'failed': failed,
+        'error': error?.toString(),
+        'completed': completed,
+      },
+    );
+  }
+
+  Future<Map<String, Object?>?> footballMatchSettlementJob(int id) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT
+          id, status, min_hours_since_kickoff, batch_size,
+          checked, settled, pending, failed, error,
+          created_at::text AS created_at,
+          completed_at::text AS completed_at
+        FROM football_match_settlement_jobs
+        WHERE id = @id
+        LIMIT 1
+      '''),
+      parameters: {'id': id},
+    );
+    if (result.isEmpty) return null;
+    return Map<String, Object?>.from(result.first.toColumnMap());
   }
 
   /// Liefert den stabilen, zuletzt gespeicherten Spielplan einer Tages- und

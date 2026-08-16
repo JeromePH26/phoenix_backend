@@ -88,6 +88,17 @@ Future<void> main() async {
     stdout.writeln(
       '[PHOENIX CRON] Job $jobId vollständig abgeschlossen.',
     );
+
+    // Nach dem Tageslauf offene, analysierte Spiele auf ihr Endergebnis
+    // prüfen. Läuft serverseitig asynchron weiter; der Cron wartet bewusst
+    // nicht darauf, da nichts Nachgelagertes davon abhängt.
+    try {
+      await _settleMatchResults(client: client, config: config);
+    } catch (error, stackTrace) {
+      stderr.writeln('[PHOENIX CRON] Match-Ergebnis-Check übersprungen: $error');
+      stderr.writeln(stackTrace);
+    }
+
     exitCode = 0;
   } catch (error, stackTrace) {
     stderr.writeln('[PHOENIX CRON] FEHLER: $error');
@@ -128,6 +139,33 @@ Future<void> _settleDate({
     '[PHOENIX CRON] Abrechnung: '
     'settled=${response['settled'] ?? 0}, '
     'skipped=${response['skipped'] ?? 0}',
+  );
+}
+
+/// Stößt den Ergebnis-Abgleich für football_matches an (home_goals,
+/// away_goals, status). Getrennt von _settleDate oben, das nur Tipps und
+/// Tages-Kombis für die ROI-Historie abrechnet.
+Future<void> _settleMatchResults({
+  required HttpClient client,
+  required _CronConfig config,
+}) async {
+  final uri = config.uri(
+    '/api/admin/football/matches/settle',
+    {'minHoursSinceKickoff': '3', 'batchSize': '25'},
+  );
+
+  stdout.writeln('[PHOENIX CRON] Match-Ergebnis-Check ...');
+
+  final response = await _requestJson(
+    client: client,
+    uri: uri,
+    method: 'POST',
+    adminToken: config.adminToken,
+  );
+
+  stdout.writeln(
+    '[PHOENIX CRON] Match-Ergebnis-Check gestartet: '
+    'jobId=${response['jobId']}',
   );
 }
 

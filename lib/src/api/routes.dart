@@ -16,6 +16,7 @@ import '../services/football_market_selection_service.dart';
 import '../services/football_value_service.dart';
 import '../services/football_finalization_service.dart';
 import '../services/football_result_settlement_service.dart';
+import '../services/football_match_backfill_service.dart';
 import '../services/football_daily_pipeline_service.dart';
 import '../services/football_service.dart';
 import '../services/football_asset_service.dart';
@@ -826,6 +827,69 @@ class ApiRoutes {
       } catch (error) {
         return jsonResponse({'error': error.toString()}, statusCode: 500);
       }
+    });
+
+    // Backfill und wiederkehrender Check für football_matches.home_goals /
+    // away_goals / status. Getrennt von /settle oben, das nur Tipps und
+    // Tages-Kombis für die ROI-Historie abrechnet, nicht die Match-Zeile
+    // selbst. Läuft asynchron, weil ein Backfill hunderte Fixtures in
+    // gedrosselten Batches abfragen kann.
+    router.post('/api/admin/football/matches/settle', (
+      Request request,
+    ) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+      final query = request.url.queryParameters;
+      // Default 3h für den täglichen Check, Backfill-Aufrufe übergeben
+      // bewusst minHours=4 gemäß Vorgabe.
+      final minHours =
+          (int.tryParse(query['minHoursSinceKickoff'] ?? '') ?? 3)
+              .clamp(0, 24 * 30);
+      final batchSize =
+          (int.tryParse(query['batchSize'] ?? '') ?? 25).clamp(1, 100);
+
+      final jobId = await database.createFootballMatchSettlementJob(
+        minHoursSinceKickoff: minHours,
+        batchSize: batchSize,
+      );
+
+      unawaited(
+        FootballMatchBackfillService(
+          database: database,
+          football: football,
+        ).run(
+          jobId: jobId,
+          minHoursSinceKickoff: minHours,
+          batchSize: batchSize,
+        ),
+      );
+
+      return jsonResponse({
+        'status': 'started',
+        'jobId': jobId,
+        'minHoursSinceKickoff': minHours,
+        'batchSize': batchSize,
+        'statusUrl': '/api/admin/football/matches/settle/$jobId',
+      }, statusCode: 202);
+    });
+
+    router.get('/api/admin/football/matches/settle/<jobId|[0-9]+>', (
+      Request request,
+      String jobId,
+    ) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+      final id = int.tryParse(jobId);
+      if (id == null) {
+        return jsonResponse({'error': 'Ungültige Job-ID.'}, statusCode: 400);
+      }
+      final job = await database.footballMatchSettlementJob(id);
+      if (job == null) {
+        return jsonResponse({'error': 'Job nicht gefunden.'}, statusCode: 404);
+      }
+      return jsonResponse(job);
     });
 
     router.get('/api/football/performance', (Request request) async {
