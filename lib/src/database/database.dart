@@ -2741,9 +2741,10 @@ class PhoenixDatabase {
         FROM historical_twin_matches
         WHERE data_coverage_percent >= @min_coverage
           AND (
-            @elo_diff IS NULL
+            CAST(@elo_diff AS DOUBLE PRECISION) IS NULL
             OR elo_difference IS NULL
-            OR ABS(elo_difference - @elo_diff) < @elo_tolerance
+            OR ABS(elo_difference - CAST(@elo_diff AS DOUBLE PRECISION))
+               < CAST(@elo_tolerance AS DOUBLE PRECISION)
           )
         ORDER BY data_coverage_percent DESC
         LIMIT @limit
