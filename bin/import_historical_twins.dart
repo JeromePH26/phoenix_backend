@@ -34,6 +34,13 @@ Future<void> main(List<String> args) async {
   // ohne den bereits gespeicherten Bereich erneut zu schreiben und ohne den
   // knappen Speicherplatz mit nicht benötigten Zwischenjahren zu belasten.
   final insertFromDate = _argString(args, '--insert-from');
+  // Schreibt die berechneten Zeilen absteigend nach Datum statt aufsteigend,
+  // damit bei knappem Speicher zuerst die für PHÖNIX relevanteren, aktuellen
+  // Jahre gesichert werden. Ändert NICHTS an der Reihenfolge der
+  // Feature-Berechnung selbst (immer aufsteigend, leakage-frei).
+  final newestFirst = args.contains('--newest-first');
+  // Optionale harte Obergrenze für geschriebene Zeilen (Sicherheitsreserve).
+  final maxToWrite = _argInt(args, '--max-write');
 
   final config = AppConfig.fromEnvironment();
   final database = PhoenixDatabase(config.databaseUrl);
@@ -58,6 +65,8 @@ Future<void> main(List<String> args) async {
       insertFromDate: insertFromDate == null
           ? null
           : DateTime.tryParse(insertFromDate),
+      newestFirst: newestFirst,
+      maxToWrite: maxToWrite,
     );
   }
 
@@ -172,12 +181,21 @@ Future<void> _importMatches(
   PhoenixDatabase database, {
   int? limit,
   DateTime? insertFromDate,
+  bool newestFirst = false,
+  int? maxToWrite,
 }) async {
   if (insertFromDate != null) {
     stdout.writeln(
       '[TWINS IMPORT] Historie wird ab dem ersten CSV-Datum aufgebaut, '
       'aber nur Matches ab ${insertFromDate.toIso8601String().substring(0, 10)} '
       'werden geschrieben.',
+    );
+  }
+  if (newestFirst) {
+    stdout.writeln(
+      '[TWINS IMPORT] Schreibreihenfolge: neueste Spiele zuerst (Feature-'
+      'Berechnung bleibt intern chronologisch aufsteigend, Data Leakage '
+      'ausgeschlossen).',
     );
   }
   final file = File('data/historical_twins/Matches.csv');
@@ -241,22 +259,228 @@ Future<void> _importMatches(
   _TeamHistory historyFor(String team) =>
       histories.putIfAbsent(team, () => _TeamHistory());
 
+  var invalid = 0;
+
+  // ---------------------------------------------------------------------
+  // PHASE A: Rein rechnerisch, KEINE Datenbankschreibzugriffe.
+  //
+  // Läuft immer chronologisch AUFSTEIGEND (Voraussetzung für Leakage-freie
+  // Rolling-Features - ein Match aus 2025 braucht die Historie von davor,
+  // unabhängig davon, in welcher Reihenfolge später geschrieben wird).
+  // Jede berechnete Zeile landet zunächst nur im Arbeitsspeicher.
+  // ---------------------------------------------------------------------
+  final computedRows = <Map<String, Object?>>[];
+
+  for (var i = 0; i < effectiveRows.length; i++) {
+    final row = effectiveRows[i];
+    final division = field(row, 'Division') ?? '';
+    final matchDateRaw = field(row, 'MatchDate');
+    final homeTeam = field(row, 'HomeTeam');
+    final awayTeam = field(row, 'AwayTeam');
+
+    if (matchDateRaw == null || homeTeam == null || awayTeam == null) {
+      invalid++;
+      continue;
+    }
+    final matchDate = DateTime.tryParse(matchDateRaw);
+    if (matchDate == null) {
+      invalid++;
+      continue;
+    }
+
+    final ftHome = _int(field(row, 'FTHome'));
+    final ftAway = _int(field(row, 'FTAway'));
+    final result = field(row, 'FTResult');
+
+    final homeElo = _double(field(row, 'HomeElo'));
+    final awayElo = _double(field(row, 'AwayElo'));
+    final form3Home = _double(field(row, 'Form3Home'));
+    final form5Home = _double(field(row, 'Form5Home'));
+    final form3Away = _double(field(row, 'Form3Away'));
+    final form5Away = _double(field(row, 'Form5Away'));
+
+    final oddHome = _double(field(row, 'OddHome'));
+    final oddDraw = _double(field(row, 'OddDraw'));
+    final oddAway = _double(field(row, 'OddAway'));
+    final over25Odd = _double(field(row, 'Over25'));
+    final under25Odd = _double(field(row, 'Under25'));
+
+    // Rolling-Features AUSSCHLIESSLICH aus der bisherigen Historie - das
+    // aktuelle Match ist zu diesem Zeitpunkt noch nicht eingetragen.
+    final homeHist = historyFor(homeTeam);
+    final awayHist = historyFor(awayTeam);
+    final homeOverallFeat = _rollingFeatures(homeHist.overall);
+    final awayOverallFeat = _rollingFeatures(awayHist.overall);
+    final homeHomeFeat = _rollingFeatures(homeHist.home);
+    final awayAwayFeat = _rollingFeatures(awayHist.away);
+
+    final eloDiff =
+        (homeElo != null && awayElo != null) ? homeElo - awayElo : null;
+    final absoluteLevel =
+        (homeElo != null && awayElo != null) ? (homeElo + awayElo) / 2 : null;
+
+    double? normHome, normDraw, normAway;
+    if (oddHome != null &&
+        oddHome > 1 &&
+        oddDraw != null &&
+        oddDraw > 1 &&
+        oddAway != null &&
+        oddAway > 1) {
+      final rawHome = 1 / oddHome;
+      final rawDraw = 1 / oddDraw;
+      final rawAway = 1 / oddAway;
+      final sum = rawHome + rawDraw + rawAway;
+      if (sum > 0) {
+        normHome = rawHome / sum * 100;
+        normDraw = rawDraw / sum * 100;
+        normAway = rawAway / sum * 100;
+      }
+    }
+
+    double? over25Prob, under25Prob;
+    if (over25Odd != null &&
+        over25Odd > 1 &&
+        under25Odd != null &&
+        under25Odd > 1) {
+      final rawOver = 1 / over25Odd;
+      final rawUnder = 1 / under25Odd;
+      final sum = rawOver + rawUnder;
+      if (sum > 0) {
+        over25Prob = rawOver / sum * 100;
+        under25Prob = rawUnder / sum * 100;
+      }
+    }
+
+    final features = <String, Object?>{
+      'homeOverall': homeOverallFeat,
+      'awayOverall': awayOverallFeat,
+      'homeHomeProfile': homeHomeFeat,
+      'awayAwayProfile': awayAwayFeat,
+    };
+
+    var available = 0;
+    const totalBlocks = 6;
+    if (eloDiff != null) available++;
+    if (form3Home != null || form5Home != null) available++;
+    if (normHome != null) available++;
+    if (homeOverallFeat['goalsScoredAvg'] != null &&
+        awayOverallFeat['goalsScoredAvg'] != null) {
+      available++;
+    }
+    if (homeHomeFeat['goalsScoredAvg'] != null &&
+        awayAwayFeat['goalsScoredAvg'] != null) {
+      available++;
+    }
+    if (absoluteLevel != null) available++;
+    final dataCoverage = available / totalBlocks * 100;
+
+    final sourceMatchKey = '$division|$matchDateRaw|$homeTeam|$awayTeam';
+
+    // Historie wird für JEDES Match berechnet (s. o.), aber nur ab dem
+    // Cutoff überhaupt zum Schreiben vorgemerkt - so bleiben Rolling-
+    // Features für 2020+ trotzdem leakage-frei, ohne dass die
+    // dazwischenliegenden Jahre in die knappe Datenbank geschrieben werden.
+    if (insertFromDate == null || !matchDate.isBefore(insertFromDate)) {
+      computedRows.add({
+        'key': sourceMatchKey,
+        'division': division,
+        'date': matchDate,
+        'home_team': homeTeam,
+        'away_team': awayTeam,
+        'home_goals': ftHome,
+        'away_goals': ftAway,
+        'result': result,
+        'home_elo': homeElo,
+        'away_elo': awayElo,
+        'elo_diff': eloDiff,
+        'abs_level': absoluteLevel,
+        'form3_home': form3Home,
+        'form5_home': form5Home,
+        'form3_away': form3Away,
+        'form5_away': form5Away,
+        'norm_home': normHome,
+        'norm_draw': normDraw,
+        'norm_away': normAway,
+        'over25': over25Prob,
+        'under25': under25Prob,
+        'features': jsonEncode(features),
+        'coverage': dataCoverage,
+        'import_version': _importVersion,
+      });
+    }
+
+    // ERST NACH dem Berechnen der Pre-Match-Features das eigene Ergebnis in
+    // die Team-Historie aufnehmen, damit dasselbe Match nie sein eigenes
+    // Feature beeinflusst.
+    if (ftHome != null && ftAway != null) {
+      final homeShots = _double(field(row, 'HomeShots'));
+      final awayShots = _double(field(row, 'AwayShots'));
+      final homeTarget = _double(field(row, 'HomeTarget'));
+      final awayTarget = _double(field(row, 'AwayTarget'));
+      final homeOutcome = _MatchOutcome(
+        scored: ftHome,
+        conceded: ftAway,
+        shotsFor: homeShots,
+        shotsTargetFor: homeTarget,
+      );
+      final awayOutcome = _MatchOutcome(
+        scored: ftAway,
+        conceded: ftHome,
+        shotsFor: awayShots,
+        shotsTargetFor: awayTarget,
+      );
+      homeHist.overall.add(homeOutcome);
+      homeHist.home.add(homeOutcome);
+      awayHist.overall.add(awayOutcome);
+      awayHist.away.add(awayOutcome);
+      _trim(homeHist.overall);
+      _trim(homeHist.home);
+      _trim(awayHist.overall);
+      _trim(awayHist.away);
+    }
+
+    if ((i + 1) % 20000 == 0 || i == effectiveRows.length - 1) {
+      stdout.writeln(
+        '[TWINS IMPORT] Berechnung: ${i + 1}/${effectiveRows.length} '
+        '(vorgemerkt zum Schreiben: ${computedRows.length})',
+      );
+    }
+  }
+
+  stdout.writeln(
+    '[TWINS IMPORT] Berechnung abgeschlossen: ${computedRows.length} Zeilen '
+    'zum Schreiben vorgemerkt, $invalid ungültig.',
+  );
+
+  // ---------------------------------------------------------------------
+  // PHASE B: Schreiben. Reihenfolge unabhängig von der Berechnung - bei
+  // newestFirst werden die neuesten Spiele zuerst geschrieben, damit bei
+  // knappem Speicher die für PHÖNIX relevanteren, aktuelleren Twins zuerst
+  // gesichert sind.
+  // ---------------------------------------------------------------------
+  if (newestFirst) {
+    computedRows.sort(
+      (a, b) => (b['date'] as DateTime).compareTo(a['date'] as DateTime),
+    );
+  }
+  final rowsToWrite = maxToWrite != null && maxToWrite < computedRows.length
+      ? computedRows.sublist(0, maxToWrite)
+      : computedRows;
+
   var inserted = 0;
   var skippedDuplicate = 0;
-  var invalid = 0;
-  var featuresBuilt = 0;
-  // Commit-Grenze pro Transaktion (siehe Begründung unten) - deutlich größer
-  // als der Insert-Batch, weil jede Transaktion jetzt nur noch wenige
-  // Multi-Row-Statements statt hunderter Einzel-Inserts enthält.
+  var writeFailed = 0;
+  // Commit-Grenze pro Transaktion - deutlich größer als der Insert-Batch,
+  // weil jede Transaktion jetzt nur noch wenige Multi-Row-Statements statt
+  // hunderter Einzel-Inserts enthält.
   const batchCommitSize = 4000;
-  // Zeilen pro einzelnem INSERT-Statement. Ein Statement pro Zeile bedeutet
-  // einen Netzwerk-Roundtrip pro Zeile - bei 230.000 Zeilen und Latenz zum
-  // Railway-Proxy summiert sich das auf viele Stunden. Multi-Row-VALUES
-  // reduzieren die Roundtrips um den Faktor insertBatchSize (24 Spalten *
-  // 200 Zeilen = 4800 Parameter, weit unter Postgres' Limit von 65535).
+  // Zeilen pro einzelnem INSERT-Statement. Multi-Row-VALUES reduzieren die
+  // Netzwerk-Roundtrips um den Faktor insertBatchSize (24 Spalten * 200
+  // Zeilen = 4800 Parameter, weit unter Postgres' Limit von 65535).
   const insertBatchSize = 200;
 
   final pendingRows = <Map<String, Object?>>[];
+  var diskFull = false;
 
   Future<void> flush(TxSession session) async {
     if (pendingRows.isEmpty) return;
@@ -287,233 +511,71 @@ Future<void> _importMatches(
       ON CONFLICT (source, source_match_key) DO NOTHING
     ''';
 
-    try {
-      final result = await session.execute(
-        Sql.named(sql),
-        parameters: parameters,
-      );
-      inserted += result.affectedRows;
-      featuresBuilt += result.affectedRows;
-      skippedDuplicate += pendingRows.length - result.affectedRows;
-    } catch (error) {
-      // Ein fehlerhafter Batch darf den restlichen Import nicht abbrechen -
-      // die betroffenen Zeilen gelten als invalid und können durch einen
-      // erneuten (idempotenten) Lauf nachträglich importiert werden.
-      invalid += pendingRows.length;
-      stderr.writeln('[TWINS IMPORT] Batch-Fehler (${pendingRows.length} Zeilen): $error');
-    }
+    final result = await session.execute(Sql.named(sql), parameters: parameters);
+    inserted += result.affectedRows;
+    skippedDuplicate += pendingRows.length - result.affectedRows;
     pendingRows.clear();
   }
 
   // Eine Transaktion PRO COMMIT-BATCH statt einer einzigen Transaktion für
-  // alle 230.000 Zeilen: schlägt ein Insert-Batch mit einem echten SQL-Fehler
-  // fehl, "vergiftet" Postgres sonst die gesamte Transaktion und jeder
+  // alle Zeilen: schlägt ein Insert-Batch mit einem echten SQL-Fehler fehl,
+  // "vergiftet" Postgres sonst die gesamte Transaktion und jeder
   // nachfolgende Batch würde bis zum Transaktionsende stumm mitscheitern.
-  // So bleibt der Schaden auf höchstens einen Commit-Batch begrenzt, und der
-  // Import ist idempotent erneut ausführbar, um Lücken zu schließen.
+  // So bleibt der Schaden auf höchstens einen Commit-Batch begrenzt, und
+  // der Import ist idempotent erneut ausführbar, um Lücken zu schließen.
   for (var batchStart = 0;
-      batchStart < effectiveRows.length;
+      batchStart < rowsToWrite.length && !diskFull;
       batchStart += batchCommitSize) {
-    final batchEnd = (batchStart + batchCommitSize < effectiveRows.length)
+    final batchEnd = (batchStart + batchCommitSize < rowsToWrite.length)
         ? batchStart + batchCommitSize
-        : effectiveRows.length;
+        : rowsToWrite.length;
 
     // Der Railway-Proxy trennt lang laufende Verbindungen irgendwann von
     // sich aus (in der Praxis nach ca. 20 Minuten). Ein einzelner
     // Verbindungsabbruch darf den kompletten Import nicht beenden: bis zu
     // drei Versuche, jeweils mit einer frisch geholten (bei Bedarf neu
     // aufgebauten) Verbindung. Dank ON CONFLICT DO NOTHING ist ein Retry
-    // desselben Batches immer sicher.
+    // desselben Batches immer sicher. Ein "Speicher voll"-Fehler ist davon
+    // ausdrücklich ausgenommen: erneutes Versuchen ist dann sinnlos, jeder
+    // weitere Batch würde identisch scheitern - stattdessen sofort und
+    // kontrolliert abbrechen.
     var attempt = 0;
     while (true) {
       attempt++;
       try {
         final conn = await database.connection();
         await conn.runTx<void>((session) async {
-          for (var i = batchStart; i < batchEnd; i++) {
-      final row = effectiveRows[i];
-      final division = field(row, 'Division') ?? '';
-      final matchDateRaw = field(row, 'MatchDate');
-      final homeTeam = field(row, 'HomeTeam');
-      final awayTeam = field(row, 'AwayTeam');
-
-      if (matchDateRaw == null || homeTeam == null || awayTeam == null) {
-        invalid++;
-        continue;
-      }
-      final matchDate = DateTime.tryParse(matchDateRaw);
-      if (matchDate == null) {
-        invalid++;
-        continue;
-      }
-
-      final ftHome = _int(field(row, 'FTHome'));
-      final ftAway = _int(field(row, 'FTAway'));
-      final result = field(row, 'FTResult');
-
-      final homeElo = _double(field(row, 'HomeElo'));
-      final awayElo = _double(field(row, 'AwayElo'));
-      final form3Home = _double(field(row, 'Form3Home'));
-      final form5Home = _double(field(row, 'Form5Home'));
-      final form3Away = _double(field(row, 'Form3Away'));
-      final form5Away = _double(field(row, 'Form5Away'));
-
-      final oddHome = _double(field(row, 'OddHome'));
-      final oddDraw = _double(field(row, 'OddDraw'));
-      final oddAway = _double(field(row, 'OddAway'));
-      final over25Odd = _double(field(row, 'Over25'));
-      final under25Odd = _double(field(row, 'Under25'));
-
-      // Rolling-Features AUSSCHLIESSLICH aus der bisherigen Historie -
-      // das aktuelle Match ist zu diesem Zeitpunkt noch nicht eingetragen.
-      final homeHist = historyFor(homeTeam);
-      final awayHist = historyFor(awayTeam);
-      final homeOverallFeat = _rollingFeatures(homeHist.overall);
-      final awayOverallFeat = _rollingFeatures(awayHist.overall);
-      final homeHomeFeat = _rollingFeatures(homeHist.home);
-      final awayAwayFeat = _rollingFeatures(awayHist.away);
-
-      final eloDiff =
-          (homeElo != null && awayElo != null) ? homeElo - awayElo : null;
-      final absoluteLevel =
-          (homeElo != null && awayElo != null) ? (homeElo + awayElo) / 2 : null;
-
-      double? normHome, normDraw, normAway;
-      if (oddHome != null &&
-          oddHome > 1 &&
-          oddDraw != null &&
-          oddDraw > 1 &&
-          oddAway != null &&
-          oddAway > 1) {
-        final rawHome = 1 / oddHome;
-        final rawDraw = 1 / oddDraw;
-        final rawAway = 1 / oddAway;
-        final sum = rawHome + rawDraw + rawAway;
-        if (sum > 0) {
-          normHome = rawHome / sum * 100;
-          normDraw = rawDraw / sum * 100;
-          normAway = rawAway / sum * 100;
-        }
-      }
-
-      double? over25Prob, under25Prob;
-      if (over25Odd != null &&
-          over25Odd > 1 &&
-          under25Odd != null &&
-          under25Odd > 1) {
-        final rawOver = 1 / over25Odd;
-        final rawUnder = 1 / under25Odd;
-        final sum = rawOver + rawUnder;
-        if (sum > 0) {
-          over25Prob = rawOver / sum * 100;
-          under25Prob = rawUnder / sum * 100;
-        }
-      }
-
-      final features = <String, Object?>{
-        'homeOverall': homeOverallFeat,
-        'awayOverall': awayOverallFeat,
-        'homeHomeProfile': homeHomeFeat,
-        'awayAwayProfile': awayAwayFeat,
-      };
-
-      var available = 0;
-      const totalBlocks = 6;
-      if (eloDiff != null) available++;
-      if (form3Home != null || form5Home != null) available++;
-      if (normHome != null) available++;
-      if (homeOverallFeat['goalsScoredAvg'] != null &&
-          awayOverallFeat['goalsScoredAvg'] != null) {
-        available++;
-      }
-      if (homeHomeFeat['goalsScoredAvg'] != null &&
-          awayAwayFeat['goalsScoredAvg'] != null) {
-        available++;
-      }
-      if (absoluteLevel != null) available++;
-      final dataCoverage = available / totalBlocks * 100;
-
-      final sourceMatchKey = '$division|$matchDateRaw|$homeTeam|$awayTeam';
-
-      // Historie wird für JEDES Match aufgebaut (s. o.), aber nur ab dem
-      // Cutoff tatsächlich geschrieben - so bleiben Rolling-Features für
-      // 2020+ trotzdem leakage-frei, ohne die dazwischenliegenden Jahre
-      // erneut in die knappe Datenbank zu schreiben.
-      if (insertFromDate == null || !matchDate.isBefore(insertFromDate)) {
-        pendingRows.add({
-          'key': sourceMatchKey,
-          'division': division,
-          'date': matchDate,
-          'home_team': homeTeam,
-          'away_team': awayTeam,
-          'home_goals': ftHome,
-          'away_goals': ftAway,
-          'result': result,
-          'home_elo': homeElo,
-          'away_elo': awayElo,
-          'elo_diff': eloDiff,
-          'abs_level': absoluteLevel,
-          'form3_home': form3Home,
-          'form5_home': form5Home,
-          'form3_away': form3Away,
-          'form5_away': form5Away,
-          'norm_home': normHome,
-          'norm_draw': normDraw,
-          'norm_away': normAway,
-          'over25': over25Prob,
-          'under25': under25Prob,
-          'features': jsonEncode(features),
-          'coverage': dataCoverage,
-          'import_version': _importVersion,
-        });
-        if (pendingRows.length >= insertBatchSize) {
-          await flush(session);
-        }
-      }
-
-      // ERST NACH dem Speichern der Pre-Match-Features das eigene Ergebnis
-      // in die Team-Historie aufnehmen, damit dasselbe Match nie sein
-      // eigenes Feature beeinflusst.
-      if (ftHome != null && ftAway != null) {
-        final homeShots = _double(field(row, 'HomeShots'));
-        final awayShots = _double(field(row, 'AwayShots'));
-        final homeTarget = _double(field(row, 'HomeTarget'));
-        final awayTarget = _double(field(row, 'AwayTarget'));
-        final homeOutcome = _MatchOutcome(
-          scored: ftHome,
-          conceded: ftAway,
-          shotsFor: homeShots,
-          shotsTargetFor: homeTarget,
-        );
-        final awayOutcome = _MatchOutcome(
-          scored: ftAway,
-          conceded: ftHome,
-          shotsFor: awayShots,
-          shotsTargetFor: awayTarget,
-        );
-        homeHist.overall.add(homeOutcome);
-        homeHist.home.add(homeOutcome);
-        awayHist.overall.add(awayOutcome);
-        awayHist.away.add(awayOutcome);
-        _trim(homeHist.overall);
-        _trim(homeHist.home);
-        _trim(awayHist.overall);
-        _trim(awayHist.away);
-      }
-
-      }
-      // Am Ende jeder Transaktion IMMER flushen, auch wenn insertBatchSize
-      // nicht exakt erreicht wurde - sonst würden Restzeilen erst mit der
-      // (dann bereits ungültigen) Session der nächsten Transaktion
-      // verarbeitet und stillschweigend verloren gehen.
-      await flush(session);
+          // insertBatchSize-Chunks innerhalb der Commit-Batch-Transaktion:
+          // ein einzelnes Multi-Row-INSERT über den ganzen Commit-Batch
+          // (bis zu batchCommitSize Zeilen * 24 Spalten) würde Postgres'
+          // Parameterlimit von 65535 überschreiten.
+          for (var insertStart = batchStart;
+              insertStart < batchEnd;
+              insertStart += insertBatchSize) {
+            final insertEnd =
+                (insertStart + insertBatchSize < batchEnd)
+                    ? insertStart + insertBatchSize
+                    : batchEnd;
+            pendingRows.addAll(rowsToWrite.sublist(insertStart, insertEnd));
+            await flush(session);
+          }
         });
         break; // Batch erfolgreich committet.
       } catch (error) {
-        // Ein Verbindungsabbruch rollt die GESAMTE Transaktion zurück
-        // (Postgres-Atomarität) - hier wurde also nichts halb gespeichert,
-        // dieser Batch muss vollständig wiederholt werden.
+        pendingRows.clear();
+        final message = error.toString();
+        if (message.contains('53100') ||
+            message.toLowerCase().contains('no space left')) {
+          diskFull = true;
+          writeFailed += batchEnd - batchStart;
+          stderr.writeln(
+            '[TWINS IMPORT] Speicher voll (Batch $batchStart-$batchEnd) - '
+            'Import wird kontrolliert gestoppt, keine weiteren Versuche.',
+          );
+          break;
+        }
         if (attempt >= 3) {
+          writeFailed += batchEnd - batchStart;
           stderr.writeln(
             '[TWINS IMPORT] Batch $batchStart-$batchEnd nach $attempt '
             'Versuchen aufgegeben: $error. Ein erneuter Skript-Lauf holt '
@@ -529,17 +591,27 @@ Future<void> _importMatches(
       }
     }
 
-    final pct = (batchEnd / effectiveRows.length * 100).toStringAsFixed(1);
+    final pct = (batchEnd / rowsToWrite.length * 100).toStringAsFixed(1);
     stdout.writeln(
-      '[TWINS IMPORT] $batchEnd/${effectiveRows.length} ($pct%) '
-      'inserted=$inserted duplicates=$skippedDuplicate invalid=$invalid '
-      'featuresBuilt=$featuresBuilt',
+      '[TWINS IMPORT] Schreiben: $batchEnd/${rowsToWrite.length} ($pct%) '
+      'inserted=$inserted duplicates=$skippedDuplicate writeFailed=$writeFailed',
     );
+    if (diskFull) {
+      final oldestWritten = rowsToWrite[batchStart > 0 ? batchStart - 1 : 0]['date'];
+      stdout.writeln(
+        '[TWINS IMPORT] Gestoppt bei Speicher-Erschöpfung. Zuletzt '
+        'bearbeitetes Datum in dieser Schreibreihenfolge: $oldestWritten. '
+        '${rowsToWrite.length - batchEnd} vorgemerkte Zeilen wurden NICHT '
+        'mehr versucht.',
+      );
+    }
   }
 
   stdout.writeln(
-    '[TWINS IMPORT] Matches.csv fertig: rowsRead=$rowsRead inserted=$inserted '
-    'duplicates=$skippedDuplicate invalid=$invalid featuresBuilt=$featuresBuilt',
+    '[TWINS IMPORT] Matches.csv fertig: rowsRead=$rowsRead '
+    'berechnet=${computedRows.length} inserted=$inserted '
+    'duplicates=$skippedDuplicate writeFailed=$writeFailed invalid=$invalid '
+    'diskFull=$diskFull',
   );
 
   final countConn = await database.connection();
