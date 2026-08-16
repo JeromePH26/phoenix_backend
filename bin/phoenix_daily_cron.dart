@@ -42,12 +42,11 @@ Future<void> main() async {
     ..idleTimeout = const Duration(seconds: 30);
 
   try {
-    // Die sichtbare Historie startet am 07.08.2026. Neun Kalendertage sind
-    // bei 7.500 Provider-Requests pro Tag vernachlässigbar, verhindern aber,
-    // dass verspätete Endstände dauerhaft als "Offen" stehen bleiben. Der
-    // erzwungene Rückblick nutzt dieselbe sichere Zeitspanne und rechnet auch
-    // bereits entschiedene historische Einträge erneut ab.
-    const settlementDays = 9;
+    // Im Normalbetrieb reichen die letzten drei Tage für verspätete Endstände.
+    // Ein kompletter Rückblick wird bewusst nur mit der separaten Variable
+    // PHOENIX_CRON_RECONCILE aktiviert; "Run now" startet dann nicht jedes
+    // Mal erneut neun historische Provider-Abfragen.
+    final settlementDays = fullReconcile ? 9 : 3;
     for (var offset = 1; offset <= settlementDays; offset++) {
       if (offset > 1) {
         await Future<void>.delayed(const Duration(seconds: 7));
