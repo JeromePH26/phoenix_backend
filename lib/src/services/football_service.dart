@@ -43,36 +43,58 @@ class FootballService {
     if (rows is! List) return const [];
     return rows
         .whereType<Map>()
-        .map((raw) {
-          final row = Map<String, dynamic>.from(raw);
-          final fixture = _map(row['fixture']);
-          final league = _map(row['league']);
-          final teams = _map(row['teams']);
-          final goals = _map(row['goals']);
-          final home = _map(teams['home']);
-          final away = _map(teams['away']);
-          final status = _map(fixture['status']);
-          return <String, Object?>{
-            'id': fixture['id']?.toString() ?? '',
-            'kickoff': fixture['date']?.toString() ?? '',
-            'status': status['short']?.toString() ?? 'NS',
-            'leagueId': league['id']?.toString() ?? '',
-            'season': _seasonForMatch(league, date),
-            'league': league['name']?.toString() ?? '',
-            'country': league['country']?.toString() ?? '',
-            'leagueLogo': league['logo']?.toString() ?? '',
-            'homeTeamId': home['id']?.toString() ?? '',
-            'homeTeam': home['name']?.toString() ?? '',
-            'homeLogo': home['logo']?.toString() ?? '',
-            'awayTeamId': away['id']?.toString() ?? '',
-            'awayTeam': away['name']?.toString() ?? '',
-            'awayLogo': away['logo']?.toString() ?? '',
-            'homeGoals': goals['home'],
-            'awayGoals': goals['away'],
-          };
-        })
+        .map((raw) => _normalizeFixture(Map<String, dynamic>.from(raw), date))
         .where((row) => (row['id'] as String).isNotEmpty)
         .toList();
+  }
+
+  /// Holt einen einzelnen, nicht vom Tagescache abhängigen Endstand. Diese
+  /// Abfrage ist ausschließlich für offene Historie-Tipps gedacht, wenn der
+  /// zuvor geladene Spieltag noch einen alten Live-/NS-Status enthält.
+  Future<Map<String, Object?>?> fixtureById(String fixtureId) async {
+    final id = fixtureId.trim();
+    if (id.isEmpty) return null;
+    final decoded = await providerRequest(
+      path: '/fixtures',
+      query: <String, String>{'id': id, 'timezone': 'Europe/Berlin'},
+    );
+    final rows = decoded['response'];
+    if (rows is! List || rows.isEmpty || rows.first is! Map) return null;
+    return _normalizeFixture(
+      Map<String, dynamic>.from(rows.first as Map),
+      DateTime.now(),
+    );
+  }
+
+  Map<String, Object?> _normalizeFixture(
+    Map<String, dynamic> row,
+    DateTime fallbackDate,
+  ) {
+    final fixture = _map(row['fixture']);
+    final league = _map(row['league']);
+    final teams = _map(row['teams']);
+    final goals = _map(row['goals']);
+    final home = _map(teams['home']);
+    final away = _map(teams['away']);
+    final status = _map(fixture['status']);
+    return <String, Object?>{
+      'id': fixture['id']?.toString() ?? '',
+      'kickoff': fixture['date']?.toString() ?? '',
+      'status': status['short']?.toString() ?? 'NS',
+      'leagueId': league['id']?.toString() ?? '',
+      'season': _seasonForMatch(league, fallbackDate),
+      'league': league['name']?.toString() ?? '',
+      'country': league['country']?.toString() ?? '',
+      'leagueLogo': league['logo']?.toString() ?? '',
+      'homeTeamId': home['id']?.toString() ?? '',
+      'homeTeam': home['name']?.toString() ?? '',
+      'homeLogo': home['logo']?.toString() ?? '',
+      'awayTeamId': away['id']?.toString() ?? '',
+      'awayTeam': away['name']?.toString() ?? '',
+      'awayLogo': away['logo']?.toString() ?? '',
+      'homeGoals': goals['home'],
+      'awayGoals': goals['away'],
+    };
   }
 
   Future<Map<String, Object?>> coverageForFixture({

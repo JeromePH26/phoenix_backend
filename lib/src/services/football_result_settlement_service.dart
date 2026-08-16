@@ -37,17 +37,40 @@ class FootballResultSettlementService {
 
     for (final tip in pending) {
       final fixtureId = tip['fixture_id']?.toString() ?? '';
-      final match = matchById[fixtureId];
+      var match = matchById[fixtureId];
+      if (match == null) {
+        // Ein einzelner Fixture-Abruf verhindert, dass ein lückenhafter
+        // Tagesfeed eine abgeschlossene Wette dauerhaft offen lässt.
+        match = await football.fixtureById(fixtureId);
+        if (match != null) matchById[fixtureId] = match;
+      }
+
       if (match == null) {
         skipped++;
         continue;
       }
 
-      final fixture = _map(match['fixture']);
+      var fixture = _map(match['fixture']);
       final status = _map(fixture['status']);
-      final shortStatus = status['short']?.toString().toUpperCase() ??
+      var shortStatus = status['short']?.toString().toUpperCase() ??
           match['status']?.toString().toUpperCase() ??
           '';
+
+      // Der Tagesfeed darf im Cache kurz hinterherhinken. Erst wenn auch die
+      // frische Einzelabfrage keinen finalen Status liefert, bleibt der Tipp
+      // korrekt offen (z. B. bei Live- oder verschobenen Spielen).
+      if (!_isVoided(shortStatus) && !_isFinished(shortStatus)) {
+        final fresh = await football.fixtureById(fixtureId);
+        if (fresh != null) {
+          matchById[fixtureId] = fresh;
+          match = fresh;
+          fixture = _map(match['fixture']);
+          final freshStatus = _map(fixture['status']);
+          shortStatus = freshStatus['short']?.toString().toUpperCase() ??
+              match['status']?.toString().toUpperCase() ??
+              '';
+        }
+      }
 
       // Abgesagte oder abgebrochene Partien dürfen nie dauerhaft als offen
       // erscheinen. Verschobene Spiele (PST) bleiben dagegen pending, weil sie
