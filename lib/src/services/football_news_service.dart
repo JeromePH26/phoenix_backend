@@ -68,8 +68,13 @@ class FootballNewsService {
           await _storeMatchArticle(match, review: false);
         }
       }
-      await _syncTransfersOncePerDay(matches);
-      await _refreshSeasonProjectionsOncePerDay();
+      // Eigene Spielberichte dürfen beim Öffnen des News-Tabs sofort aus der
+      // Datenbank entstehen. Teure Provider-Anreicherungen (Transfers und
+      // Saisonprojektionen) laufen jedoch nicht mehr neben einem Tagesscan:
+      // Ein App-Start hatte bislang Dutzende parallele API-Requests ausgelöst
+      // und dadurch die eigentlichen PHÖNIX-Analysen mit HTTP 429 verdrängt.
+      // Sie werden nur noch über die dafür vorgesehene Admin-Ausführung
+      // gestartet, nicht durch einen normalen News-Abruf.
       _lastRefresh = DateTime.now();
     } catch (error, stackTrace) {
       stderr.writeln('[PHOENIX NEWS] $error');

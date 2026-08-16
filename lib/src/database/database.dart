@@ -1023,7 +1023,7 @@ class PhoenixDatabase {
       WHERE manual_status = 'whitelist'
         AND competition_level IS NOT NULL
       ORDER BY country, competition_level, league_name
-    '''), parameters: {'season': season});
+    '''));
     return rows
         .map((row) => {
               'leagueId': row[0].toString(),
