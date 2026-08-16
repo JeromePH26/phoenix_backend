@@ -2517,6 +2517,21 @@ class PhoenixDatabase {
     final db = await connection();
     final result = await db.execute(
       Sql.named('''
+        WITH first_predictions AS (
+          -- Ein täglicher Neu-Scan darf nie mehrere sichtbare Wetten für
+          -- dasselbe Spiel erzeugen. Für Historie, Quote und ROI zählt stets
+          -- die erste, also tatsächlich vor Spielbeginn veröffentlichte
+          -- PHÖNIX-Prognose. Spätere Scans bleiben intern erhalten.
+          SELECT DISTINCT ON (prediction_date, fixture_id)
+            phase_two_scan_run_id, fixture_id, prediction_date, kickoff,
+            market_key, market_label, model_probability, fair_odds,
+            market_odds, assigned_units, data_quality, confidence,
+            result_status, home_score, away_score, profit_units, settled_at,
+            created_at, payload
+          FROM football_analysis_history
+          WHERE prediction_date >= CAST(@since AS DATE)
+          ORDER BY prediction_date, fixture_id, created_at ASC
+        )
         SELECT phase_two_scan_run_id, fixture_id, prediction_date, kickoff,
                market_key, market_label, model_probability, fair_odds,
                market_odds, assigned_units, data_quality, confidence, result_status,
@@ -2533,8 +2548,7 @@ class PhoenixDatabase {
                  AS away_team,
                COALESCE(payload->>'league', payload #>> '{selection,league}', '')
                  AS league
-        FROM football_analysis_history
-        WHERE prediction_date >= CAST(@since AS DATE)
+        FROM first_predictions
         ORDER BY kickoff DESC NULLS LAST, created_at DESC
         LIMIT @limit
       '''),
@@ -2615,6 +2629,11 @@ class PhoenixDatabase {
 
     Future<Map<String, Object?>> period(String condition) async {
       final result = await db.execute('''
+        WITH first_predictions AS (
+          SELECT DISTINCT ON (prediction_date, fixture_id) *
+          FROM football_analysis_history
+          ORDER BY prediction_date, fixture_id, created_at ASC
+        )
         SELECT COUNT(*) AS total,
                COUNT(*) FILTER (WHERE market_odds > 1) AS priced,
                COUNT(*) FILTER (WHERE result_status IN ('won','lost','push')
@@ -2629,7 +2648,7 @@ class PhoenixDatabase {
                  ('won','lost','push') AND assigned_units > 0), 0) AS staked_units,
                COALESCE(SUM(profit_units) FILTER (WHERE result_status IN
                  ('won','lost','push') AND assigned_units > 0), 0) AS profit_units
-        FROM football_analysis_history
+        FROM first_predictions
         WHERE $condition
       ''');
       return metrics(Map<String, Object?>.from(result.first.toColumnMap()));
@@ -2637,6 +2656,11 @@ class PhoenixDatabase {
 
     Future<List<Map<String, Object?>>> grouped(String expression) async {
       final result = await db.execute('''
+        WITH first_predictions AS (
+          SELECT DISTINCT ON (prediction_date, fixture_id) *
+          FROM football_analysis_history
+          ORDER BY prediction_date, fixture_id, created_at ASC
+        )
         SELECT $expression AS name, COUNT(*) AS total,
                COUNT(*) FILTER (WHERE market_odds > 1) AS priced,
                COUNT(*) FILTER (WHERE result_status IN ('won','lost','push')
@@ -2651,7 +2675,7 @@ class PhoenixDatabase {
                  ('won','lost','push') AND assigned_units > 0), 0) AS staked_units,
                COALESCE(SUM(profit_units) FILTER (WHERE result_status IN
                  ('won','lost','push') AND assigned_units > 0), 0) AS profit_units
-        FROM football_analysis_history
+        FROM first_predictions
         GROUP BY 1
         ORDER BY settled DESC, name
       ''');
