@@ -1018,17 +1018,8 @@ class ApiRoutes {
 
     final result = await db.execute(
       Sql.named(r'''
-        WITH latest_job AS (
-          SELECT phase_two_scan_run_id
-          FROM football_daily_pipeline_jobs
-          WHERE scan_date = CAST(@day AS DATE)
-            AND status = 'completed'
-            AND phase_two_scan_run_id IS NOT NULL
-          ORDER BY id DESC
-          LIMIT 1
-        )
         SELECT DISTINCT ON (a.match_id)
-          m.id,
+          COALESCE(m.id, a.match_id) AS id,
           m.kickoff_utc,
           m.status,
           m.league_id,
@@ -1050,18 +1041,32 @@ class ApiRoutes {
           a.payload AS analysis_payload,
           p.availability AS phase_two_availability,
           a.analyzed_at
-        FROM latest_job j
-        INNER JOIN football_phase_two_results p
-          ON p.scan_run_id = j.phase_two_scan_run_id
-         AND p.analysis_allowed = TRUE
-        INNER JOIN analyses a
-          ON a.match_id = p.fixture_id
-         AND a.sport = 'football'
-        INNER JOIN football_matches m
+        FROM analyses a
+        LEFT JOIN football_matches m
           ON m.id = a.match_id
+        LEFT JOIN LATERAL (
+          -- Eine neue Scan-Ausführung darf bereits gespeicherte Analysen
+          -- nicht verdrängen. Die Phase-2-Zeile ist nur der Rückfall, wenn
+          -- ein historischer Match-Datensatz nicht mehr vorhanden ist.
+          SELECT p.fixture_id, p.availability
+          FROM football_daily_pipeline_jobs j
+          INNER JOIN football_phase_two_results p
+            ON p.scan_run_id = j.phase_two_scan_run_id
+          WHERE j.scan_date = CAST(@day AS DATE)
+            AND j.status = 'completed'
+            AND p.fixture_id = a.match_id
+          ORDER BY j.id DESC
+          LIMIT 1
+        ) p ON TRUE
         WHERE a.data_quality >= @minimum_quality
+          AND a.sport = 'football'
           AND a.model_version = @model_version
           AND a.payload IS NOT NULL
+          AND (
+            (m.kickoff_utc AT TIME ZONE 'Europe/Berlin')::date =
+                CAST(@day AS DATE)
+            OR p.fixture_id IS NOT NULL
+          )
         ORDER BY a.match_id, a.analyzed_at DESC
       '''),
       parameters: {
@@ -1093,6 +1098,7 @@ class ApiRoutes {
 
           final rawMatch = mapValue(values.remove('raw_json'));
           final analysis = mapValue(values.remove('analysis_payload'));
+          final selection = mapValue(analysis['selection']);
           final phaseTwoAvailability =
               mapValue(values.remove('phase_two_availability'));
           final existingPhaseTwo = mapValue(analysis['phaseTwo']);
@@ -1108,13 +1114,25 @@ class ApiRoutes {
             },
           };
 
+          String textValue(Object? primary, Object? fallback) {
+            final primaryText = primary?.toString() ?? '';
+            if (primaryText.trim().isNotEmpty) return primaryText;
+            return fallback?.toString() ?? '';
+          }
+
           return <String, Object?>{
             ...rawMatch,
-            'id': values['id']?.toString() ?? '',
-            'kickoff': values['kickoff_utc']?.toString() ?? '',
+            'id': textValue(
+              values['id'],
+              analysis['fixtureId'] ?? selection['fixtureId'],
+            ),
+            'kickoff': textValue(
+              values['kickoff_utc'],
+              analysis['kickoff'] ?? selection['kickoff'],
+            ),
             'status': values['status']?.toString() ?? '',
-            'leagueId': values['league_id']?.toString() ?? '',
-            'league': values['league_name']?.toString() ?? '',
+            'leagueId': textValue(values['league_id'], analysis['leagueId']),
+            'league': textValue(values['league_name'], analysis['league']),
             'country': values['country']?.toString() ?? '',
             'homeTeamId': values['home_team_id']?.toString() ?? '',
             'homeTeam': values['home_team_name']?.toString() ?? '',
