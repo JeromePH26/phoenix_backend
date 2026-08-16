@@ -1,0 +1,7 @@
+.dart_tool/
+.packages
+build/
+
+# Historical Twins Datensätze sind groß und extern beschaffbar - bewusst
+# nicht committen, siehe data/historical_twins/README.md.
+data/historical_twins/*.csv

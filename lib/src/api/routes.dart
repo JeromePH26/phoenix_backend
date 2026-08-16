@@ -17,6 +17,7 @@ import '../services/football_value_service.dart';
 import '../services/football_finalization_service.dart';
 import '../services/football_result_settlement_service.dart';
 import '../services/football_match_backfill_service.dart';
+import '../services/historical_twin_service.dart';
 import '../services/football_daily_pipeline_service.dart';
 import '../services/football_service.dart';
 import '../services/football_asset_service.dart';
@@ -318,6 +319,22 @@ class ApiRoutes {
         return jsonResponse(snapshot);
       } catch (error) {
         return jsonResponse({'error': error.toString()}, statusCode: 502);
+      }
+    });
+
+    // Historical Twins V1 (nur lesend, keine Wirkung auf die PHÖNIX-Engine -
+    // siehe HistoricalTwinService-Dokumentation).
+    router.get('/api/football/historical-twins/<fixtureId|[0-9]+>', (
+      Request request,
+      String fixtureId,
+    ) async {
+      try {
+        final result = await HistoricalTwinService(
+          database: database,
+        ).findTwins(fixtureId);
+        return jsonResponse(result);
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
       }
     });
 

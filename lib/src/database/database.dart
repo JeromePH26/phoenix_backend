@@ -736,9 +736,87 @@ class PhoenixDatabase {
       ON football_matches (status, kickoff_utc)
     ''');
 
+    // Historical Twins V1: externe historische Spiele bewusst getrennt von
+    // football_matches, damit ein Pre-Match-Vergleichsdatensatz nie mit
+    // PHÖNIX' eigenen Live-Daten kollidiert. "source" unterscheidet spätere
+    // phoenix-eigene Twin-Kandidaten (phoenix_native) von diesem externen
+    // Datensatz (external_dataset).
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS historical_twin_matches (
+        id BIGSERIAL PRIMARY KEY,
+        source TEXT NOT NULL DEFAULT 'external_dataset',
+        source_match_key TEXT NOT NULL,
+        division TEXT NOT NULL DEFAULT '',
+        match_date DATE NOT NULL,
+        home_team TEXT NOT NULL,
+        away_team TEXT NOT NULL,
+        home_goals INTEGER,
+        away_goals INTEGER,
+        result TEXT,
+        home_elo DOUBLE PRECISION,
+        away_elo DOUBLE PRECISION,
+        elo_difference DOUBLE PRECISION,
+        absolute_elo_level DOUBLE PRECISION,
+        form3_home DOUBLE PRECISION,
+        form5_home DOUBLE PRECISION,
+        form3_away DOUBLE PRECISION,
+        form5_away DOUBLE PRECISION,
+        normalized_home_probability DOUBLE PRECISION,
+        normalized_draw_probability DOUBLE PRECISION,
+        normalized_away_probability DOUBLE PRECISION,
+        over25_probability DOUBLE PRECISION,
+        under25_probability DOUBLE PRECISION,
+        -- Rolling-/Lagged-Features (nur aus frueheren Spielen berechnet,
+        -- siehe Import-Skript) liegen gebuendelt in JSONB statt als
+        -- ~28 Einzelspalten.
+        features JSONB NOT NULL DEFAULT '{}'::jsonb,
+        data_coverage_percent DOUBLE PRECISION NOT NULL DEFAULT 0,
+        import_version TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (source, source_match_key)
+      )
+    ''');
+
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_historical_twin_matches_elo_diff
+      ON historical_twin_matches (elo_difference)
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_historical_twin_matches_coverage
+      ON historical_twin_matches (data_coverage_percent)
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_historical_twin_matches_date
+      ON historical_twin_matches (match_date DESC)
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_historical_twin_matches_prob
+      ON historical_twin_matches (normalized_home_probability)
+    ''');
+
+    // Zeitreihe aus EloRatings.csv, getrennt von den je-Match-Elo-Werten in
+    // historical_twin_matches. Legt die Basis dafür, dass PHÖNIX seine
+    // eigene Elo-Reihe künftig selbst fortschreiben kann (siehe Vorgabe 14) -
+    // die Fortschreibung selbst ist bewusst nicht Teil von V1.
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS historical_elo_ratings (
+        id BIGSERIAL PRIMARY KEY,
+        rating_date DATE NOT NULL,
+        club TEXT NOT NULL,
+        country TEXT NOT NULL DEFAULT '',
+        elo DOUBLE PRECISION NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (rating_date, club)
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_historical_elo_ratings_club_date
+      ON historical_elo_ratings (club, rating_date DESC)
+    ''');
+
     await db.execute('''
       INSERT INTO app_meta (key, value)
-      VALUES ('schema_version', '6')
+      VALUES ('schema_version', '7')
       ON CONFLICT (key) DO UPDATE
       SET value = EXCLUDED.value, updated_at = NOW()
     ''');
@@ -2594,6 +2672,92 @@ class PhoenixDatabase {
     final row = Map<String, Object?>.from(counts.first.toColumnMap());
     row['weiterhin_offen'] = stillOpen.first[0];
     return row;
+  }
+
+  // ---------------------------------------------------------------------
+  // Historical Twins V1
+  // ---------------------------------------------------------------------
+
+  Future<Map<String, Object?>?> footballMatchForTwin(String fixtureId) async {
+    final db = await connection();
+    final rows = await db.execute(
+      Sql.named('''
+        SELECT id, home_team_name, away_team_name, league_name, country,
+               kickoff_utc, raw_json
+        FROM football_matches
+        WHERE id = @id
+        LIMIT 1
+      '''),
+      parameters: {'id': fixtureId},
+    );
+    if (rows.isEmpty) return null;
+    return Map<String, Object?>.from(rows.first.toColumnMap());
+  }
+
+  /// Neuestes Phase-4-Engine-Input für ein Fixture (Torraten-Heim-/Auswärts-
+  /// Profil, siehe FootballEngineInputService). Historical Twins lesen
+  /// ausschließlich Pre-Match-Felder daraus - niemals Simulation, faire
+  /// Quote oder Tipp.
+  Future<Map<String, Object?>?> latestFootballEngineInput(
+    String fixtureId,
+  ) async {
+    final db = await connection();
+    final rows = await db.execute(
+      Sql.named('''
+        SELECT normalized_input
+        FROM football_engine_inputs
+        WHERE fixture_id = @fixture_id
+        ORDER BY created_at DESC
+        LIMIT 1
+      '''),
+      parameters: {'fixture_id': fixtureId},
+    );
+    if (rows.isEmpty) return null;
+    final value = rows.first[0];
+    return value is Map ? Map<String, Object?>.from(value) : null;
+  }
+
+  /// Grobe SQL-Vorfilterung für die Similarity-Berechnung (siehe Vorgabe 23):
+  /// schneidet den Suchraum anhand der Elo-Differenz und der Data Coverage
+  /// zu, bevor die exakte, gewichtete Ähnlichkeit in Dart berechnet wird.
+  /// KEIN harter Liga-/Ligastufen-Filter.
+  Future<List<Map<String, Object?>>> historicalTwinCandidates({
+    double? eloDifference,
+    double eloTolerance = 220,
+    double minDataCoverage = 40,
+    int limit = 4000,
+  }) async {
+    final db = await connection();
+    final rows = await db.execute(
+      Sql.named('''
+        SELECT
+          id, source, division, match_date, home_team, away_team,
+          home_goals, away_goals, result, home_elo, away_elo,
+          elo_difference, absolute_elo_level, form3_home, form5_home,
+          form3_away, form5_away, normalized_home_probability,
+          normalized_draw_probability, normalized_away_probability,
+          over25_probability, under25_probability, features,
+          data_coverage_percent
+        FROM historical_twin_matches
+        WHERE data_coverage_percent >= @min_coverage
+          AND (
+            @elo_diff IS NULL
+            OR elo_difference IS NULL
+            OR ABS(elo_difference - @elo_diff) < @elo_tolerance
+          )
+        ORDER BY data_coverage_percent DESC
+        LIMIT @limit
+      '''),
+      parameters: {
+        'min_coverage': minDataCoverage,
+        'elo_diff': eloDifference,
+        'elo_tolerance': eloTolerance,
+        'limit': limit,
+      },
+    );
+    return rows
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
   }
 
   /// Liefert den stabilen, zuletzt gespeicherten Spielplan einer Tages- und
