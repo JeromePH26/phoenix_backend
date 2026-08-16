@@ -75,13 +75,18 @@ Future<void> main() async {
       date: today,
     );
 
-    // WICHTIG:
-    // Railway beendet lange Cron-Container nach einiger Zeit.
-    // Der eigentliche Job läuft bereits im permanenten Backend-Service weiter.
-    // Deshalb beendet sich der Cron direkt nach erfolgreichem Start als Erfolg.
+    // Der Scan läuft im Backend asynchron. Ein sofortiges Cron-Ende ist aber
+    // keine Option: Railway beendet den zugehörigen Container dann, bevor die
+    // Pipeline ihre Ergebnisse veröffentlichen kann. Der Cron bleibt deshalb
+    // bis zum terminalen Status aktiv und protokolliert den Fortschritt.
+    await _waitForCompletion(
+      client: client,
+      config: config,
+      jobId: jobId,
+    );
+
     stdout.writeln(
-      '[PHOENIX CRON] Job $jobId läuft serverseitig weiter. '
-      'Cron-Start erfolgreich abgeschlossen.',
+      '[PHOENIX CRON] Job $jobId vollständig abgeschlossen.',
     );
     exitCode = 0;
   } catch (error, stackTrace) {
