@@ -40,16 +40,22 @@ Future<void> main() async {
     ..idleTimeout = const Duration(seconds: 30);
 
   try {
-    // Ergebnisse können verspätet korrigiert werden und ältere DNB-Snapshots
-    // mussten bisher manuell nachgerechnet werden. Deshalb wird ein kurzer,
-    // API-schonender Rückblick automatisch abgeglichen statt nur gestern.
-    for (var offset = 1; offset <= 14; offset++) {
+    // Im normalen Nachtlauf reichen die letzten drei Tage für verspätete
+    // Endstände. Ein manuell erzwungener Lauf gleicht zusätzlich den gesamten
+    // seit 07.08. gespeicherten Zeitraum ab. Die Football-API limitiert
+    // Anfragen pro Minute; deshalb werden Rückblicke bewusst gedrosselt.
+    final settlementDays = forceRun ? 9 : 3;
+    for (var offset = 1; offset <= settlementDays; offset++) {
+      if (offset > 1) {
+        await Future<void>.delayed(const Duration(seconds: 7));
+      }
       final settlementDate = today.subtract(Duration(days: offset));
       try {
         await _settleDate(
           client: client,
           config: config,
           date: settlementDate,
+          reconcile: forceRun,
         );
       } catch (error, stackTrace) {
         stderr.writeln(
@@ -89,14 +95,17 @@ Future<void> _settleDate({
   required HttpClient client,
   required _CronConfig config,
   required DateTime date,
+  required bool reconcile,
 }) async {
   final day = _day(date);
   final uri = config.uri(
     '/api/admin/football/settle',
-    // Der Vortag wird erneut gegen die offiziellen Endstände abgeglichen.
-    // Dadurch werden auch Korrekturen an der Markt-Abrechnung automatisch
-    // auf bereits entschiedene Tipps angewandt.
-    {'date': day, 'reconcile': 'true'},
+    {
+      'date': day,
+      // Nur der bewusst erzwungene Rückblick schreibt bereits entschiedene
+      // historische Tipps erneut. Der Nachtlauf verarbeitet offene Tipps.
+      'reconcile': reconcile.toString(),
+    },
   );
 
   stdout.writeln('[PHOENIX CRON] Ergebnisabrechnung für $day ...');
