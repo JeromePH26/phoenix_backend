@@ -46,12 +46,14 @@ class FootballPhaseOneScanService {
       var processed = 0;
 
       for (final match in relevantMatches) {
-        if (safeEligibleLimit != null &&
-            eligible.length >= safeEligibleLimit) {
+        if (safeEligibleLimit != null && eligible.length >= safeEligibleLimit) {
           break;
         }
         processed++;
-        final decision = await _decide(match);
+        // Die Liga wurde unmittelbar davor gegen die manuelle Whitelist
+        // geprüft. Ein erneuter Profil-Lookup plus Upsert pro Fixture wäre
+        // reine Doppelarbeit; hier reichen die fachlichen Pre-Match-Gates.
+        final decision = _decideWhitelisted(match);
 
         await database.savePhaseOneDecision(
           scanRunId: scanRunId,
@@ -250,14 +252,12 @@ class FootballPhaseOneScanService {
       season: season,
       gender: gender,
       competitionLevel: level,
-      initialHistoricalStatus:
-          _string(profile['historical_status']).isEmpty
-              ? 'observation'
-              : _string(profile['historical_status']),
-      initialSeasonStatus:
-          _string(profile['season_status']).isEmpty
-              ? 'observation'
-              : _string(profile['season_status']),
+      initialHistoricalStatus: _string(profile['historical_status']).isEmpty
+          ? 'observation'
+          : _string(profile['historical_status']),
+      initialSeasonStatus: _string(profile['season_status']).isEmpty
+          ? 'observation'
+          : _string(profile['season_status']),
     );
 
     final manualStatus = _string(profile['manual_status']);
@@ -281,6 +281,72 @@ class FootballPhaseOneScanService {
       eligible: false,
       status: 'observation',
       reason: 'not_whitelisted',
+    );
+  }
+
+  _PhaseOneDecision _decideWhitelisted(Map<String, Object?> match) {
+    final fixtureId = _string(match['id']);
+    final homeTeamId = _string(match['homeTeamId']);
+    final awayTeamId = _string(match['awayTeamId']);
+    final homeTeam = _string(match['homeTeam']).isNotEmpty
+        ? _string(match['homeTeam'])
+        : _string(match['homeTeamName']);
+    final awayTeam = _string(match['awayTeam']).isNotEmpty
+        ? _string(match['awayTeam'])
+        : _string(match['awayTeamName']);
+    final status = _string(match['status']).toUpperCase();
+    final kickoff = DateTime.tryParse(_string(match['kickoff']))?.toUtc();
+    final leagueName = _string(match['league']);
+    final round = _string(match['round']);
+
+    if (fixtureId.isEmpty ||
+        (homeTeamId.isEmpty && homeTeam.isEmpty) ||
+        (awayTeamId.isEmpty && awayTeam.isEmpty)) {
+      return const _PhaseOneDecision(
+        eligible: false,
+        status: 'excluded',
+        reason: 'missing_absolute_minimum',
+      );
+    }
+    if (_isCancelledOrUnscheduled(status)) {
+      return const _PhaseOneDecision(
+        eligible: false,
+        status: 'excluded',
+        reason: 'invalid_fixture_status',
+      );
+    }
+    if (status != 'NS') {
+      return const _PhaseOneDecision(
+        eligible: false,
+        status: 'excluded',
+        reason: 'not_pre_match',
+      );
+    }
+    if (kickoff == null || !kickoff.isAfter(DateTime.now().toUtc())) {
+      return const _PhaseOneDecision(
+        eligible: false,
+        status: 'excluded',
+        reason: 'kickoff_not_in_future',
+      );
+    }
+    if (_isFriendly(leagueName, round)) {
+      return const _PhaseOneDecision(
+        eligible: false,
+        status: 'excluded',
+        reason: 'friendly',
+      );
+    }
+    if (_isYouthCompetition(leagueName, round)) {
+      return const _PhaseOneDecision(
+        eligible: false,
+        status: 'excluded',
+        reason: 'youth_competition',
+      );
+    }
+    return const _PhaseOneDecision(
+      eligible: true,
+      status: 'approved',
+      reason: null,
     );
   }
 
@@ -337,8 +403,7 @@ class FootballPhaseOneScanService {
         .hasMatch(value)) {
       return 2;
     }
-    if (RegExp(r'\b(3rd|third|liga 3|division 3|3\. liga)\b')
-        .hasMatch(value)) {
+    if (RegExp(r'\b(3rd|third|liga 3|division 3|3\. liga)\b').hasMatch(value)) {
       return 3;
     }
 
@@ -405,8 +470,7 @@ class FootballPhaseOneScanService {
     return int.tryParse(value?.toString() ?? '') ?? 0;
   }
 
-  String _day(DateTime value) =>
-      '${value.year.toString().padLeft(4, '0')}-'
+  String _day(DateTime value) => '${value.year.toString().padLeft(4, '0')}-'
       '${value.month.toString().padLeft(2, '0')}-'
       '${value.day.toString().padLeft(2, '0')}';
 }
