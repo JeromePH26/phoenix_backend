@@ -5,7 +5,7 @@ class FootballMarketSelectionService {
 
   final PhoenixDatabase database;
 
-  static const modelVersion = 'market_selection_v9_clean_core_markets';
+  static const modelVersion = 'market_selection_v10_no_dc12';
 
   Future<Map<String, Object?>> select({
     required int phaseTwoScanRunId,
@@ -47,6 +47,18 @@ class FootballMarketSelectionService {
           label: 'Auswärtssieg',
           probability: probabilities['awayWin'] ?? probabilities['away'],
           fairOdds: fairOdds['awayWin'] ?? fairOdds['away'],
+        ),
+        _candidate(
+          key: 'dc1x',
+          label: 'Doppelte Chance 1X',
+          probability: probabilities['dc1x'],
+          fairOdds: fairOdds['dc1x'],
+        ),
+        _candidate(
+          key: 'dcX2',
+          label: 'Doppelte Chance X2',
+          probability: probabilities['dcX2'],
+          fairOdds: fairOdds['dcX2'],
         ),
         _candidate(
           key: 'over25',
@@ -145,14 +157,17 @@ class FootballMarketSelectionService {
       // Extrem sichere Linien wie Über 0,5 oder Unter 5,5 haben fast immer
       // unspielbar kleine Quoten. Sie bleiben in der Marktübersicht, dürfen
       // aber nicht automatisch jeden sinnvolleren Pick verdrängen.
-      // Der Phoenix-Top-Tipp soll eine echte Spielthese sein. Kombi- und
-      // Doppelchance-Märkte werden nicht mehr veröffentlicht. DNB ist allein
-      // unter der oben geprüften Mindestquote als selektiver Ausweichmarkt
-      // erlaubt.
+      // Der Phoenix-Top-Tipp soll eine echte Spielthese sein. 1X und X2
+      // bleiben als nachvollziehbare Absicherung verfügbar, DC 12 und
+      // Kombimärkte werden dagegen niemals als Tipp veröffentlicht. DNB ist
+      // allein unter der oben geprüften Mindestquote als selektiver
+      // Ausweichmarkt erlaubt.
       const primaryTipKeys = <String>{
         'homeWin',
         'draw',
         'awayWin',
+        'dc1x',
+        'dcX2',
         'over25',
         'under25',
         'bttsYes',
@@ -202,9 +217,8 @@ class FootballMarketSelectionService {
                 : candidates.where((candidate) {
                     final key = _string(candidate['key']);
                     // Nur wenn die Kernmärkte vollständig fehlen, greifen wir
-                    // auf eine breite Torlinie zurück. Kombi-, Doppelte-
-                    // Chance- und andere Sicherheitsmärkte werden niemals als
-                    // Notlösung veröffentlicht.
+                    // auf eine breite Torlinie zurück. Kombi- und DC-12-
+                    // Märkte werden niemals als Notlösung veröffentlicht.
                     return reserveTipKeys.contains(key);
                   }).toList(growable: false),
       )..sort((a, b) {
