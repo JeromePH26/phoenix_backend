@@ -1086,14 +1086,14 @@ class PhoenixDatabase {
     bool reconcile = false,
   }) async {
     final db = await connection();
+    final statusFilter = reconcile ? '' : "AND result_status = 'pending'";
     final rows = await db.execute(Sql.named('''
       SELECT combo_date, combined_odds, assigned_units, payload
       FROM football_daily_combos
       WHERE combo_date = CAST(@date AS DATE)
-        AND (@reconcile = TRUE OR result_status = 'pending')
+        $statusFilter
     '''), parameters: {
       'date': date.toUtc().toIso8601String().substring(0, 10),
-      'reconcile': reconcile,
     });
     return rows
         .map((row) => Map<String, Object?>.from(row.toColumnMap()))
@@ -2467,18 +2467,23 @@ class PhoenixDatabase {
     bool reconcile = false,
   }) async {
     final db = await connection();
+    final statusFilter = reconcile ? '' : "AND result_status = 'pending'";
+    final dateFilter = date == null
+        ? ''
+        : 'AND prediction_date = CAST(@prediction_date AS DATE)';
     final result = await db.execute(
       Sql.named('''
         SELECT phase_two_scan_run_id, fixture_id, market_key, market_label,
                market_odds, assigned_units, payload
         FROM football_analysis_history
-        WHERE (@reconcile = TRUE OR result_status = 'pending')
-          AND (@prediction_date IS NULL OR prediction_date = CAST(@prediction_date AS DATE))
+        WHERE TRUE
+          $statusFilter
+          $dateFilter
         ORDER BY kickoff
       '''),
       parameters: {
-        'prediction_date': date?.toIso8601String().substring(0, 10),
-        'reconcile': reconcile,
+        if (date != null)
+          'prediction_date': date.toUtc().toIso8601String().substring(0, 10),
       },
     );
     return result
