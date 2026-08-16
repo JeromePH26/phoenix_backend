@@ -41,11 +41,20 @@ class FootballDailyPipelineService {
       final safeSimulations = simulations.clamp(1000, 100000);
 
       await _step(jobId, 'phase1');
+      stdout.writeln(
+        '[PHOENIX PIPELINE] Job $jobId: Phase 1 startet '
+        '(alle Whitelist-Spiele, Qualitätsminimum $safeQuality).',
+      );
       final phaseOne = await FootballPhaseOneScanService(
         database: database,
         football: football,
       ).run(date, eligibleLimit: effectiveLimit);
       final phaseOneId = _integer(phaseOne['scanRunId']);
+      stdout.writeln(
+        '[PHOENIX PIPELINE] Job $jobId: Phase 1 fertig – '
+        'gesamt=${_integer(phaseOne['total'])}, '
+        'freigegeben=${_integer(phaseOne['eligibleCount'])}.',
+      );
 
       await database.updateFootballDailyPipelineJob(
         jobId: jobId,
@@ -66,6 +75,11 @@ class FootballDailyPipelineService {
         phaseOneScanRunId: phaseOneId,
         limit: effectiveLimit,
         minimumDataQuality: safeQuality,
+      );
+
+      stdout.writeln(
+        '[PHOENIX PIPELINE] Job $jobId: Phase 2 vorbereitet – '
+        'Kandidaten=${_integer(prepared['limit'])}.',
       );
 
       if (prepared['started'] != true) {
@@ -89,6 +103,10 @@ class FootballDailyPipelineService {
 
       final phaseTwoResult = await phaseTwoService.processPrepared(prepared);
       final allowed = _integer(phaseTwoResult['allowed']);
+      stdout.writeln(
+        '[PHOENIX PIPELINE] Job $jobId: Phase 2 fertig – '
+        'geprüft=${_integer(phaseTwoResult['checked'])}, freigegeben=$allowed.',
+      );
 
       if (allowed <= 0) {
         await _finish(
@@ -118,6 +136,9 @@ class FootballDailyPipelineService {
       ).prepare(phaseTwoScanRunId: phaseTwoId, limit: effectiveLimit);
 
       final preparedInputs = _integer(engineResult['prepared']);
+      stdout.writeln(
+        '[PHOENIX PIPELINE] Job $jobId: Engine-Eingaben=$preparedInputs.',
+      );
       if (preparedInputs <= 0) {
         throw StateError('Keine Engine-Eingaben wurden erzeugt.');
       }
@@ -131,6 +152,9 @@ class FootballDailyPipelineService {
       );
 
       final simulated = _integer(simulationResult['processed']);
+      stdout.writeln(
+        '[PHOENIX PIPELINE] Job $jobId: Simulationen=$simulated.',
+      );
       if (simulated <= 0) {
         throw StateError('Keine Simulation wurde erzeugt.');
       }
@@ -144,6 +168,9 @@ class FootballDailyPipelineService {
       );
 
       final selected = _integer(marketResult['processed']);
+      stdout.writeln(
+        '[PHOENIX PIPELINE] Job $jobId: Marktauswahl=$selected.',
+      );
       if (selected <= 0) {
         throw StateError('Keine Marktauswahl wurde erzeugt.');
       }
@@ -381,6 +408,7 @@ class FootballDailyPipelineService {
   }
 
   Future<void> _step(int jobId, String step) {
+    stdout.writeln('[PHOENIX PIPELINE] Job $jobId: Schritt $step.');
     return database.updateFootballDailyPipelineJob(
       jobId: jobId,
       status: 'running',

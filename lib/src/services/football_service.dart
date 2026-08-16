@@ -567,10 +567,16 @@ class FootballService {
     final uri = Uri.parse('$_baseUrl$path').replace(
       queryParameters: query,
     );
-    final response = await _client.get(uri, headers: {
-      'x-apisports-key': apiKey,
-      'accept': 'application/json',
-    });
+    // Ein hängender Provider-Request darf den gesamten Hintergrundlauf nicht
+    // dauerhaft blockieren. coverageForFixture behandelt den einzelnen
+    // fehlenden Datenbaustein bereits als nicht verfügbar und verarbeitet
+    // danach die restlichen Whitelist-Spiele weiter.
+    final response = await _client
+        .get(uri, headers: {
+          'x-apisports-key': apiKey,
+          'accept': 'application/json',
+        })
+        .timeout(const Duration(seconds: 20));
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw StateError('Football API HTTP ${response.statusCode}');
