@@ -27,6 +27,13 @@ Future<void> main(List<String> args) async {
   final limit = _argInt(args, '--limit');
   final skipElo = args.contains('--skip-elo');
   final skipMatches = args.contains('--skip-matches');
+  // Historie wird IMMER ab dem allerersten CSV-Datum aufgebaut (sonst
+  // Leakage-Risiko für die erste Saison nach dem Cutoff) - dieser Parameter
+  // bestimmt nur, ab welchem Datum tatsächlich in die DB geschrieben wird.
+  // So lässt sich gezielt ein neuerer Zeitraum ergänzen (z. B. 2020-2025),
+  // ohne den bereits gespeicherten Bereich erneut zu schreiben und ohne den
+  // knappen Speicherplatz mit nicht benötigten Zwischenjahren zu belasten.
+  final insertFromDate = _argString(args, '--insert-from');
 
   final config = AppConfig.fromEnvironment();
   final database = PhoenixDatabase(config.databaseUrl);
@@ -45,7 +52,13 @@ Future<void> main(List<String> args) async {
   }
 
   if (!skipMatches) {
-    await _importMatches(database, limit: limit);
+    await _importMatches(
+      database,
+      limit: limit,
+      insertFromDate: insertFromDate == null
+          ? null
+          : DateTime.tryParse(insertFromDate),
+    );
   }
 
   await database.close();
@@ -155,7 +168,18 @@ Future<void> _importEloRatings(PhoenixDatabase database) async {
   );
 }
 
-Future<void> _importMatches(PhoenixDatabase database, {int? limit}) async {
+Future<void> _importMatches(
+  PhoenixDatabase database, {
+  int? limit,
+  DateTime? insertFromDate,
+}) async {
+  if (insertFromDate != null) {
+    stdout.writeln(
+      '[TWINS IMPORT] Historie wird ab dem ersten CSV-Datum aufgebaut, '
+      'aber nur Matches ab ${insertFromDate.toIso8601String().substring(0, 10)} '
+      'werden geschrieben.',
+    );
+  }
   final file = File('data/historical_twins/Matches.csv');
   if (!file.existsSync()) {
     stdout.writeln(
@@ -411,34 +435,40 @@ Future<void> _importMatches(PhoenixDatabase database, {int? limit}) async {
 
       final sourceMatchKey = '$division|$matchDateRaw|$homeTeam|$awayTeam';
 
-      pendingRows.add({
-        'key': sourceMatchKey,
-        'division': division,
-        'date': matchDate,
-        'home_team': homeTeam,
-        'away_team': awayTeam,
-        'home_goals': ftHome,
-        'away_goals': ftAway,
-        'result': result,
-        'home_elo': homeElo,
-        'away_elo': awayElo,
-        'elo_diff': eloDiff,
-        'abs_level': absoluteLevel,
-        'form3_home': form3Home,
-        'form5_home': form5Home,
-        'form3_away': form3Away,
-        'form5_away': form5Away,
-        'norm_home': normHome,
-        'norm_draw': normDraw,
-        'norm_away': normAway,
-        'over25': over25Prob,
-        'under25': under25Prob,
-        'features': jsonEncode(features),
-        'coverage': dataCoverage,
-        'import_version': _importVersion,
-      });
-      if (pendingRows.length >= insertBatchSize) {
-        await flush(session);
+      // Historie wird für JEDES Match aufgebaut (s. o.), aber nur ab dem
+      // Cutoff tatsächlich geschrieben - so bleiben Rolling-Features für
+      // 2020+ trotzdem leakage-frei, ohne die dazwischenliegenden Jahre
+      // erneut in die knappe Datenbank zu schreiben.
+      if (insertFromDate == null || !matchDate.isBefore(insertFromDate)) {
+        pendingRows.add({
+          'key': sourceMatchKey,
+          'division': division,
+          'date': matchDate,
+          'home_team': homeTeam,
+          'away_team': awayTeam,
+          'home_goals': ftHome,
+          'away_goals': ftAway,
+          'result': result,
+          'home_elo': homeElo,
+          'away_elo': awayElo,
+          'elo_diff': eloDiff,
+          'abs_level': absoluteLevel,
+          'form3_home': form3Home,
+          'form5_home': form5Home,
+          'form3_away': form3Away,
+          'form5_away': form5Away,
+          'norm_home': normHome,
+          'norm_draw': normDraw,
+          'norm_away': normAway,
+          'over25': over25Prob,
+          'under25': under25Prob,
+          'features': jsonEncode(features),
+          'coverage': dataCoverage,
+          'import_version': _importVersion,
+        });
+        if (pendingRows.length >= insertBatchSize) {
+          await flush(session);
+        }
       }
 
       // ERST NACH dem Speichern der Pre-Match-Features das eigene Ergebnis
@@ -603,6 +633,15 @@ int? _argInt(List<String> args, String prefix) {
   for (final arg in args) {
     if (arg.startsWith('$prefix=')) {
       return int.tryParse(arg.substring(prefix.length + 1));
+    }
+  }
+  return null;
+}
+
+String? _argString(List<String> args, String prefix) {
+  for (final arg in args) {
+    if (arg.startsWith('$prefix=')) {
+      return arg.substring(prefix.length + 1);
     }
   }
   return null;
