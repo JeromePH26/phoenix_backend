@@ -5,7 +5,7 @@ class FootballMarketSelectionService {
 
   final PhoenixDatabase database;
 
-  static const modelVersion = 'market_selection_v8_recommendation_balance';
+  static const modelVersion = 'market_selection_v9_clean_core_markets';
 
   Future<Map<String, Object?>> select({
     required int phaseTwoScanRunId,
@@ -89,11 +89,6 @@ class FootballMarketSelectionService {
       const extendedMarkets = <String, String>{
         'over35': 'Über 3,5 Tore',
         'under35': 'Unter 3,5 Tore',
-        'dc1x': 'Doppelte Chance 1X',
-        'dc12': 'Doppelte Chance 12',
-        'dcX2': 'Doppelte Chance X2',
-        'dnbHome': 'Draw No Bet Heim',
-        'dnbAway': 'Draw No Bet Auswärts',
       };
       for (final market in extendedMarkets.entries) {
         candidates.add(
@@ -105,6 +100,38 @@ class FootballMarketSelectionService {
           ),
         );
       }
+      // DNB ist kein pauschaler Sicherheitsmarkt. Er wird nur überhaupt
+      // berücksichtigt, wenn die zugrunde liegende Siegthese ausreichend
+      // offen ist (faire 1X2-Quote etwa 1.90+) und die Absicherung selbst
+      // mindestens eine faire 1.30 hergibt.
+      void addDnbIfInteresting({
+        required String dnbKey,
+        required String winKey,
+        required String label,
+      }) {
+        final winFairOdds = _number(fairOdds[winKey]) ?? 0;
+        final dnbFairOdds = _number(fairOdds[dnbKey]) ?? 0;
+        if (winFairOdds < 1.90 || dnbFairOdds < 1.30) return;
+        candidates.add(
+          _candidate(
+            key: dnbKey,
+            label: label,
+            probability: probabilities[dnbKey],
+            fairOdds: fairOdds[dnbKey],
+          ),
+        );
+      }
+
+      addDnbIfInteresting(
+        dnbKey: 'dnbHome',
+        winKey: 'homeWin',
+        label: 'Draw No Bet Heim',
+      );
+      addDnbIfInteresting(
+        dnbKey: 'dnbAway',
+        winKey: 'awayWin',
+        label: 'Draw No Bet Auswärts',
+      );
       candidates.removeWhere(
         (candidate) => (_number(candidate['probability']) ?? 0) <= 0,
       );
@@ -118,9 +145,10 @@ class FootballMarketSelectionService {
       // Extrem sichere Linien wie Über 0,5 oder Unter 5,5 haben fast immer
       // unspielbar kleine Quoten. Sie bleiben in der Marktübersicht, dürfen
       // aber nicht automatisch jeden sinnvolleren Pick verdrängen.
-      // Der Phoenix-Top-Tipp soll eine echte Spielthese sein. Absicherungen
-      // (DNB, doppelte Chance) und das sehr breite Unter 3,5 bleiben sichtbar,
-      // dürfen aber keinen Top-Tipp verdrängen.
+      // Der Phoenix-Top-Tipp soll eine echte Spielthese sein. Kombi- und
+      // Doppelchance-Märkte werden nicht mehr veröffentlicht. DNB ist allein
+      // unter der oben geprüften Mindestquote als selektiver Ausweichmarkt
+      // erlaubt.
       const primaryTipKeys = <String>{
         'homeWin',
         'draw',
@@ -131,13 +159,10 @@ class FootballMarketSelectionService {
         'bttsNo',
         'homeOver15',
         'awayOver15',
-      };
-      const reserveTipKeys = <String>{
         'dnbHome',
         'dnbAway',
-        'dc1x',
-        'dc12',
-        'dcX2',
+      };
+      const reserveTipKeys = <String>{
         'over35',
         'under35',
       };
@@ -177,8 +202,9 @@ class FootballMarketSelectionService {
                 : candidates.where((candidate) {
                     final key = _string(candidate['key']);
                     // Nur wenn die Kernmärkte vollständig fehlen, greifen wir
-                    // auf eine Absicherung zurück. Hohe Torlinien und Kombis
-                    // werden niemals als Notlösung veröffentlicht.
+                    // auf eine breite Torlinie zurück. Kombi-, Doppelte-
+                    // Chance- und andere Sicherheitsmärkte werden niemals als
+                    // Notlösung veröffentlicht.
                     return reserveTipKeys.contains(key);
                   }).toList(growable: false),
       )..sort((a, b) {

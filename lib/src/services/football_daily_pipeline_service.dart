@@ -257,6 +257,21 @@ class FootballDailyPipelineService {
 
       final rawProbabilities = _map(simulation['probabilities']);
       final rawFairOdds = _map(simulation['fairOdds']);
+      // Same-game-Kombis und Doppelte Chance 12 sind bewusst kein Teil der
+      // öffentlichen PHÖNIX-Märkte. Sie bleiben höchstens intern in einer
+      // Simulation verfügbar, erscheinen aber nie mehr als Analyse-Tipp.
+      bool hiddenMarket(String key) {
+        final normalized = key.toLowerCase();
+        return normalized.startsWith('combo') || normalized == 'dc12';
+      }
+
+      rawProbabilities.removeWhere((key, _) => hiddenMarket(key));
+      rawFairOdds.removeWhere((key, _) => hiddenMarket(key));
+      final publicSimulation = <String, Object?>{
+        ...simulation,
+        'probabilities': rawProbabilities,
+        'fairOdds': rawFairOdds,
+      };
       final phoenixTip = _map(selection['phoenixTip']);
       final trust = _map(selection['trust']);
       final aiContext = _map(simulation['aiContext']);
@@ -341,7 +356,7 @@ class FootballDailyPipelineService {
         'topScorelines': simulation['topScorelines'],
         'phoenixTip': phoenixTip,
         'selection': selection,
-        'simulation': simulation,
+        'simulation': publicSimulation,
         'simulationCount': simulation['simulations'],
         'aiContext': aiContext,
         'contextApplied': aiContext['applied'] == true,
