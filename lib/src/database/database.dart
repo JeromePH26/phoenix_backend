@@ -717,9 +717,16 @@ class PhoenixDatabase {
         pending INTEGER NOT NULL DEFAULT 0,
         failed INTEGER NOT NULL DEFAULT 0,
         error TEXT,
+        last_error TEXT,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         completed_at TIMESTAMPTZ
       )
+    ''');
+
+    // Bestehende Railway-Datenbanken besitzen die Spalte ggf. noch nicht.
+    await db.execute('''
+      ALTER TABLE football_match_settlement_jobs
+        ADD COLUMN IF NOT EXISTS last_error TEXT
     ''');
 
     // Beschleunigt die wiederkehrende Suche nach noch offenen Spielen, ohne
@@ -2498,6 +2505,10 @@ class PhoenixDatabase {
     int? pending,
     int? failed,
     Object? error,
+    // Letzte pro-Fixture-Fehlermeldung (z. B. "Football API HTTP 429").
+    // Einzelne Fixture-Fehler brechen den Job nicht ab, sollen aber sichtbar
+    // bleiben - deshalb per COALESCE nur bei einem neuen Fehler überschrieben.
+    String? lastError,
     bool completed = false,
   }) async {
     final db = await connection();
@@ -2510,6 +2521,7 @@ class PhoenixDatabase {
           pending = COALESCE(@pending, pending),
           failed = COALESCE(@failed, failed),
           error = @error,
+          last_error = COALESCE(@last_error, last_error),
           completed_at = CASE WHEN @completed THEN NOW() ELSE completed_at END
         WHERE id = @job_id
       '''),
@@ -2521,6 +2533,7 @@ class PhoenixDatabase {
         'pending': pending,
         'failed': failed,
         'error': error?.toString(),
+        'last_error': lastError,
         'completed': completed,
       },
     );
@@ -2532,7 +2545,7 @@ class PhoenixDatabase {
       Sql.named('''
         SELECT
           id, status, min_hours_since_kickoff, batch_size,
-          checked, settled, pending, failed, error,
+          checked, settled, pending, failed, error, last_error,
           created_at::text AS created_at,
           completed_at::text AS completed_at
         FROM football_match_settlement_jobs

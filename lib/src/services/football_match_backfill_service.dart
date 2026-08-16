@@ -36,6 +36,8 @@ class FootballMatchBackfillService {
     var settled = 0;
     var pending = 0;
     var failed = 0;
+    String? lastError;
+    var rateLimited = false;
     // Ein Spiel, das noch läuft oder verschoben ist, bleibt bis zum nächsten
     // Lauf in der Kandidatenliste stehen (Status ändert sich nicht sofort).
     // Ohne dieses Set würde dieselbe Batch-Abfrage es in jeder weiteren
@@ -44,7 +46,7 @@ class FootballMatchBackfillService {
     final visitedThisRun = <String>{};
 
     try {
-      while (checked < maxFixtures) {
+      while (checked < maxFixtures && !rateLimited) {
         final candidates = await database.footballMatchResultCandidates(
           minHoursSinceKickoff: minHoursSinceKickoff,
           limit: batchSize,
@@ -108,9 +110,18 @@ class FootballMatchBackfillService {
             }
           } catch (error) {
             failed++;
+            lastError = error.toString();
             stderr.writeln(
               '[PHOENIX MATCH SETTLE] Fixture $fixtureId fehlgeschlagen: $error',
             );
+            // Sobald der Anbieter das Tageslimit meldet, würde jede weitere
+            // Anfrage im selben Batch garantiert ebenfalls scheitern. Statt
+            // den restlichen Batch trotzdem "aggressiv" durchzuprobieren,
+            // sauber abbrechen und exakt melden, was bis dahin geschafft war.
+            if (_looksRateLimited(lastError)) {
+              rateLimited = true;
+              break;
+            }
           }
 
           if (pauseBetweenCalls > Duration.zero) {
@@ -120,34 +131,40 @@ class FootballMatchBackfillService {
 
         await database.updateFootballMatchSettlementJob(
           jobId: jobId,
-          status: 'running',
+          status: rateLimited ? 'rate_limited' : 'running',
           checked: checked,
           settled: settled,
           pending: pending,
           failed: failed,
+          lastError: lastError,
         );
+
+        if (rateLimited) break;
 
         // Kleinere Batches als die angeforderte Größe heißen: die Warteschlange
         // ist für diesen Lauf leer.
         if (candidates.length < batchSize) break;
       }
 
+      final finalStatus = rateLimited ? 'rate_limited' : 'completed';
       await database.updateFootballMatchSettlementJob(
         jobId: jobId,
-        status: 'completed',
+        status: finalStatus,
         checked: checked,
         settled: settled,
         pending: pending,
         failed: failed,
+        lastError: lastError,
         completed: true,
       );
 
       return {
-        'status': 'completed',
+        'status': finalStatus,
         'checked': checked,
         'settled': settled,
         'pending': pending,
         'failed': failed,
+        'lastError': lastError,
       };
     } catch (error) {
       await database.updateFootballMatchSettlementJob(
@@ -158,10 +175,19 @@ class FootballMatchBackfillService {
         pending: pending,
         failed: failed,
         error: error,
+        lastError: error.toString(),
         completed: true,
       );
       rethrow;
     }
+  }
+
+  bool _looksRateLimited(String message) {
+    final value = message.toLowerCase();
+    return value.contains('429') ||
+        value.contains('rate limit') ||
+        value.contains('too many requests') ||
+        value.contains('quota');
   }
 
   int? _int(Object? value) {
