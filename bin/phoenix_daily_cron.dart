@@ -17,6 +17,8 @@ Future<void> main() async {
   // führt den Tagesscan aus. Der andere beendet sich sofort.
   final forceRun =
       Platform.environment['PHOENIX_CRON_FORCE_RUN']?.toLowerCase() == 'true';
+  final fullReconcile =
+      Platform.environment['PHOENIX_CRON_RECONCILE']?.toLowerCase() == 'true';
 
   if (!forceRun && berlinNow.hour != 0) {
     stdout.writeln(
@@ -40,11 +42,11 @@ Future<void> main() async {
     ..idleTimeout = const Duration(seconds: 30);
 
   try {
-    // Im normalen Nachtlauf reichen die letzten drei Tage für verspätete
-    // Endstände. Ein manuell erzwungener Lauf gleicht zusätzlich den gesamten
-    // seit 07.08. gespeicherten Zeitraum ab. Die Football-API limitiert
-    // Anfragen pro Minute; deshalb werden Rückblicke bewusst gedrosselt.
-    final settlementDays = forceRun ? 9 : 3;
+    // Im Normalbetrieb reichen die letzten drei Tage für verspätete Endstände.
+    // Ein kompletter Rückblick wird bewusst nur mit der separaten Variable
+    // PHOENIX_CRON_RECONCILE aktiviert; "Run now" startet dann nicht jedes
+    // Mal erneut neun historische Provider-Abfragen.
+    final settlementDays = fullReconcile ? 9 : 3;
     for (var offset = 1; offset <= settlementDays; offset++) {
       if (offset > 1) {
         await Future<void>.delayed(const Duration(seconds: 7));
@@ -55,7 +57,7 @@ Future<void> main() async {
           client: client,
           config: config,
           date: settlementDate,
-          reconcile: forceRun,
+          reconcile: fullReconcile,
         );
       } catch (error, stackTrace) {
         stderr.writeln(
