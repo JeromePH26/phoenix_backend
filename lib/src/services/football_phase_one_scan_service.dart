@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import '../database/database.dart';
 import 'football_service.dart';
 
@@ -18,16 +20,25 @@ class FootballPhaseOneScanService {
     final scanRunId = await database.createFootballScanRun(date);
 
     try {
+      stdout.writeln('[PHOENIX PHASE1] Lade globalen Spieltag ${_day(date)}.');
       final matches = await football.matchesForDate(date);
+      stdout.writeln(
+        '[PHOENIX PHASE1] Provider-Spieltag geladen: ${matches.length} Fixtures.',
+      );
       // Nur Whitelist-Ligen können später eine Analyse erhalten. Die
       // Providerantwort enthält aber den globalen Spieltag; ohne diesen
       // Vorfilter würde jedes fremde Fixture einzeln einen Profil- und
       // Schreibzugriff verursachen und den Cron unnötig um Minuten strecken.
-      final whitelistedLeagueIds = await database.whitelistedFootballLeagueIds();
+      final whitelistedLeagueIds =
+          await database.whitelistedFootballLeagueIds();
       final relevantMatches = matches.where((match) {
         final leagueId = _string(match['leagueId']);
         return leagueId.isNotEmpty && whitelistedLeagueIds.contains(leagueId);
-      });
+      }).toList(growable: false);
+      stdout.writeln(
+        '[PHOENIX PHASE1] Whitelist: ${whitelistedLeagueIds.length} Ligen, '
+        '${relevantMatches.length} Fixtures heute.',
+      );
       final eligible = <Map<String, Object?>>[];
       final excluded = <Map<String, Object?>>[];
       final reasons = <String, int>{};
