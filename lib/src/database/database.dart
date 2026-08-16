@@ -1454,6 +1454,22 @@ class PhoenixDatabase {
     return Map<String, Object?>.from(result.first.toColumnMap());
   }
 
+  /// Die Phase-1-Pipeline braucht nur Ligen, die explizit freigegeben sind.
+  /// Ein einzelner Lookup verhindert, dass für mehrere hundert fremde
+  /// Tages-Factures jeweils zwei Datenbankabfragen ausgeführt werden.
+  Future<Set<String>> whitelistedFootballLeagueIds() async {
+    final db = await connection();
+    final result = await db.execute('''
+      SELECT league_id
+      FROM football_leagues
+      WHERE manual_status = 'whitelist'
+    ''');
+    return result
+        .map((row) => row[0]?.toString().trim() ?? '')
+        .where((id) => id.isNotEmpty)
+        .toSet();
+  }
+
   Future<void> upsertLeagueSeen({
     required String leagueId,
     required String leagueName,

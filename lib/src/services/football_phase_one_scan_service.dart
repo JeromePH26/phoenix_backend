@@ -19,13 +19,22 @@ class FootballPhaseOneScanService {
 
     try {
       final matches = await football.matchesForDate(date);
+      // Nur Whitelist-Ligen können später eine Analyse erhalten. Die
+      // Providerantwort enthält aber den globalen Spieltag; ohne diesen
+      // Vorfilter würde jedes fremde Fixture einzeln einen Profil- und
+      // Schreibzugriff verursachen und den Cron unnötig um Minuten strecken.
+      final whitelistedLeagueIds = await database.whitelistedFootballLeagueIds();
+      final relevantMatches = matches.where((match) {
+        final leagueId = _string(match['leagueId']);
+        return leagueId.isNotEmpty && whitelistedLeagueIds.contains(leagueId);
+      });
       final eligible = <Map<String, Object?>>[];
       final excluded = <Map<String, Object?>>[];
       final reasons = <String, int>{};
       final safeEligibleLimit = eligibleLimit?.clamp(1, 1000);
       var processed = 0;
 
-      for (final match in matches) {
+      for (final match in relevantMatches) {
         if (safeEligibleLimit != null &&
             eligible.length >= safeEligibleLimit) {
           break;
