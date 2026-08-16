@@ -175,9 +175,34 @@ class PhoenixApiGuard {
   }
 
   Future<Response> _footballMatches(DateTime date) async {
+    // Die App liest den Spielplan primär aus dem eigenen, beim Tages-Scan
+    // angelegten Cache. Das verhindert, dass API-Limits plötzlich Spiele aus
+    // der Übersicht entfernen oder für alle Nutzer eine neue Provider-Abfrage
+    // auslösen.
+    final cached = await database.cachedWhitelistedFootballMatchesForDate(date);
+    if (cached.isNotEmpty) {
+      return jsonResponse({
+        'sport': 'football',
+        'date': _day(date),
+        'whitelistOnly': true,
+        'source': 'database_cache',
+        'count': cached.length,
+        'matches': cached,
+      });
+    }
+
     try {
       final matches = await football.matchesForDate(date);
       final allowed = await _onlyWhitelisted(matches);
+
+      for (final match in allowed) {
+        final fixtureId = _text(match['id']);
+        if (fixtureId.isEmpty) continue;
+        await database.upsertFootballMatchFromPayload(
+          fixtureId: fixtureId,
+          payload: match,
+        );
+      }
 
       return jsonResponse({
         'sport': 'football',
@@ -187,6 +212,8 @@ class PhoenixApiGuard {
         'matches': allowed,
       });
     } catch (error) {
+      // Ein leerer Cache ist nur beim allerersten Aufruf möglich. Danach
+      // bleibt der gespeicherte Spielplan auch bei Provider-Ausfällen stabil.
       return jsonResponse({'error': error.toString()}, statusCode: 502);
     }
   }

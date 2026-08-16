@@ -371,7 +371,7 @@ class FootballDailyPipelineService {
         payload: matchPayload,
       );
 
-      await database.saveFinalFootballAnalysis(
+      final inserted = await database.saveFinalFootballAnalysis(
         fixtureId: fixtureId,
         modelVersion: publishedModelVersion,
         dataQuality: dataQuality,
@@ -380,17 +380,22 @@ class FootballDailyPipelineService {
         payload: analysisPayload,
       );
 
-      await database.saveFootballAnalysisHistory(
-        phaseTwoScanRunId: phaseTwoScanRunId,
-        fixtureId: fixtureId,
-        modelVersion: publishedModelVersion,
-        dataQuality: dataQuality,
-        confidence: confidence,
-        payload: analysisPayload,
-      );
+      // Ein bereits veröffentlichter Tipp ist eingefroren. Kein zusätzlicher
+      // History-Eintrag und keine neue Tages-Kombi aus einem späteren,
+      // abweichenden Re-Scan dürfen ihn unbemerkt verändern.
+      if (inserted) {
+        await database.saveFootballAnalysisHistory(
+          phaseTwoScanRunId: phaseTwoScanRunId,
+          fixtureId: fixtureId,
+          modelVersion: publishedModelVersion,
+          dataQuality: dataQuality,
+          confidence: confidence,
+          payload: analysisPayload,
+        );
 
-      published++;
-      publishedAnalyses.add(analysisPayload);
+        published++;
+        publishedAnalyses.add(analysisPayload);
+      }
     }
 
     return {

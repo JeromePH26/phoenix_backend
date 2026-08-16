@@ -50,6 +50,14 @@ class FootballPhaseOneScanService {
           break;
         }
         processed++;
+        // Der Tages-Spielplan ist unabhängig von einer späteren Analyse. So
+        // bleiben auch bereits gestartete, abgesagte oder wegen fehlender
+        // Detaildaten ausgeschlossene Whitelist-Spiele in der App sichtbar,
+        // selbst wenn das Provider-Limit später erreicht wird.
+        await database.upsertFootballMatchFromPayload(
+          fixtureId: _string(match['id']),
+          payload: match,
+        );
         // Die Liga wurde unmittelbar davor gegen die manuelle Whitelist
         // geprüft. Ein erneuter Profil-Lookup plus Upsert pro Fixture wäre
         // reine Doppelarbeit; hier reichen die fachlichen Pre-Match-Gates.

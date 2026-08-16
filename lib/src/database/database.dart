@@ -2376,7 +2376,64 @@ class PhoenixDatabase {
     );
   }
 
-  Future<void> saveFinalFootballAnalysis({
+  /// Liefert den stabilen, zuletzt gespeicherten Spielplan einer Tages- und
+  /// Liga-Whitelist. Phase-1-Datensätze ergänzen dabei Spiele, die bewusst
+  /// keine Analyse erhalten haben (live, beendet, abgesagt oder ohne Details).
+  /// Dadurch hängt die App-Anzeige nicht an einer neuen Provider-Abfrage.
+  Future<List<Map<String, Object?>>> cachedWhitelistedFootballMatchesForDate(
+    DateTime date,
+  ) async {
+    final db = await connection();
+    final rows = await db.execute(
+      Sql.named('''
+        WITH candidates AS (
+          SELECT
+            m.id AS fixture_id,
+            m.raw_json AS payload,
+            m.kickoff_utc,
+            2 AS source_priority
+          FROM football_matches m
+          INNER JOIN football_leagues l ON l.league_id = m.league_id
+          WHERE l.manual_status = 'whitelist'
+            AND (m.kickoff_utc AT TIME ZONE 'Europe/Berlin')::date =
+                CAST(@day AS DATE)
+
+          UNION ALL
+
+          SELECT
+            sm.fixture_id,
+            sm.payload,
+            NULL::TIMESTAMPTZ AS kickoff_utc,
+            1 AS source_priority
+          FROM football_scan_matches sm
+          INNER JOIN football_scan_runs sr ON sr.id = sm.scan_run_id
+          INNER JOIN football_leagues l ON l.league_id = sm.league_id
+          WHERE l.manual_status = 'whitelist'
+            AND sr.scan_date = CAST(@day AS DATE)
+        ), chosen AS (
+          SELECT DISTINCT ON (fixture_id)
+            fixture_id, payload, kickoff_utc
+          FROM candidates
+          WHERE fixture_id <> ''
+          ORDER BY fixture_id, source_priority DESC
+        )
+        SELECT payload
+        FROM chosen
+        ORDER BY kickoff_utc NULLS LAST, fixture_id
+      '''),
+      parameters: {'day': _dateOnly(date)},
+    );
+
+    return rows
+        .map((row) => _jsonMap(row[0]))
+        .where((payload) => payload.isNotEmpty)
+        .toList(growable: false);
+  }
+
+  /// Publizierte Pre-Match-Analysen sind ein Snapshot. Nachfolgende Scans
+  /// dürfen sie weder neu berechnen noch den Tipp austauschen; sie können
+  /// lediglich Match-Status und Ergebnis in `football_matches` aktualisieren.
+  Future<bool> saveFinalFootballAnalysis({
     required String fixtureId,
     required String modelVersion,
     required int dataQuality,
@@ -2385,7 +2442,7 @@ class PhoenixDatabase {
     required Map<String, Object?> payload,
   }) async {
     final db = await connection();
-    await db.execute(
+    final rows = await db.execute(
       Sql.named('''
         INSERT INTO analyses (
           sport, match_id, model_version, data_quality,
@@ -2394,12 +2451,8 @@ class PhoenixDatabase {
           'football', @match_id, @model_version, @data_quality,
           @confidence, @recommendation, CAST(@payload AS JSONB)
         )
-        ON CONFLICT (sport, match_id, model_version) DO UPDATE SET
-          data_quality = EXCLUDED.data_quality,
-          confidence = EXCLUDED.confidence,
-          recommendation = EXCLUDED.recommendation,
-          payload = EXCLUDED.payload,
-          analyzed_at = NOW()
+        ON CONFLICT (sport, match_id, model_version) DO NOTHING
+        RETURNING id
       '''),
       parameters: {
         'match_id': fixtureId,
@@ -2410,6 +2463,7 @@ class PhoenixDatabase {
         'payload': jsonEncode(payload),
       },
     );
+    return rows.isNotEmpty;
   }
 
   Future<void> saveFootballAnalysisHistory({
