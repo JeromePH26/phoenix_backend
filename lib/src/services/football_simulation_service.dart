@@ -135,6 +135,11 @@ class FootballSimulationService {
       hit('dcX2', draw || awayWin);
       hit('dnbHome', homeWin);
       hit('dnbAway', awayWin);
+      // Teamtore sind eine brauchbare, konkrete Alternative zu sehr breiten
+      // Absicherungen. Nur die 1,5-Linie wird als Empfehlungsmarkt erzeugt;
+      // 0,5 wäre fast immer eine nichtssagende Niedrigquote.
+      hit('homeOver15', homeGoals >= 2);
+      hit('awayOver15', awayGoals >= 2);
       final goalDifference = homeGoals - awayGoals;
       // Europäisches Handicap ist ein Dreiweg-Markt. Für jede Linie sind
       // Heimsieg, Handicap-Remis und Auswärtssieg getrennte Quotenausgänge.

@@ -63,11 +63,16 @@ class FootballValueService {
                 maximumFairMarketDeviationPercent,
             'valuePercent': null,
             'isValueTip': false,
-            'reason': 'Keine PHÖNIX-Einschätzung über 60 % vorhanden.',
+            'reason':
+                'Keine Wettfreigabe: Die Modellwahrscheinlichkeit liegt unter der Mindestschwelle.',
           },
           'display': {
             ..._map(selection['display']),
-            'showPhoenixTip': false,
+            // Die Analyse bleibt sichtbar, auch wenn das Spiel nicht für
+            // einen Einsatz freigegeben ist. So entsteht im Detailbereich
+            // keine leere Karte; die UI kann klar zwischen Einschätzung und
+            // Value-/Wettfreigabe unterscheiden.
+            'showPhoenixTip': true,
             'showValueTip': false,
           },
         };
@@ -127,8 +132,7 @@ class FootballValueService {
 
       final minimumOddsPassed =
           marketOdds != null && marketOdds >= minimumMarketOdds;
-      final recommendationOddsPassed =
-          marketOdds != null &&
+      final recommendationOddsPassed = marketOdds != null &&
           marketOdds >= minimumMarketOdds &&
           marketOdds <= maximumRecommendedOdds;
       final minimumValuePassed =
@@ -183,8 +187,10 @@ class FootballValueService {
           // PHÖNIX-Tipp richtet sich nach Modell/Stabilität, wird aber nur
           // mit einer plausiblen Vollzeitquote freigegeben. Damit kann z. B.
           // eine 16.00 niemals als Standard-Tipp erscheinen.
-          'showPhoenixTip':
-              hasRequiredData && recommendationOddsPassed && marketGuardPassed,
+          // Der PHÖNIX-Tipp ist die Modellaussage und darf nicht verschwinden,
+          // wenn eine Quote fehlt oder vom Markt-Guard abgelehnt wird. Nur
+          // `showValueTip` bedeutet eine tatsächlich geprüfte Wettfreigabe.
+          'showPhoenixTip': true,
           'showValueTip': isValueTip,
         },
       };
@@ -311,9 +317,8 @@ class FootballValueService {
     // abweichende Quote liefern. Sie darf nicht als angebliche "beste Quote"
     // in der App landen. Der höchste Wert innerhalb von 12 % des Marktmedians
     // bleibt sichtbar, echte Ausreißer werden verworfen.
-    final plausible = found
-        .where((odd) => odd <= median * 1.12)
-        .toList(growable: false);
+    final plausible =
+        found.where((odd) => odd <= median * 1.12).toList(growable: false);
     final best = plausible.isEmpty ? median : plausible.last;
 
     return _OddsSummary(
@@ -554,9 +559,11 @@ class FootballValueService {
   bool _isMatchWinnerSelection(String value, {required String outcome}) {
     final normalized = value.trim();
     return switch (outcome) {
-      'home' => const {'home', 'home team', 'home win', '1'}.contains(normalized),
+      'home' =>
+        const {'home', 'home team', 'home win', '1'}.contains(normalized),
       'draw' => const {'draw', 'x'}.contains(normalized),
-      'away' => const {'away', 'away team', 'away win', '2'}.contains(normalized),
+      'away' =>
+        const {'away', 'away team', 'away win', '2'}.contains(normalized),
       _ => false,
     };
   }
@@ -570,7 +577,9 @@ class FootballValueService {
     final normalized = value.toLowerCase().trim();
     return home
         ? normalized == 'home' || normalized == 'home team' || normalized == '1'
-        : normalized == 'away' || normalized == 'away team' || normalized == '2';
+        : normalized == 'away' ||
+            normalized == 'away team' ||
+            normalized == '2';
   }
 
   bool _isExactGoalsOverUnderMarket(String value) =>

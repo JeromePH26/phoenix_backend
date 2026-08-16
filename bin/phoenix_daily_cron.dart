@@ -16,8 +16,7 @@ Future<void> main() async {
   // Nur der Lauf, der tatsächlich in die Berliner 00-Uhr-Stunde fällt,
   // führt den Tagesscan aus. Der andere beendet sich sofort.
   final forceRun =
-      Platform.environment['PHOENIX_CRON_FORCE_RUN']?.toLowerCase() ==
-          'true';
+      Platform.environment['PHOENIX_CRON_FORCE_RUN']?.toLowerCase() == 'true';
 
   if (!forceRun && berlinNow.hour != 0) {
     stdout.writeln(
@@ -36,26 +35,29 @@ Future<void> main() async {
     berlinNow.month,
     berlinNow.day,
   );
-  final yesterday = today.subtract(const Duration(days: 1));
-
   final client = HttpClient()
     ..connectionTimeout = const Duration(seconds: 30)
     ..idleTimeout = const Duration(seconds: 30);
 
   try {
-    // Zuerst werden offene Tipps des Vortages abgerechnet.
-    // Ein Fehler dabei darf den heutigen Scan nicht stoppen.
-    try {
-      await _settleDate(
-        client: client,
-        config: config,
-        date: yesterday,
-      );
-    } catch (error, stackTrace) {
-      stderr.writeln(
-        '[PHOENIX CRON] Ergebnisabrechnung übersprungen: $error',
-      );
-      stderr.writeln(stackTrace);
+    // Ergebnisse können verspätet korrigiert werden und ältere DNB-Snapshots
+    // mussten bisher manuell nachgerechnet werden. Deshalb wird ein kurzer,
+    // API-schonender Rückblick automatisch abgeglichen statt nur gestern.
+    for (var offset = 1; offset <= 14; offset++) {
+      final settlementDate = today.subtract(Duration(days: offset));
+      try {
+        await _settleDate(
+          client: client,
+          config: config,
+          date: settlementDate,
+        );
+      } catch (error, stackTrace) {
+        stderr.writeln(
+          '[PHOENIX CRON] Ergebnisabrechnung für '
+          '${_day(settlementDate)} übersprungen: $error',
+        );
+        stderr.writeln(stackTrace);
+      }
     }
 
     // Danach wird der komplette heutige PHÖNIX-Lauf gestartet.
@@ -176,8 +178,7 @@ Future<void> _waitForCompletion({
     );
 
     final status = response['status']?.toString().toLowerCase() ?? '';
-    final step =
-        response['current_step']?.toString() ??
+    final step = response['current_step']?.toString() ??
         response['currentStep']?.toString() ??
         '';
     final processed = _integer(response['processed']) ?? 0;
@@ -196,9 +197,7 @@ Future<void> _waitForCompletion({
       return;
     }
 
-    if (status == 'failed' ||
-        status == 'error' ||
-        status == 'interrupted') {
+    if (status == 'failed' || status == 'error' || status == 'interrupted') {
       throw StateError(
         'Tagesscan $jobId wurde mit Status "$status" beendet: '
         '${response['error'] ?? response['last_error'] ?? response}',
@@ -230,8 +229,8 @@ Future<Map<String, dynamic>> _requestJson({
     ..set(HttpHeaders.userAgentHeader, 'PHOENIX-Railway-Cron/1.0');
 
   final response = await request.close().timeout(
-    const Duration(minutes: 2),
-  );
+        const Duration(minutes: 2),
+      );
   final body = await utf8.decoder.bind(response).join();
 
   dynamic decoded;
@@ -285,13 +284,11 @@ class _CronConfig {
 
   factory _CronConfig.fromEnvironment() {
     final environment = Platform.environment;
-    final backendUrl = (
-      environment['PHOENIX_BACKEND_URL'] ??
-      'https://energetic-peace-production-b6f2.up.railway.app'
-    ).replaceAll(RegExp(r'/+$'), '');
+    final backendUrl = (environment['PHOENIX_BACKEND_URL'] ??
+            'https://energetic-peace-production-b6f2.up.railway.app')
+        .replaceAll(RegExp(r'/+$'), '');
 
-    final adminToken =
-        environment['PHOENIX_ADMIN_TOKEN']?.trim() ?? '';
+    final adminToken = environment['PHOENIX_ADMIN_TOKEN']?.trim() ?? '';
     if (adminToken.isEmpty) {
       throw StateError('PHOENIX_ADMIN_TOKEN fehlt im Cron-Service.');
     }
@@ -316,8 +313,7 @@ class _CronConfig {
         seconds: integer('PHOENIX_CRON_POLL_SECONDS', 30).clamp(10, 300),
       ),
       maximumRuntime: Duration(
-        minutes:
-            integer('PHOENIX_CRON_MAX_MINUTES', 90).clamp(10, 180),
+        minutes: integer('PHOENIX_CRON_MAX_MINUTES', 90).clamp(10, 180),
       ),
     );
   }
@@ -345,8 +341,7 @@ DateTime _toBerlin(DateTime utc) {
     hour: 1,
   );
 
-  final isSummerTime =
-      !utc.isBefore(summerStart) && utc.isBefore(summerEnd);
+  final isSummerTime = !utc.isBefore(summerStart) && utc.isBefore(summerEnd);
   return utc.add(Duration(hours: isSummerTime ? 2 : 1));
 }
 

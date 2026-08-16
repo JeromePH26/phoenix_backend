@@ -14,6 +14,17 @@ class FootballDailyComboService {
     required Iterable<Map<String, Object?>> analyses,
   }) async {
     final candidates = <_ComboCandidate>[];
+    const eligibleMarketKeys = <String>{
+      'homeWin',
+      'draw',
+      'awayWin',
+      'over25',
+      'under25',
+      'bttsYes',
+      'bttsNo',
+      'homeOver15',
+      'awayOver15',
+    };
     for (final analysis in analyses) {
       final selection = _map(analysis['selection']);
       final matchId = _string(analysis['fixtureId']);
@@ -36,13 +47,12 @@ class FootballDailyComboService {
         final usesModelOdds = bookmakerOdds <= 1;
         final odds = usesModelOdds ? fairOdds : bookmakerOdds;
         if (key.isEmpty ||
+            !eligibleMarketKeys.contains(key) ||
             odds < 1.20 ||
             odds > 1.85 ||
-            probability < .56 ||
+            probability < .68 ||
             probability > .86 ||
-            confidence < 58 ||
-            key == 'over05' ||
-            key.toLowerCase().startsWith('dnb')) {
+            confidence < 60) {
           continue;
         }
         candidates.add(

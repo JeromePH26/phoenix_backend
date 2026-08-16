@@ -5,7 +5,7 @@ class FootballMarketSelectionService {
 
   final PhoenixDatabase database;
 
-  static const modelVersion = 'market_selection_v7_meaningful_markets';
+  static const modelVersion = 'market_selection_v8_recommendation_balance';
 
   Future<Map<String, Object?>> select({
     required int phaseTwoScanRunId,
@@ -72,6 +72,18 @@ class FootballMarketSelectionService {
           probability: probabilities['bttsNo'],
           fairOdds: fairOdds['bttsNo'],
         ),
+        _candidate(
+          key: 'homeOver15',
+          label: 'Heimteam über 1,5 Tore',
+          probability: probabilities['homeOver15'],
+          fairOdds: fairOdds['homeOver15'],
+        ),
+        _candidate(
+          key: 'awayOver15',
+          label: 'Auswärtsteam über 1,5 Tore',
+          probability: probabilities['awayOver15'],
+          fairOdds: fairOdds['awayOver15'],
+        ),
       ];
 
       const extendedMarkets = <String, String>{
@@ -106,7 +118,10 @@ class FootballMarketSelectionService {
       // Extrem sichere Linien wie Über 0,5 oder Unter 5,5 haben fast immer
       // unspielbar kleine Quoten. Sie bleiben in der Marktübersicht, dürfen
       // aber nicht automatisch jeden sinnvolleren Pick verdrängen.
-      const topTipKeys = <String>{
+      // Der Phoenix-Top-Tipp soll eine echte Spielthese sein. Absicherungen
+      // (DNB, doppelte Chance) und das sehr breite Unter 3,5 bleiben sichtbar,
+      // dürfen aber keinen Top-Tipp verdrängen.
+      const primaryTipKeys = <String>{
         'homeWin',
         'draw',
         'awayWin',
@@ -114,6 +129,10 @@ class FootballMarketSelectionService {
         'under25',
         'bttsYes',
         'bttsNo',
+        'homeOver15',
+        'awayOver15',
+      };
+      const reserveTipKeys = <String>{
         'dnbHome',
         'dnbAway',
         'dc1x',
@@ -133,7 +152,7 @@ class FootballMarketSelectionService {
             probability <
                 _asProbability(
                     probabilities['awayWin'] ?? probabilities['away']);
-        return topTipKeys.contains(key) &&
+        return primaryTipKeys.contains(key) &&
             !isContradictoryDraw &&
             probability >= minimumProbabilityDecimal.clamp(0.0, 1.0) &&
             fair >= 1.20;
@@ -148,7 +167,7 @@ class FootballMarketSelectionService {
             probability <
                 _asProbability(
                     probabilities['awayWin'] ?? probabilities['away']);
-        return topTipKeys.contains(key) && !isContradictoryDraw;
+        return primaryTipKeys.contains(key) && !isContradictoryDraw;
       }).toList(growable: false);
       final ranked = List<Map<String, Object?>>.from(
         selectable.isNotEmpty
@@ -157,12 +176,10 @@ class FootballMarketSelectionService {
                 ? fallbackCore
                 : candidates.where((candidate) {
                     final key = _string(candidate['key']);
-                    return !const <String>{
-                      'over45',
-                      'under45',
-                      'over55',
-                      'under55',
-                    }.contains(key);
+                    // Nur wenn die Kernmärkte vollständig fehlen, greifen wir
+                    // auf eine Absicherung zurück. Hohe Torlinien und Kombis
+                    // werden niemals als Notlösung veröffentlicht.
+                    return reserveTipKeys.contains(key);
                   }).toList(growable: false),
       )..sort((a, b) {
           final scoreA = _selectionScore(a);
@@ -172,6 +189,12 @@ class FootballMarketSelectionService {
           return (_number(b['probability']) ?? 0)
               .compareTo(_number(a['probability']) ?? 0);
         });
+
+      if (ranked.isEmpty) {
+        // Kein Markt mit verwertbarer Wahrscheinlichkeit: keine künstliche
+        // Empfehlung erzeugen und den Scan robust fortsetzen.
+        continue;
+      }
 
       final best = ranked.first;
       final second = ranked.length > 1 ? ranked[1] : ranked.first;
@@ -335,6 +358,8 @@ class FootballMarketSelectionService {
       'under25',
       'bttsYes',
       'bttsNo',
+      'homeOver15',
+      'awayOver15',
       'dnbHome',
       'dnbAway',
     }.contains(key)) {

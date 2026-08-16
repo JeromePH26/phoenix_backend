@@ -2,6 +2,7 @@ import 'dart:io';
 
 import '../database/database.dart';
 import 'football_engine_input_service.dart';
+import 'football_daily_combo_service.dart';
 import 'football_market_selection_service.dart';
 import 'football_phase_one_scan_service.dart';
 import 'football_phase_two_scan_service.dart';
@@ -169,6 +170,19 @@ class FootballDailyPipelineService {
         date: date,
       );
 
+      await _step(jobId, 'daily_combo');
+      final rawPublished = publishResult['publishedAnalyses'];
+      final publishedAnalyses = rawPublished is List
+          ? rawPublished.map(_map).toList(growable: false)
+          : const <Map<String, Object?>>[];
+      final dailyCombo = await FootballDailyComboService(
+        database: database,
+      ).buildAndSave(date: date, analyses: publishedAnalyses);
+      stdout.writeln(
+        '[PHOENIX PIPELINE] Tages-Kombi: '
+        '${dailyCombo == null ? 'keine geeigneten zwei Tipps' : 'erstellt'}',
+      );
+
       await _finish(
         jobId: jobId,
         step: 'completed',
@@ -199,6 +213,7 @@ class FootballDailyPipelineService {
 
     var processed = 0;
     var published = 0;
+    final publishedAnalyses = <Map<String, Object?>>[];
 
     for (final row in rows) {
       processed++;
@@ -333,14 +348,13 @@ class FootballDailyPipelineService {
       );
 
       published++;
+      publishedAnalyses.add(analysisPayload);
     }
 
     return {
       'processed': processed,
       'published': published,
-      // Kombinations-Tipps sind bewusst deaktiviert. PHÖNIX veröffentlicht
-      // nur einzelne, nachvollziehbare Märkte.
-      'dailyComboCreated': false,
+      'publishedAnalyses': publishedAnalyses,
     };
   }
 

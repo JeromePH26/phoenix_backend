@@ -36,10 +36,19 @@ class FootballAssetService {
       return Response.badRequest(body: 'Ungültige Bild-ID.');
     }
 
-    final cached = await database.footballAsset(
-      type: normalizedType,
-      id: normalizedId,
-    );
+    // Die Anzeige eines Wappens darf nicht ausfallen, nur weil die Cache-Tabelle
+    // während eines Deployments noch nicht migriert wurde. In diesem seltenen
+    // Fall liefern wir das geprüfte Original aus und versuchen beim nächsten
+    // Abruf erneut, es persistent zu speichern.
+    Map<String, Object?>? cached;
+    try {
+      cached = await database.footballAsset(
+        type: normalizedType,
+        id: normalizedId,
+      );
+    } catch (_) {
+      cached = null;
+    }
     if (cached != null) {
       final encoded = cached['content_base64']?.toString() ?? '';
       final mimeType = cached['mime_type']?.toString() ?? '';
@@ -73,13 +82,18 @@ class FootballAssetService {
       return Response.badRequest(body: 'Ungültige oder zu große Bilddatei.');
     }
 
-    await database.saveFootballAsset(
-      type: normalizedType,
-      id: normalizedId,
-      sourceUrl: source,
-      mimeType: mimeType,
-      bytes: bytes,
-    );
+    try {
+      await database.saveFootballAsset(
+        type: normalizedType,
+        id: normalizedId,
+        sourceUrl: source,
+        mimeType: mimeType,
+        bytes: bytes,
+      );
+    } catch (_) {
+      // Das Bild ist valide und kann angezeigt werden. Der persistente Cache
+      // wird nach einer erfolgreichen Migration automatisch nachgefüllt.
+    }
     return _imageResponse(bytes, mimeType);
   }
 

@@ -49,7 +49,11 @@ class FootballResultSettlementService {
           match['status']?.toString().toUpperCase() ??
           '';
 
-      if (!_isFinished(shortStatus)) {
+      // Abgesagte oder abgebrochene Partien dürfen nie dauerhaft als offen
+      // erscheinen. Verschobene Spiele (PST) bleiben dagegen pending, weil sie
+      // später mit derselben Tipp-ID noch regulär stattfinden können.
+      final isVoidedFixture = _isVoided(shortStatus);
+      if (!isVoidedFixture && !_isFinished(shortStatus)) {
         skipped++;
         continue;
       }
@@ -70,12 +74,14 @@ class FootballResultSettlementService {
           payload['marketLabel']?.toString() ??
           '';
 
-      final resultStatus = gradeMarket(
-        marketKey: marketKey,
-        marketLabel: marketLabel,
-        homeScore: homeScore,
-        awayScore: awayScore,
-      );
+      final resultStatus = isVoidedFixture
+          ? 'voided'
+          : gradeMarket(
+              marketKey: marketKey,
+              marketLabel: marketLabel,
+              homeScore: homeScore,
+              awayScore: awayScore,
+            );
 
       if (resultStatus == 'unsupported') {
         skipped++;
@@ -245,6 +251,10 @@ class FootballResultSettlementService {
         return homeScore > awayScore && total > 1.5 ? 'won' : 'lost';
       case 'comboawayover15':
         return awayScore > homeScore && total > 1.5 ? 'won' : 'lost';
+      case 'homeover15':
+        return homeScore >= 2 ? 'won' : 'lost';
+      case 'awayover15':
+        return awayScore >= 2 ? 'won' : 'lost';
       // Nur für bereits gespeicherte historische Tipps. Neue Scans erzeugen
       // keine asiatischen Handicaps mehr, ihre Auswertung darf jedoch nicht
       // verfälscht oder offen gelassen werden.
@@ -288,6 +298,33 @@ class FootballResultSettlementService {
             : goalDifference == 0
                 ? 'push'
                 : 'lost';
+    }
+
+    // Manche ältere Snapshots speichern nur das sichtbare Label statt des
+    // Schlüssels. Ohne diese Variante blieb Draw No Bet trotz Endstand offen.
+    if (_containsAny(key, [
+      'draw no bet heim',
+      'draw no bet home',
+      'dnb heim',
+      'dnb home',
+    ])) {
+      return goalDifference > 0
+          ? 'won'
+          : goalDifference == 0
+              ? 'push'
+              : 'lost';
+    }
+    if (_containsAny(key, [
+      'draw no bet auswarts',
+      'draw no bet away',
+      'dnb auswarts',
+      'dnb away',
+    ])) {
+      return goalDifference < 0
+          ? 'won'
+          : goalDifference == 0
+              ? 'push'
+              : 'lost';
     }
 
     if (_containsAny(key, ['home_win', 'home win', 'heimsieg', '1x2_home'])) {
@@ -399,6 +436,8 @@ class FootballResultSettlementService {
 
   bool _isFinished(String status) =>
       const {'FT', 'AET', 'PEN', 'AWD', 'WO'}.contains(status);
+
+  bool _isVoided(String status) => const {'CANC', 'ABD'}.contains(status);
 
   Map<String, Object?> _map(Object? value) =>
       value is Map ? Map<String, Object?>.from(value) : <String, Object?>{};

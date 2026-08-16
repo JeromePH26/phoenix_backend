@@ -2498,8 +2498,14 @@ class PhoenixDatabase {
       Sql.named('''
         SELECT phase_two_scan_run_id, fixture_id, prediction_date, kickoff,
                market_key, market_label, model_probability, fair_odds,
-               market_odds, data_quality, confidence, result_status,
+               market_odds, assigned_units, data_quality, confidence, result_status,
                home_score, away_score, profit_units, settled_at, created_at,
+                 COALESCE((payload #>> '{selection,value,isValueTip}')::BOOLEAN, FALSE)
+                   AS is_value_tip,
+                 COALESCE(
+                   NULLIF(payload #>> '{selection,value,valuePercent}', '')::DOUBLE PRECISION,
+                   0
+                 ) AS value_percent,
                COALESCE(payload->>'homeTeam', payload #>> '{selection,homeTeam}', '')
                  AS home_team,
                COALESCE(payload->>'awayTeam', payload #>> '{selection,awayTeam}', '')
