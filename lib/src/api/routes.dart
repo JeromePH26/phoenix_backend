@@ -6,8 +6,10 @@ import 'package:shelf_router/shelf_router.dart';
 import 'package:postgres/postgres.dart';
 
 import '../config/app_config.dart';
+import '../config/model_lab_config.dart';
 import '../database/database.dart';
 import '../http/json_response.dart';
+import 'model_lab_routes.dart';
 import '../services/football_phase_one_scan_service.dart';
 import '../services/football_phase_two_scan_service.dart';
 import '../services/football_engine_input_service.dart';
@@ -32,16 +34,32 @@ class ApiRoutes {
     required this.football,
     required this.tennis,
     required this.news,
-  });
+    ModelLabConfig? modelLabConfig,
+  }) : modelLabConfig = modelLabConfig ?? ModelLabConfig.fromEnvironment();
 
   final AppConfig config;
   final PhoenixDatabase database;
   final FootballService football;
   final TennisService tennis;
   final FootballNewsService news;
+  final ModelLabConfig modelLabConfig;
 
   Router get router {
     final router = Router();
+
+    // PHÖNIX MODEL LAB (Self-Learning Engine V0, Section 80): eigene
+    // Admin-Routen-Gruppe, nutzt dieselbe Admin-Auth wie der Rest dieser
+    // Datei. Vor allen anderen Routen eingehängt, damit `/api/admin/
+    // model-lab/...` nicht von einer generischen `/api/admin/...`-Route
+    // verschluckt wird.
+    router.mount(
+      '/api/admin/model-lab/',
+      ModelLabRoutes(
+        config: config,
+        modelLabConfig: modelLabConfig,
+        database: database,
+      ).router.call,
+    );
 
     router.get('/health', (Request request) async {
       var databaseOk = false;

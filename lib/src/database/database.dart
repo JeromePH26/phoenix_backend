@@ -814,11 +814,264 @@ class PhoenixDatabase {
       ON historical_elo_ratings (club, rating_date DESC)
     ''');
 
+    await _migrateModelLab(db);
+
     await db.execute('''
       INSERT INTO app_meta (key, value)
-      VALUES ('schema_version', '7')
+      VALUES ('schema_version', '8')
       ON CONFLICT (key) DO UPDATE
       SET value = EXCLUDED.value, updated_at = NOW()
+    ''');
+  }
+
+  /// PHÖNIX MODEL LAB (Self-Learning Engine V0). Rein additive Tabellen für
+  /// Model Registry, Learning Runs, Evaluationen, Shadow Predictions,
+  /// Monthly Reviews und Audit Log. Verändert oder löscht keine bestehenden
+  /// PHÖNIX-Produktionsdaten (Section 87).
+  Future<void> _migrateModelLab(Connection db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS phoenix_model_versions (
+        id BIGSERIAL PRIMARY KEY,
+        readable_version TEXT NOT NULL,
+        parent_model_id BIGINT REFERENCES phoenix_model_versions(id),
+        generation INTEGER NOT NULL DEFAULT 1,
+        league_id TEXT REFERENCES football_leagues(league_id),
+        market TEXT NOT NULL,
+        model_type TEXT NOT NULL DEFAULT 'weight_variant',
+        feature_config JSONB NOT NULL DEFAULT '{}',
+        weights JSONB NOT NULL DEFAULT '{}',
+        training_start TIMESTAMPTZ,
+        training_end TIMESTAMPTZ,
+        training_count INTEGER NOT NULL DEFAULT 0,
+        validation_count INTEGER NOT NULL DEFAULT 0,
+        holdout_count INTEGER NOT NULL DEFAULT 0,
+        shadow_count INTEGER NOT NULL DEFAULT 0,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        status TEXT NOT NULL DEFAULT 'challenger',
+        champion_since TIMESTAMPTZ,
+        last_promotion_at TIMESTAMPTZ,
+        minimum_observation_period_days INTEGER NOT NULL DEFAULT 14,
+        previous_champion_id BIGINT REFERENCES phoenix_model_versions(id),
+        rollback_model_id BIGINT REFERENCES phoenix_model_versions(id),
+        config_hash TEXT NOT NULL,
+        code_schema_version TEXT NOT NULL,
+        evaluation_summary JSONB NOT NULL DEFAULT '{}',
+        CHECK (model_type IN ('global_baseline', 'weight_variant')),
+        CHECK (status IN ('champion', 'challenger', 'retired', 'rejected'))
+      )
+    ''');
+
+    // Genau ein aktiver Champion je Liga (NULL = Global) x Markt.
+    await db.execute('''
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_phoenix_model_versions_one_champion
+      ON phoenix_model_versions (market, COALESCE(league_id, '__GLOBAL__'))
+      WHERE status = 'champion'
+    ''');
+    await db.execute('''
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_phoenix_model_versions_config_hash
+      ON phoenix_model_versions (market, COALESCE(league_id, '__GLOBAL__'), config_hash)
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_phoenix_model_versions_scope
+      ON phoenix_model_versions (league_id, market, status)
+    ''');
+
+    // Append-only Zuweisungs-Historie (Section 59: phoenix_model_assignments).
+    // Die aktuell gültige Zuweisung ergibt sich aus
+    // phoenix_model_versions.status = 'champion' (Single Source of Truth,
+    // siehe eindeutigem Index oben); diese Tabelle protokolliert jede
+    // Änderung zusätzlich chronologisch und auditierbar.
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS phoenix_model_assignments (
+        id BIGSERIAL PRIMARY KEY,
+        league_id TEXT,
+        market TEXT NOT NULL,
+        model_version_id BIGINT NOT NULL REFERENCES phoenix_model_versions(id),
+        is_global BOOLEAN NOT NULL DEFAULT FALSE,
+        assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_phoenix_model_assignments_scope
+      ON phoenix_model_assignments (market, league_id, assigned_at DESC)
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS phoenix_learning_runs (
+        id BIGSERIAL PRIMARY KEY,
+        started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        completed_at TIMESTAMPTZ,
+        status TEXT NOT NULL DEFAULT 'running',
+        trigger_type TEXT NOT NULL DEFAULT 'manual',
+        current_step TEXT NOT NULL DEFAULT 'created',
+        leagues_processed INTEGER NOT NULL DEFAULT 0,
+        markets_processed INTEGER NOT NULL DEFAULT 0,
+        eligible_matches INTEGER NOT NULL DEFAULT 0,
+        excluded_matches INTEGER NOT NULL DEFAULT 0,
+        exclusions_by_reason JSONB NOT NULL DEFAULT '{}',
+        challengers_created INTEGER NOT NULL DEFAULT 0,
+        errors JSONB NOT NULL DEFAULT '[]',
+        summary JSONB NOT NULL DEFAULT '{}',
+        CHECK (status IN ('running', 'completed', 'failed')),
+        CHECK (trigger_type IN ('scheduled', 'manual'))
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_phoenix_learning_runs_started
+      ON phoenix_learning_runs (started_at DESC)
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS phoenix_learning_candidates (
+        id BIGSERIAL PRIMARY KEY,
+        learning_run_id BIGINT NOT NULL REFERENCES phoenix_learning_runs(id),
+        model_version_id BIGINT NOT NULL REFERENCES phoenix_model_versions(id),
+        league_id TEXT,
+        market TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'created',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_phoenix_learning_candidates_run
+      ON phoenix_learning_candidates (learning_run_id)
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS phoenix_model_evaluations (
+        id BIGSERIAL PRIMARY KEY,
+        model_version_id BIGINT NOT NULL REFERENCES phoenix_model_versions(id),
+        compared_against_model_id BIGINT REFERENCES phoenix_model_versions(id),
+        league_id TEXT,
+        market TEXT NOT NULL,
+        evaluation_type TEXT NOT NULL,
+        match_scope TEXT NOT NULL DEFAULT 'all',
+        sample_size INTEGER NOT NULL DEFAULT 0,
+        brier_score DOUBLE PRECISION,
+        log_loss DOUBLE PRECISION,
+        calibration JSONB NOT NULL DEFAULT '[]',
+        accuracy DOUBLE PRECISION,
+        roi DOUBLE PRECISION,
+        avg_probability DOUBLE PRECISION,
+        uncertainty JSONB NOT NULL DEFAULT '{}',
+        period_start TIMESTAMPTZ,
+        period_end TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CHECK (evaluation_type IN ('walk_forward', 'holdout', 'shadow', 'monthly_review')),
+        CHECK (match_scope IN ('all', 'clean'))
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_phoenix_model_evaluations_model
+      ON phoenix_model_evaluations (model_version_id, evaluation_type)
+    ''');
+
+    // Storage-bewusst (Section 82): Shadow Predictions referenzieren den
+    // bereits vorhandenen Pre-Match-Snapshot über phase_two_scan_run_id +
+    // fixture_id, statt den kompletten JSON-Payload zu duplizieren.
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS phoenix_shadow_predictions (
+        id BIGSERIAL PRIMARY KEY,
+        model_version_id BIGINT NOT NULL REFERENCES phoenix_model_versions(id),
+        fixture_id TEXT NOT NULL,
+        league_id TEXT NOT NULL,
+        market TEXT NOT NULL,
+        phase_two_scan_run_id BIGINT,
+        predicted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        kickoff TIMESTAMPTZ,
+        predicted_before_kickoff BOOLEAN NOT NULL DEFAULT TRUE,
+        class_labels JSONB NOT NULL,
+        class_probabilities JSONB NOT NULL,
+        settled BOOLEAN NOT NULL DEFAULT FALSE,
+        outcome_index INTEGER,
+        brier_score DOUBLE PRECISION,
+        log_loss DOUBLE PRECISION,
+        settled_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (model_version_id, fixture_id, market)
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_phoenix_shadow_predictions_fixture
+      ON phoenix_shadow_predictions (fixture_id, market)
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_phoenix_shadow_predictions_settlement
+      ON phoenix_shadow_predictions (settled, kickoff)
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS phoenix_monthly_reviews (
+        id BIGSERIAL PRIMARY KEY,
+        review_year INTEGER NOT NULL,
+        review_month INTEGER NOT NULL,
+        league_id TEXT,
+        market TEXT NOT NULL,
+        champion_model_id BIGINT REFERENCES phoenix_model_versions(id),
+        challenger_model_id BIGINT REFERENCES phoenix_model_versions(id),
+        same_match_sample INTEGER NOT NULL DEFAULT 0,
+        metrics JSONB NOT NULL DEFAULT '{}',
+        uncertainty JSONB NOT NULL DEFAULT '{}',
+        recommendation TEXT NOT NULL,
+        reason TEXT NOT NULL DEFAULT '',
+        reviewed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        status TEXT NOT NULL DEFAULT 'completed'
+      )
+    ''');
+    // Section 50: Idempotenz - ein Review pro Jahr/Monat/Liga/Markt.
+    await db.execute('''
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_phoenix_monthly_reviews_period
+      ON phoenix_monthly_reviews (
+        review_year, review_month, market, COALESCE(league_id, '__GLOBAL__')
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS phoenix_model_audit_log (
+        id BIGSERIAL PRIMARY KEY,
+        occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        action TEXT NOT NULL,
+        actor TEXT NOT NULL DEFAULT 'system',
+        model_version_id BIGINT,
+        league_id TEXT,
+        market TEXT,
+        learning_run_id BIGINT,
+        details JSONB NOT NULL DEFAULT '{}'
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_phoenix_model_audit_log_time
+      ON phoenix_model_audit_log (occurred_at DESC)
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS phoenix_match_learning_flags (
+        id BIGSERIAL PRIMARY KEY,
+        fixture_id TEXT NOT NULL,
+        league_id TEXT NOT NULL,
+        market TEXT NOT NULL,
+        eligible BOOLEAN NOT NULL,
+        exclusion_reason TEXT,
+        data_quality INTEGER,
+        snapshot_timestamp TIMESTAMPTZ,
+        kickoff TIMESTAMPTZ,
+        checked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (fixture_id, market)
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_phoenix_match_learning_flags_scope
+      ON phoenix_match_learning_flags (league_id, market, eligible)
+    ''');
+
+    // Section 64: einfaches DB-seitiges Advisory-Lock, verhindert parallele
+    // Learning Runs / Monthly Reviews / Promotions ohne externe Infrastruktur.
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS phoenix_model_lab_locks (
+        lock_name TEXT PRIMARY KEY,
+        locked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        locked_by TEXT NOT NULL DEFAULT ''
+      )
     ''');
   }
 
@@ -3381,6 +3634,919 @@ class PhoenixDatabase {
       'created_at': row['created_at']?.toString(),
       'completed_at': row['completed_at']?.toString(),
     };
+  }
+
+  // ===========================================================================
+  // PHÖNIX MODEL LAB (Self-Learning Engine V0)
+  // ===========================================================================
+
+  static const List<String> modelLabFinishedMatchStatuses = [
+    'FT',
+    'AET',
+    'PEN',
+    'AWD',
+    'WO',
+  ];
+
+  /// Section 19/21: Leakage-sicherer Rohdatensatz für das Learning-System -
+  /// ein Datensatz je Fixture (der letzte VOR dem Kickoff gespeicherte
+  /// Pre-Match-Snapshot), nur für whitelisted Ligen, nur für abgeschlossene
+  /// Matches mit bekanntem Endstand. Das Outcome (home_goals/away_goals)
+  /// stammt ausschließlich aus dem NACH Matchende befüllten football_matches
+  /// - niemals aus denselben Feldern, die als Pre-Match-Feature dienen.
+  /// `football_analysis_history` wird bewusst NICHT als Quelle verwendet:
+  /// dort steht nur der EINE ausgewählte Top-Tipp-Markt je Fixture, während
+  /// football_engine_inputs + football_matches für JEDES Fixture alle drei
+  /// Model-Lab-Märkte (1X2/O-U 2.5/BTTS) direkt aus dem echten Endstand
+  /// ableiten lassen - deutlich vollständiger und ohne die Grading-Textlogik
+  /// der Tipp-Abrechnung nachbauen zu müssen.
+  Future<List<Map<String, Object?>>> modelLabRawDataset({
+    String? leagueId,
+    required int minDataQuality,
+  }) async {
+    final db = await connection();
+    final leagueFilter =
+        leagueId == null ? '' : 'AND ei.league_id = @league_id';
+    final result = await db.execute(
+      Sql.named('''
+        SELECT DISTINCT ON (ei.fixture_id)
+          ei.phase_two_scan_run_id,
+          ei.fixture_id,
+          ei.league_id,
+          ei.data_quality,
+          ei.normalized_input,
+          ei.created_at AS snapshot_created_at,
+          m.kickoff_utc,
+          m.status,
+          m.home_goals,
+          m.away_goals,
+          rc.earliest_red_card_minute
+        FROM football_engine_inputs ei
+        JOIN football_matches m ON m.id = ei.fixture_id
+        JOIN football_leagues fl ON fl.league_id = ei.league_id
+        LEFT JOIN LATERAL (
+          SELECT MIN(NULLIF(payload ->> 'minute', '')::int)
+            AS earliest_red_card_minute
+          FROM football_live_events
+          WHERE fixture_id = ei.fixture_id AND event_type = 'redCard'
+        ) rc ON TRUE
+        WHERE fl.manual_status = 'whitelist'
+          AND m.status = ANY(@finished_statuses)
+          AND m.home_goals IS NOT NULL
+          AND m.away_goals IS NOT NULL
+          AND m.kickoff_utc IS NOT NULL
+          AND ei.created_at < m.kickoff_utc
+          AND ei.data_quality >= @min_data_quality
+          $leagueFilter
+        ORDER BY ei.fixture_id, ei.created_at DESC
+      '''),
+      parameters: {
+        'finished_statuses': modelLabFinishedMatchStatuses,
+        'min_data_quality': minDataQuality,
+        if (leagueId != null) 'league_id': leagueId,
+      },
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  /// Section 23/89: Rohdaten für den Eligibility-Audit (Dry Run). Anders als
+  /// [modelLabRawDataset] filtert diese Abfrage NICHT vor, sondern liefert je
+  /// Fixture (letzter Snapshot vor dem aktuellen Zeitpunkt) alle Felder, die
+  /// der Aufrufer braucht, um jedes Fixture einem exakten Ausschlussgrund
+  /// zuzuordnen (Section 23: Data Quality / Snapshot fehlt / Timestamp
+  /// ungültig / Outcome fehlt / League nicht Whitelist).
+  Future<List<Map<String, Object?>>> modelLabEligibilityAuditRows() async {
+    final db = await connection();
+    final result = await db.execute('''
+      SELECT DISTINCT ON (ei.fixture_id)
+        ei.fixture_id,
+        ei.league_id,
+        ei.data_quality,
+        ei.created_at AS snapshot_created_at,
+        m.kickoff_utc,
+        m.status,
+        m.home_goals,
+        m.away_goals,
+        fl.manual_status
+      FROM football_engine_inputs ei
+      LEFT JOIN football_matches m ON m.id = ei.fixture_id
+      LEFT JOIN football_leagues fl ON fl.league_id = ei.league_id
+      ORDER BY ei.fixture_id, ei.created_at DESC
+    ''');
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  /// Section 33/34: Pre-Match-Snapshots für Fixtures, deren Kickoff noch in
+  /// der Zukunft liegt - Grundlage für Shadow Predictions. Nutzt exakt
+  /// denselben bereits gespeicherten Snapshot wie der Champion (keine
+  /// zusätzlichen API-Football-/KI-Aufrufe).
+  Future<List<Map<String, Object?>>> modelLabUpcomingSnapshots({
+    required int minDataQuality,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT DISTINCT ON (ei.fixture_id)
+          ei.phase_two_scan_run_id,
+          ei.fixture_id,
+          ei.league_id,
+          ei.data_quality,
+          ei.normalized_input,
+          ei.created_at AS snapshot_created_at,
+          m.kickoff_utc
+        FROM football_engine_inputs ei
+        JOIN football_matches m ON m.id = ei.fixture_id
+        JOIN football_leagues fl ON fl.league_id = ei.league_id
+        WHERE fl.manual_status = 'whitelist'
+          AND m.kickoff_utc IS NOT NULL
+          AND m.kickoff_utc > NOW()
+          AND ei.created_at < m.kickoff_utc
+          AND ei.data_quality >= @min_data_quality
+        ORDER BY ei.fixture_id, ei.created_at DESC
+      '''),
+      parameters: {'min_data_quality': minDataQuality},
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  /// Alle für das Model Lab whitelisted Ligen mit Basisdaten (Section 3/90).
+  Future<List<Map<String, Object?>>> modelLabWhitelistedLeagues() async {
+    final db = await connection();
+    final result = await db.execute('''
+      SELECT league_id, league_name, country, gender, competition_level,
+             total_samples, successful_full_analyses
+      FROM football_leagues
+      WHERE manual_status = 'whitelist'
+      ORDER BY league_name
+    ''');
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  Future<int> insertModelVersion({
+    required String readableVersion,
+    int? parentModelId,
+    required int generation,
+    String? leagueId,
+    required String market,
+    required String modelType,
+    required Map<String, Object?> featureConfig,
+    required Map<String, Object?> weights,
+    DateTime? trainingStart,
+    DateTime? trainingEnd,
+    required int trainingCount,
+    required int validationCount,
+    required int holdoutCount,
+    required int shadowCount,
+    required String status,
+    required String configHash,
+    required String codeSchemaVersion,
+    Map<String, Object?> evaluationSummary = const {},
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        INSERT INTO phoenix_model_versions (
+          readable_version, parent_model_id, generation, league_id, market,
+          model_type, feature_config, weights, training_start, training_end,
+          training_count, validation_count, holdout_count, shadow_count,
+          status, config_hash, code_schema_version, evaluation_summary
+        ) VALUES (
+          @readable_version, @parent_model_id, @generation, @league_id, @market,
+          @model_type, CAST(@feature_config AS JSONB), CAST(@weights AS JSONB),
+          @training_start, @training_end,
+          @training_count, @validation_count, @holdout_count, @shadow_count,
+          @status, @config_hash, @code_schema_version,
+          CAST(@evaluation_summary AS JSONB)
+        )
+        ON CONFLICT (market, COALESCE(league_id, '__GLOBAL__'), config_hash)
+        DO UPDATE SET readable_version = phoenix_model_versions.readable_version
+        RETURNING id
+      '''),
+      parameters: {
+        'readable_version': readableVersion,
+        'parent_model_id': parentModelId,
+        'generation': generation,
+        'league_id': leagueId,
+        'market': market,
+        'model_type': modelType,
+        'feature_config': jsonEncode(featureConfig),
+        'weights': jsonEncode(weights),
+        'training_start': trainingStart?.toUtc().toIso8601String(),
+        'training_end': trainingEnd?.toUtc().toIso8601String(),
+        'training_count': trainingCount,
+        'validation_count': validationCount,
+        'holdout_count': holdoutCount,
+        'shadow_count': shadowCount,
+        'status': status,
+        'config_hash': configHash,
+        'code_schema_version': codeSchemaVersion,
+        'evaluation_summary': jsonEncode(evaluationSummary),
+      },
+    );
+    return result.first[0] as int;
+  }
+
+  Future<Map<String, Object?>?> modelVersion(int id) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('SELECT * FROM phoenix_model_versions WHERE id = @id'),
+      parameters: {'id': id},
+    );
+    if (result.isEmpty) return null;
+    return Map<String, Object?>.from(result.first.toColumnMap());
+  }
+
+  Future<Map<String, Object?>?> globalBaselineModel(String market) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT * FROM phoenix_model_versions
+        WHERE market = @market AND league_id IS NULL
+          AND model_type = 'global_baseline'
+        ORDER BY created_at ASC
+        LIMIT 1
+      '''),
+      parameters: {'market': market},
+    );
+    if (result.isEmpty) return null;
+    return Map<String, Object?>.from(result.first.toColumnMap());
+  }
+
+  Future<Map<String, Object?>?> championModel({
+    String? leagueId,
+    required String market,
+  }) async {
+    final db = await connection();
+    final leagueFilter =
+        leagueId == null ? 'IS NULL' : '= @league_id';
+    final result = await db.execute(
+      Sql.named('''
+        SELECT * FROM phoenix_model_versions
+        WHERE market = @market AND league_id $leagueFilter
+          AND status = 'champion'
+        LIMIT 1
+      '''),
+      parameters: {
+        'market': market,
+        if (leagueId != null) 'league_id': leagueId,
+      },
+    );
+    if (result.isEmpty) return null;
+    return Map<String, Object?>.from(result.first.toColumnMap());
+  }
+
+  Future<List<Map<String, Object?>>> challengerModels({
+    String? leagueId,
+    required String market,
+  }) async {
+    final db = await connection();
+    final leagueFilter =
+        leagueId == null ? 'IS NULL' : '= @league_id';
+    final result = await db.execute(
+      Sql.named('''
+        SELECT * FROM phoenix_model_versions
+        WHERE market = @market AND league_id $leagueFilter
+          AND status = 'challenger'
+        ORDER BY created_at DESC
+      '''),
+      parameters: {
+        'market': market,
+        if (leagueId != null) 'league_id': leagueId,
+      },
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  Future<List<Map<String, Object?>>> allModelVersions({
+    String? status,
+    int limit = 500,
+  }) async {
+    final db = await connection();
+    final statusFilter = status == null ? '' : 'WHERE status = @status';
+    final result = await db.execute(
+      Sql.named('''
+        SELECT * FROM phoenix_model_versions
+        $statusFilter
+        ORDER BY created_at DESC
+        LIMIT @limit
+      '''),
+      parameters: {if (status != null) 'status': status, 'limit': limit},
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  /// Section 53/54: Promotion nur, wenn `PHOENIX_MODEL_PROMOTION_ENABLED`
+  /// serverseitig aktiv ist - der Aufrufer (Route) muss dies bereits vorher
+  /// geprüft haben. Diese Methode selbst führt den atomaren DB-Wechsel aus:
+  /// alter Champion -> 'retired' (bleibt erhalten, Section 57), neuer
+  /// Champion -> 'champion'.
+  Future<void> promoteModel({
+    required int newChampionId,
+    int? previousChampionId,
+  }) async {
+    final db = await connection();
+    await db.runTx((session) async {
+      if (previousChampionId != null) {
+        await session.execute(
+          Sql.named('''
+            UPDATE phoenix_model_versions
+            SET status = 'retired'
+            WHERE id = @id
+          '''),
+          parameters: {'id': previousChampionId},
+        );
+      }
+      await session.execute(
+        Sql.named('''
+          UPDATE phoenix_model_versions
+          SET status = 'champion',
+              champion_since = NOW(),
+              last_promotion_at = NOW(),
+              previous_champion_id = @previous_champion_id
+          WHERE id = @id
+        '''),
+        parameters: {
+          'id': newChampionId,
+          'previous_champion_id': previousChampionId,
+        },
+      );
+    });
+  }
+
+  /// Section 57: Rollback ist ein reiner, atomarer Statuswechsel zurück -
+  /// nichts wird gelöscht, jede historische Prediction behält ihre damalige
+  /// Modellversion (payload/model_version bleiben unverändert).
+  Future<void> rollbackModel({
+    required int currentChampionId,
+    required int rollbackToModelId,
+  }) async {
+    final db = await connection();
+    await db.runTx((session) async {
+      await session.execute(
+        Sql.named('''
+          UPDATE phoenix_model_versions
+          SET status = 'retired', rollback_model_id = @rollback_to
+          WHERE id = @current
+        '''),
+        parameters: {
+          'current': currentChampionId,
+          'rollback_to': rollbackToModelId,
+        },
+      );
+      await session.execute(
+        Sql.named('''
+          UPDATE phoenix_model_versions
+          SET status = 'champion', champion_since = NOW(), last_promotion_at = NOW()
+          WHERE id = @id
+        '''),
+        parameters: {'id': rollbackToModelId},
+      );
+    });
+  }
+
+  Future<void> recordModelAssignment({
+    String? leagueId,
+    required String market,
+    required int modelVersionId,
+    required bool isGlobal,
+  }) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        INSERT INTO phoenix_model_assignments (
+          league_id, market, model_version_id, is_global
+        ) VALUES (@league_id, @market, @model_version_id, @is_global)
+      '''),
+      parameters: {
+        'league_id': leagueId,
+        'market': market,
+        'model_version_id': modelVersionId,
+        'is_global': isGlobal,
+      },
+    );
+  }
+
+  Future<int> createLearningRun({required String triggerType}) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        INSERT INTO phoenix_learning_runs (trigger_type)
+        VALUES (@trigger_type)
+        RETURNING id
+      '''),
+      parameters: {'trigger_type': triggerType},
+    );
+    return result.first[0] as int;
+  }
+
+  Future<void> updateLearningRunStep({
+    required int id,
+    required String currentStep,
+  }) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        UPDATE phoenix_learning_runs SET current_step = @step WHERE id = @id
+      '''),
+      parameters: {'id': id, 'step': currentStep},
+    );
+  }
+
+  Future<void> completeLearningRun({
+    required int id,
+    required String status,
+    required int leaguesProcessed,
+    required int marketsProcessed,
+    required int eligibleMatches,
+    required int excludedMatches,
+    required Map<String, Object?> exclusionsByReason,
+    required int challengersCreated,
+    List<Object?> errors = const [],
+    Map<String, Object?> summary = const {},
+  }) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        UPDATE phoenix_learning_runs SET
+          status = @status,
+          completed_at = NOW(),
+          current_step = 'completed',
+          leagues_processed = @leagues_processed,
+          markets_processed = @markets_processed,
+          eligible_matches = @eligible_matches,
+          excluded_matches = @excluded_matches,
+          exclusions_by_reason = CAST(@exclusions_by_reason AS JSONB),
+          challengers_created = @challengers_created,
+          errors = CAST(@errors AS JSONB),
+          summary = CAST(@summary AS JSONB)
+        WHERE id = @id
+      '''),
+      parameters: {
+        'id': id,
+        'status': status,
+        'leagues_processed': leaguesProcessed,
+        'markets_processed': marketsProcessed,
+        'eligible_matches': eligibleMatches,
+        'excluded_matches': excludedMatches,
+        'exclusions_by_reason': jsonEncode(exclusionsByReason),
+        'challengers_created': challengersCreated,
+        'errors': jsonEncode(errors),
+        'summary': jsonEncode(summary),
+      },
+    );
+  }
+
+  Future<Map<String, Object?>?> learningRun(int id) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('SELECT * FROM phoenix_learning_runs WHERE id = @id'),
+      parameters: {'id': id},
+    );
+    if (result.isEmpty) return null;
+    return Map<String, Object?>.from(result.first.toColumnMap());
+  }
+
+  Future<List<Map<String, Object?>>> listLearningRuns({
+    int limit = 50,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT * FROM phoenix_learning_runs
+        ORDER BY started_at DESC
+        LIMIT @limit
+      '''),
+      parameters: {'limit': limit},
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  Future<void> addLearningCandidate({
+    required int learningRunId,
+    required int modelVersionId,
+    String? leagueId,
+    required String market,
+  }) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        INSERT INTO phoenix_learning_candidates (
+          learning_run_id, model_version_id, league_id, market
+        ) VALUES (@run_id, @model_id, @league_id, @market)
+      '''),
+      parameters: {
+        'run_id': learningRunId,
+        'model_id': modelVersionId,
+        'league_id': leagueId,
+        'market': market,
+      },
+    );
+  }
+
+  /// Section 64: einfaches Advisory-Lock. Gibt `true` zurück, wenn der Lock
+  /// erfolgreich erworben wurde (kein anderer Learning Run/Review aktiv).
+  Future<bool> acquireModelLabLock(String lockName) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        INSERT INTO phoenix_model_lab_locks (lock_name, locked_by)
+        VALUES (@name, 'model_lab')
+        ON CONFLICT (lock_name) DO NOTHING
+        RETURNING lock_name
+      '''),
+      parameters: {'name': lockName},
+    );
+    return result.isNotEmpty;
+  }
+
+  Future<void> releaseModelLabLock(String lockName) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('DELETE FROM phoenix_model_lab_locks WHERE lock_name = @name'),
+      parameters: {'name': lockName},
+    );
+  }
+
+  Future<int> insertModelEvaluation({
+    required int modelVersionId,
+    int? comparedAgainstModelId,
+    String? leagueId,
+    required String market,
+    required String evaluationType,
+    required String matchScope,
+    required int sampleSize,
+    double? brierScore,
+    double? logLoss,
+    List<Object?> calibration = const [],
+    double? accuracy,
+    double? roi,
+    double? avgProbability,
+    Map<String, Object?> uncertainty = const {},
+    DateTime? periodStart,
+    DateTime? periodEnd,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        INSERT INTO phoenix_model_evaluations (
+          model_version_id, compared_against_model_id, league_id, market,
+          evaluation_type, match_scope, sample_size, brier_score, log_loss,
+          calibration, accuracy, roi, avg_probability, uncertainty,
+          period_start, period_end
+        ) VALUES (
+          @model_version_id, @compared_against_model_id, @league_id, @market,
+          @evaluation_type, @match_scope, @sample_size, @brier_score, @log_loss,
+          CAST(@calibration AS JSONB), @accuracy, @roi, @avg_probability,
+          CAST(@uncertainty AS JSONB), @period_start, @period_end
+        )
+        RETURNING id
+      '''),
+      parameters: {
+        'model_version_id': modelVersionId,
+        'compared_against_model_id': comparedAgainstModelId,
+        'league_id': leagueId,
+        'market': market,
+        'evaluation_type': evaluationType,
+        'match_scope': matchScope,
+        'sample_size': sampleSize,
+        'brier_score': brierScore,
+        'log_loss': logLoss,
+        'calibration': jsonEncode(calibration),
+        'accuracy': accuracy,
+        'roi': roi,
+        'avg_probability': avgProbability,
+        'uncertainty': jsonEncode(uncertainty),
+        'period_start': periodStart?.toUtc().toIso8601String(),
+        'period_end': periodEnd?.toUtc().toIso8601String(),
+      },
+    );
+    return result.first[0] as int;
+  }
+
+  Future<List<Map<String, Object?>>> modelEvaluations({
+    required int modelVersionId,
+    String? evaluationType,
+  }) async {
+    final db = await connection();
+    final typeFilter =
+        evaluationType == null ? '' : 'AND evaluation_type = @type';
+    final result = await db.execute(
+      Sql.named('''
+        SELECT * FROM phoenix_model_evaluations
+        WHERE model_version_id = @model_version_id
+        $typeFilter
+        ORDER BY created_at DESC
+      '''),
+      parameters: {
+        'model_version_id': modelVersionId,
+        if (evaluationType != null) 'type': evaluationType,
+      },
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  Future<void> upsertShadowPrediction({
+    required int modelVersionId,
+    required String fixtureId,
+    required String leagueId,
+    required String market,
+    int? phaseTwoScanRunId,
+    DateTime? kickoff,
+    required List<String> classLabels,
+    required List<double> classProbabilities,
+  }) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        INSERT INTO phoenix_shadow_predictions (
+          model_version_id, fixture_id, league_id, market,
+          phase_two_scan_run_id, kickoff, class_labels, class_probabilities
+        ) VALUES (
+          @model_version_id, @fixture_id, @league_id, @market,
+          @phase_two_scan_run_id, @kickoff,
+          CAST(@class_labels AS JSONB), CAST(@class_probabilities AS JSONB)
+        )
+        ON CONFLICT (model_version_id, fixture_id, market) DO NOTHING
+      '''),
+      parameters: {
+        'model_version_id': modelVersionId,
+        'fixture_id': fixtureId,
+        'league_id': leagueId,
+        'market': market,
+        'phase_two_scan_run_id': phaseTwoScanRunId,
+        'kickoff': kickoff?.toUtc().toIso8601String(),
+        'class_labels': jsonEncode(classLabels),
+        'class_probabilities': jsonEncode(classProbabilities),
+      },
+    );
+  }
+
+  /// Fixtures, für die bereits mind. ein aktiver Champion/Challenger eine
+  /// Shadow-/Live-Prediction erzeugt hat, aber noch kein Ergebnis vorliegt.
+  Future<List<Map<String, Object?>>> pendingShadowPredictions({
+    int limit = 500,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT sp.*, m.status AS match_status, m.home_goals, m.away_goals
+        FROM phoenix_shadow_predictions sp
+        JOIN football_matches m ON m.id = sp.fixture_id
+        WHERE sp.settled = FALSE
+        ORDER BY sp.kickoff ASC NULLS LAST
+        LIMIT @limit
+      '''),
+      parameters: {'limit': limit},
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  Future<void> settleShadowPrediction({
+    required int id,
+    required int outcomeIndex,
+    required double brierScore,
+    required double logLoss,
+  }) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        UPDATE phoenix_shadow_predictions
+        SET settled = TRUE, outcome_index = @outcome_index,
+            brier_score = @brier_score, log_loss = @log_loss,
+            settled_at = NOW()
+        WHERE id = @id
+      '''),
+      parameters: {
+        'id': id,
+        'outcome_index': outcomeIndex,
+        'brier_score': brierScore,
+        'log_loss': logLoss,
+      },
+    );
+  }
+
+  Future<List<Map<String, Object?>>> settledShadowPredictions({
+    required int modelVersionId,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT * FROM phoenix_shadow_predictions
+        WHERE model_version_id = @model_version_id AND settled = TRUE
+        ORDER BY kickoff ASC
+      '''),
+      parameters: {'model_version_id': modelVersionId},
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  Future<bool> monthlyReviewExists({
+    required int year,
+    required int month,
+    String? leagueId,
+    required String market,
+  }) async {
+    final db = await connection();
+    final leagueFilter =
+        leagueId == null ? 'IS NULL' : '= @league_id';
+    final result = await db.execute(
+      Sql.named('''
+        SELECT id FROM phoenix_monthly_reviews
+        WHERE review_year = @year AND review_month = @month
+          AND market = @market AND league_id $leagueFilter
+      '''),
+      parameters: {
+        'year': year,
+        'month': month,
+        'market': market,
+        if (leagueId != null) 'league_id': leagueId,
+      },
+    );
+    return result.isNotEmpty;
+  }
+
+  Future<int> insertMonthlyReview({
+    required int year,
+    required int month,
+    String? leagueId,
+    required String market,
+    int? championModelId,
+    int? challengerModelId,
+    required int sameMatchSample,
+    required Map<String, Object?> metrics,
+    required Map<String, Object?> uncertainty,
+    required String recommendation,
+    required String reason,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        INSERT INTO phoenix_monthly_reviews (
+          review_year, review_month, league_id, market, champion_model_id,
+          challenger_model_id, same_match_sample, metrics, uncertainty,
+          recommendation, reason
+        ) VALUES (
+          @year, @month, @league_id, @market, @champion_model_id,
+          @challenger_model_id, @sample, CAST(@metrics AS JSONB),
+          CAST(@uncertainty AS JSONB), @recommendation, @reason
+        )
+        ON CONFLICT (review_year, review_month, market, COALESCE(league_id, '__GLOBAL__'))
+        DO NOTHING
+        RETURNING id
+      '''),
+      parameters: {
+        'year': year,
+        'month': month,
+        'league_id': leagueId,
+        'market': market,
+        'champion_model_id': championModelId,
+        'challenger_model_id': challengerModelId,
+        'sample': sameMatchSample,
+        'metrics': jsonEncode(metrics),
+        'uncertainty': jsonEncode(uncertainty),
+        'recommendation': recommendation,
+        'reason': reason,
+      },
+    );
+    if (result.isEmpty) {
+      throw StateError(
+        'Monthly Review für $year-$month/$market/$leagueId existiert bereits.',
+      );
+    }
+    return result.first[0] as int;
+  }
+
+  Future<List<Map<String, Object?>>> listMonthlyReviews({
+    int limit = 100,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT * FROM phoenix_monthly_reviews
+        ORDER BY reviewed_at DESC
+        LIMIT @limit
+      '''),
+      parameters: {'limit': limit},
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  Future<void> insertModelLabAuditLog({
+    required String action,
+    required String actor,
+    int? modelVersionId,
+    String? leagueId,
+    String? market,
+    int? learningRunId,
+    Map<String, Object?> details = const {},
+  }) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        INSERT INTO phoenix_model_audit_log (
+          action, actor, model_version_id, league_id, market,
+          learning_run_id, details
+        ) VALUES (
+          @action, @actor, @model_version_id, @league_id, @market,
+          @learning_run_id, CAST(@details AS JSONB)
+        )
+      '''),
+      parameters: {
+        'action': action,
+        'actor': actor,
+        'model_version_id': modelVersionId,
+        'league_id': leagueId,
+        'market': market,
+        'learning_run_id': learningRunId,
+        'details': jsonEncode(details),
+      },
+    );
+  }
+
+  Future<List<Map<String, Object?>>> listModelLabAuditLog({
+    int limit = 200,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT * FROM phoenix_model_audit_log
+        ORDER BY occurred_at DESC
+        LIMIT @limit
+      '''),
+      parameters: {'limit': limit},
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  Future<int> countShadowPredictions() async {
+    final db = await connection();
+    final result = await db.execute('SELECT COUNT(*) FROM phoenix_shadow_predictions');
+    return (result.first[0] as int?) ?? 0;
+  }
+
+  Future<void> upsertMatchLearningFlag({
+    required String fixtureId,
+    required String leagueId,
+    required String market,
+    required bool eligible,
+    String? exclusionReason,
+    int? dataQuality,
+    DateTime? snapshotTimestamp,
+    DateTime? kickoff,
+  }) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        INSERT INTO phoenix_match_learning_flags (
+          fixture_id, league_id, market, eligible, exclusion_reason,
+          data_quality, snapshot_timestamp, kickoff
+        ) VALUES (
+          @fixture_id, @league_id, @market, @eligible, @exclusion_reason,
+          @data_quality, @snapshot_timestamp, @kickoff
+        )
+        ON CONFLICT (fixture_id, market) DO UPDATE SET
+          eligible = EXCLUDED.eligible,
+          exclusion_reason = EXCLUDED.exclusion_reason,
+          data_quality = EXCLUDED.data_quality,
+          snapshot_timestamp = EXCLUDED.snapshot_timestamp,
+          kickoff = EXCLUDED.kickoff,
+          checked_at = NOW()
+      '''),
+      parameters: {
+        'fixture_id': fixtureId,
+        'league_id': leagueId,
+        'market': market,
+        'eligible': eligible,
+        'exclusion_reason': exclusionReason,
+        'data_quality': dataQuality,
+        'snapshot_timestamp': snapshotTimestamp?.toUtc().toIso8601String(),
+        'kickoff': kickoff?.toUtc().toIso8601String(),
+      },
+    );
   }
 
   Future<void> close() async {
