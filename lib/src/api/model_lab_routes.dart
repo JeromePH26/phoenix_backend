@@ -75,7 +75,8 @@ class ModelLabRoutes {
     router.get('/leagues', (Request request) async {
       if (!_isAdmin(request)) return _unauthorized();
       try {
-        return jsonResponse(await _leagueOverview());
+        final leagues = await _leagueOverview();
+        return jsonResponse({'count': leagues.length, 'leagues': leagues});
       } catch (error) {
         return jsonResponse({'error': error.toString()}, statusCode: 500);
       }
