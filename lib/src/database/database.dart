@@ -2539,9 +2539,9 @@ class PhoenixDatabase {
           home_goals = @home_goals,
           away_goals = @away_goals,
           raw_json = raw_json || jsonb_strip_nulls(jsonb_build_object(
-            'status', @status,
-            'homeGoals', @home_goals,
-            'awayGoals', @away_goals
+            'status', CAST(@status AS TEXT),
+            'homeGoals', CAST(@home_goals AS INTEGER),
+            'awayGoals', CAST(@away_goals AS INTEGER)
           )),
           updated_at = NOW()
         WHERE id = @id
