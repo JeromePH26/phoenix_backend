@@ -88,6 +88,43 @@ class ModelRegistryService {
     required String market,
   }) => database.challengerModels(leagueId: leagueId, market: market);
 
+  /// Batch-Variante von [currentChampion]/[currentChallengers] für den
+  /// Model-Lab-Übersichts-Endpoint: ein einziger DB-Roundtrip für ALLE
+  /// Liga x Markt-Kombinationen statt 2 sequenzielle Anfragen je Kombination.
+  Future<
+      ({
+        Map<String, Map<String, Object?>> champions,
+        Map<String, List<Map<String, Object?>>> challengers,
+      })> currentChampionsAndChallengersBatch({
+    required List<String> leagueIds,
+    required List<String> markets,
+  }) async {
+    final rows = await database.modelVersionsForLeagueMarkets(
+      leagueIds: leagueIds,
+      markets: markets,
+    );
+
+    final champions = <String, Map<String, Object?>>{};
+    final challengers = <String, List<Map<String, Object?>>>{};
+    for (final row in rows) {
+      final leagueId = row['league_id']?.toString();
+      final market = row['market']?.toString();
+      if (leagueId == null || market == null) continue;
+      final key = leagueMarketKey(leagueId, market);
+      if (row['status'] == 'champion') {
+        champions[key] = row;
+      } else {
+        (challengers[key] ??= <Map<String, Object?>>[]).add(row);
+      }
+    }
+    return (champions: champions, challengers: challengers);
+  }
+
+  /// Schlüsselformat für die Lookup-Maps aus
+  /// [currentChampionsAndChallengersBatch].
+  static String leagueMarketKey(String leagueId, String market) =>
+      '$leagueId|$market';
+
   /// Section 12: nächste Generation für eine Liga x Markt-Kombination.
   /// Generation 1 = Global Baseline. Jede Promotion (später, außerhalb V0)
   /// erhöht die Generation um 1; innerhalb einer Generation zählen

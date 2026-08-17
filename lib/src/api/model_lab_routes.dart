@@ -474,6 +474,23 @@ class ModelLabRoutes {
     final audit = await datasetBuilder.auditEligibility();
     final leagues = await database.modelLabWhitelistedLeagues();
 
+    // Section 70/93: EIN Batch-Query für Champions/Challenger aller
+    // relevanten Liga x Markt-Kombinationen, statt (wie zuvor) 2 sequenzielle
+    // DB-Roundtrips je Kombination in der Schleife unten auszulösen - bei 36
+    // Whitelist-Ligen x 3 Märkten waren das bis zu 216 Roundtrips und der
+    // Endpoint lief in Produktion in den Client-Timeout.
+    final relevantLeagueIds = [
+      for (final league in leagues)
+        if (league['league_id'] != null &&
+            (onlyLeagueId == null ||
+                league['league_id'].toString() == onlyLeagueId))
+          league['league_id'].toString(),
+    ];
+    final batch = await registry.currentChampionsAndChallengersBatch(
+      leagueIds: relevantLeagueIds,
+      markets: [for (final market in LearningMarket.values) market.key],
+    );
+
     final results = <Map<String, Object?>>[];
     for (final league in leagues) {
       final leagueId = league['league_id']?.toString();
@@ -487,14 +504,10 @@ class ModelLabRoutes {
 
       final markets = <Map<String, Object?>>[];
       for (final market in LearningMarket.values) {
-        final champion = await registry.currentChampion(
-          leagueId: leagueId,
-          market: market.key,
-        );
-        final challengers = await registry.currentChallengers(
-          leagueId: leagueId,
-          market: market.key,
-        );
+        final key = ModelRegistryService.leagueMarketKey(leagueId, market.key);
+        final champion = batch.champions[key];
+        final challengers =
+            batch.challengers[key] ?? const <Map<String, Object?>>[];
         final status = classifyLeagueMarketStatus(
           eligibleSampleSize: counts.eligible,
           hasLeagueChampion: champion != null,

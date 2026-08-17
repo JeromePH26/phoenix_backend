@@ -3927,6 +3927,37 @@ class PhoenixDatabase {
         .toList();
   }
 
+  /// Batch-Variante von [championModel]/[challengerModels] für den Model-Lab-
+  /// Übersichts-Endpoint (Section 70): lädt Champions und Challenger für ALLE
+  /// übergebenen Liga x Markt-Kombinationen mit einem einzigen Query, statt
+  /// wie bei einzeln aufgerufenen [championModel]/[challengerModels] 2
+  /// sequenzielle DB-Roundtrips je Kombination auszulösen (siehe
+  /// [footballLeagueManualStatuses] für dasselbe Muster).
+  Future<List<Map<String, Object?>>> modelVersionsForLeagueMarkets({
+    required List<String> leagueIds,
+    required List<String> markets,
+  }) async {
+    if (leagueIds.isEmpty || markets.isEmpty) return const [];
+
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT * FROM phoenix_model_versions
+        WHERE market = ANY(@markets)
+          AND league_id = ANY(@league_ids)
+          AND status IN ('champion', 'challenger')
+        ORDER BY created_at DESC
+      '''),
+      parameters: {
+        'markets': markets,
+        'league_ids': leagueIds,
+      },
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
   Future<List<Map<String, Object?>>> allModelVersions({
     String? status,
     int limit = 500,
