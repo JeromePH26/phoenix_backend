@@ -321,6 +321,12 @@ class FootballResultSettlementService {
             : goalDifference == 0
                 ? 'push'
                 : 'lost';
+      case 'bttsyes':
+        return homeScore > 0 && awayScore > 0 ? 'won' : 'lost';
+      case 'bttsno':
+        return homeScore > 0 && awayScore > 0 ? 'lost' : 'won';
+      case 'awaywin':
+        return awayScore > homeScore ? 'won' : 'lost';
     }
 
     // Manche ältere Snapshots speichern nur das sichtbare Label statt des
