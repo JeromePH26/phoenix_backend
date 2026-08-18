@@ -832,15 +832,27 @@ class PhoenixDatabase {
   /// Zeilen unverändert das bisherige Produktionsverhalten behalten, bis ein
   /// Admin ein Flag aktiv umschaltet. Löscht oder überschreibt keine
   /// bestehenden Spalten.
+  /// `ALTER TABLE ADD COLUMN` needs an ACCESS EXCLUSIVE lock, which briefly
+  /// blocks on any other open transaction touching `football_matches` (the
+  /// most actively-written table in this app - scans, settlement, etc.). A
+  /// short `SET LOCAL lock_timeout` means a busy moment fails fast with a
+  /// catchable error (caught by the caller in `migrate()`'s try/catch, server
+  /// still starts) instead of hanging past the Railway healthcheck window and
+  /// taking the whole deploy down. Safe to just retry `migrate()` (next
+  /// server start, or `POST /api/admin/migrate`) once the table is quieter -
+  /// the `ADD COLUMN IF NOT EXISTS` itself stays fully idempotent.
   Future<void> _migrateFootballMatchControls(Connection db) async {
-    await db.execute('''
-      ALTER TABLE football_matches
-        ADD COLUMN IF NOT EXISTS visible BOOLEAN NOT NULL DEFAULT TRUE,
-        ADD COLUMN IF NOT EXISTS analysis_enabled BOOLEAN NOT NULL DEFAULT TRUE,
-        ADD COLUMN IF NOT EXISTS tip_enabled BOOLEAN NOT NULL DEFAULT TRUE,
-        ADD COLUMN IF NOT EXISTS learning_enabled BOOLEAN NOT NULL DEFAULT TRUE,
-        ADD COLUMN IF NOT EXISTS live_enabled BOOLEAN NOT NULL DEFAULT TRUE
-    ''');
+    await db.runTx((session) async {
+      await session.execute("SET LOCAL lock_timeout = '5s'");
+      await session.execute('''
+        ALTER TABLE football_matches
+          ADD COLUMN IF NOT EXISTS visible BOOLEAN NOT NULL DEFAULT TRUE,
+          ADD COLUMN IF NOT EXISTS analysis_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+          ADD COLUMN IF NOT EXISTS tip_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+          ADD COLUMN IF NOT EXISTS learning_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+          ADD COLUMN IF NOT EXISTS live_enabled BOOLEAN NOT NULL DEFAULT TRUE
+      ''');
+    });
   }
 
   /// PHÖNIX CONTROL CENTER (internes Admin-Webapp-Backend, additiv): eigene
