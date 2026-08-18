@@ -816,12 +816,30 @@ class PhoenixDatabase {
 
     await _migrateModelLab(db);
     await _migrateControlCenter(db);
+    await _migrateFootballMatchControls(db);
 
     await db.execute('''
       INSERT INTO app_meta (key, value)
-      VALUES ('schema_version', '9')
+      VALUES ('schema_version', '10')
       ON CONFLICT (key) DO UPDATE
       SET value = EXCLUDED.value, updated_at = NOW()
+    ''');
+  }
+
+  /// PHÖNIX CONTROL CENTER PHASE 2 (Football-Domain-Admin-APIs, additiv):
+  /// Pro-Match-Steuerflags für Matches/Teams/Wappen-Verwaltung. Rein additiv
+  /// über `ADD COLUMN IF NOT EXISTS` mit `DEFAULT TRUE`, damit bestehende
+  /// Zeilen unverändert das bisherige Produktionsverhalten behalten, bis ein
+  /// Admin ein Flag aktiv umschaltet. Löscht oder überschreibt keine
+  /// bestehenden Spalten.
+  Future<void> _migrateFootballMatchControls(Connection db) async {
+    await db.execute('''
+      ALTER TABLE football_matches
+        ADD COLUMN IF NOT EXISTS visible BOOLEAN NOT NULL DEFAULT TRUE,
+        ADD COLUMN IF NOT EXISTS analysis_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        ADD COLUMN IF NOT EXISTS tip_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        ADD COLUMN IF NOT EXISTS learning_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        ADD COLUMN IF NOT EXISTS live_enabled BOOLEAN NOT NULL DEFAULT TRUE
     ''');
   }
 
@@ -5032,6 +5050,312 @@ class PhoenixDatabase {
       parameters: parameters,
     );
     return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  // -- PHÖNIX CONTROL CENTER PHASE 2: Football-Domain-Admin-APIs ---------
+  // Matches-Browsing, Pro-Match-Flags, Teams/Wappen & Assets, Datenqualität.
+  // Bleibt bewusst getrennt von den obigen Control-Center-Methoden: diese
+  // Endpunkte hängen an `/api/admin/football/...` mit dem statischen
+  // PHOENIX_ADMIN_TOKEN (siehe `_isAdmin()` in routes.dart), nicht an der
+  // Mitarbeiter-Session-Auth. `insertAdminAuditLog`/`listAdminAuditLog`
+  // oben werden trotzdem wiederverwendet - ein Audit-Log reicht für beide
+  // Auth-Wege.
+
+  /// Paginierte, gefilterte Match-Liste für
+  /// `GET /api/admin/football/matches`. Alle Filter sind additiv (AND
+  /// verknüpft) und optional.
+  Future<Map<String, Object?>> listFootballMatchesAdmin({
+    String? date,
+    String? leagueId,
+    String? teamId,
+    String? status,
+    bool? visible,
+    bool? hasAnalysis,
+    bool? settled,
+    int limit = 50,
+    int offset = 0,
+  }) async {
+    final db = await connection();
+    final conditions = <String>[];
+    final filterParameters = <String, Object?>{};
+
+    if (date != null && date.trim().isNotEmpty) {
+      conditions.add('m.kickoff_utc::date = CAST(@date AS DATE)');
+      filterParameters['date'] = date.trim();
+    }
+    if (leagueId != null && leagueId.trim().isNotEmpty) {
+      conditions.add('m.league_id = @league_id');
+      filterParameters['league_id'] = leagueId.trim();
+    }
+    if (teamId != null && teamId.trim().isNotEmpty) {
+      conditions.add('(m.home_team_id = @team_id OR m.away_team_id = @team_id)');
+      filterParameters['team_id'] = teamId.trim();
+    }
+    if (status != null && status.trim().isNotEmpty) {
+      conditions.add('m.status = @status');
+      filterParameters['status'] = status.trim();
+    }
+    if (visible != null) {
+      conditions.add('m.visible = @visible');
+      filterParameters['visible'] = visible;
+    }
+    if (hasAnalysis != null) {
+      conditions.add(
+        hasAnalysis
+            ? "EXISTS (SELECT 1 FROM analyses a WHERE a.sport = 'football' AND a.match_id = m.id)"
+            : "NOT EXISTS (SELECT 1 FROM analyses a WHERE a.sport = 'football' AND a.match_id = m.id)",
+      );
+    }
+    if (settled != null) {
+      conditions.add(
+        settled
+            ? '(m.home_goals IS NOT NULL AND m.away_goals IS NOT NULL)'
+            : '(m.home_goals IS NULL OR m.away_goals IS NULL)',
+      );
+    }
+
+    final whereClause =
+        conditions.isEmpty ? '' : 'WHERE ${conditions.join(' AND ')}';
+
+    final rows = await db.execute(
+      Sql.named('''
+        SELECT
+          m.id, m.kickoff_utc, m.status, m.league_id, m.league_name, m.country,
+          m.home_team_id, m.home_team_name, m.home_logo,
+          m.away_team_id, m.away_team_name, m.away_logo,
+          m.home_goals, m.away_goals,
+          m.visible, m.analysis_enabled, m.tip_enabled, m.learning_enabled,
+          m.live_enabled,
+          EXISTS (
+            SELECT 1 FROM analyses a
+            WHERE a.sport = 'football' AND a.match_id = m.id
+          ) AS has_analysis
+        FROM football_matches m
+        $whereClause
+        ORDER BY m.kickoff_utc DESC
+        LIMIT @limit OFFSET @offset
+      '''),
+      parameters: {...filterParameters, 'limit': limit, 'offset': offset},
+    );
+
+    final countRows = await db.execute(
+      Sql.named('''
+        SELECT COUNT(*) AS total FROM football_matches m $whereClause
+      '''),
+      parameters: filterParameters,
+    );
+    final total = int.tryParse(
+          countRows.first.toColumnMap()['total']?.toString() ?? '',
+        ) ??
+        0;
+
+    return {
+      'matches': rows
+          .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+          .toList(),
+      'total': total,
+      'limit': limit,
+      'offset': offset,
+    };
+  }
+
+  /// Voller Match-Detail-Datensatz für
+  /// `GET /api/admin/football/matches/<id>`: die Match-Zeile inklusive der
+  /// fünf Steuerflags, plus - falls vorhanden - der eingefrorene
+  /// Pre-Match-Analyse-Snapshot aus `football_analysis_history` (die erste
+  /// je veröffentlichte Prognose, siehe Tabellenkommentar dort) und die
+  /// zuletzt berechnete `analyses`-Zeile. Gibt `null` zurück, wenn das Match
+  /// nicht existiert.
+  Future<Map<String, Object?>?> footballMatchAdminDetail(String id) async {
+    final db = await connection();
+    final rows = await db.execute(
+      Sql.named('''
+        SELECT
+          m.id, m.kickoff_utc, m.status, m.league_id, m.league_name, m.country,
+          m.home_team_id, m.home_team_name, m.home_logo,
+          m.away_team_id, m.away_team_name, m.away_logo,
+          m.home_goals, m.away_goals, m.raw_json,
+          m.visible, m.analysis_enabled, m.tip_enabled, m.learning_enabled,
+          m.live_enabled, m.updated_at
+        FROM football_matches m
+        WHERE m.id = @id
+      '''),
+      parameters: {'id': id},
+    );
+    if (rows.isEmpty) return null;
+    final match = Map<String, Object?>.from(rows.first.toColumnMap());
+
+    // Erste jemals gespeicherte Prognose für dieses Fixture - der
+    // unveränderliche Pre-Match-Snapshot, nicht ein späterer Rescan
+    // (dieselbe "first predictions"-Semantik wie in `footballHistory()`
+    // oben).
+    final snapshotRows = await db.execute(
+      Sql.named('''
+        SELECT phase_two_scan_run_id, fixture_id, prediction_date, kickoff,
+               model_version, market_key, market_label, model_probability,
+               fair_odds, market_odds, assigned_units, data_quality,
+               confidence, result_status, home_score, away_score,
+               profit_units, settled_at, payload, created_at
+        FROM football_analysis_history
+        WHERE fixture_id = @id
+        ORDER BY created_at ASC
+        LIMIT 1
+      '''),
+      parameters: {'id': id},
+    );
+
+    final latestAnalysisRows = await db.execute(
+      Sql.named('''
+        SELECT model_version, data_quality, confidence, recommendation,
+               analyzed_at
+        FROM analyses
+        WHERE sport = 'football' AND match_id = @id
+        ORDER BY analyzed_at DESC
+        LIMIT 1
+      '''),
+      parameters: {'id': id},
+    );
+
+    match['analysisSnapshot'] = snapshotRows.isEmpty
+        ? null
+        : Map<String, Object?>.from(snapshotRows.first.toColumnMap());
+    match['latestAnalysis'] = latestAnalysisRows.isEmpty
+        ? null
+        : Map<String, Object?>.from(latestAnalysisRows.first.toColumnMap());
+
+    return match;
+  }
+
+  /// Aktualisiert ein Subset der fünf Pro-Match-Steuerflags. [flags] ist
+  /// bereits keyed by DB-Spaltenname (siehe `matchFlagJsonToColumn` in
+  /// `football_admin_logic.dart`) - diese Methode selbst validiert die
+  /// Spaltennamen nicht mehr, das übernimmt der Aufrufer über die feste
+  /// Allowlist dort, damit hier keine beliebigen Spaltennamen interpoliert
+  /// werden können.
+  ///
+  /// Gibt die vorherigen Werte der geänderten Spalten zurück (für den
+  /// Audit-Log-Diff), oder `null`, wenn das Match nicht existiert.
+  Future<Map<String, Object?>?> updateFootballMatchFlags({
+    required String id,
+    required Map<String, bool> flags,
+  }) async {
+    if (flags.isEmpty) return null;
+    const allowedColumns = {
+      'visible',
+      'analysis_enabled',
+      'tip_enabled',
+      'learning_enabled',
+      'live_enabled',
+    };
+    if (flags.keys.any((column) => !allowedColumns.contains(column))) {
+      throw ArgumentError('Ungültige Flag-Spalte.');
+    }
+
+    final db = await connection();
+    final columns = flags.keys.toList();
+
+    final previousRows = await db.execute(
+      Sql.named('''
+        SELECT ${columns.join(', ')} FROM football_matches WHERE id = @id
+      '''),
+      parameters: {'id': id},
+    );
+    if (previousRows.isEmpty) return null;
+    final previous = Map<String, Object?>.from(previousRows.first.toColumnMap());
+
+    final setClause = columns.map((column) => '$column = @$column').join(', ');
+    await db.execute(
+      Sql.named('''
+        UPDATE football_matches
+        SET $setClause, updated_at = NOW()
+        WHERE id = @id
+      '''),
+      parameters: {'id': id, ...flags},
+    );
+
+    return previous;
+  }
+
+  /// Team-/Liga-Wappen-Inventar für `GET /api/admin/football/assets`:
+  /// jede in den letzten [sinceDays] Tagen in `football_matches` gesehene
+  /// Team- oder Liga-ID, links gejoined gegen den `football_assets`-Cache.
+  /// Fehlt eine Zeile im Cache, kommt sie trotzdem mit `mime_type = NULL`
+  /// zurück (MISSING) - der Aufrufer berechnet den Status über
+  /// `computeAssetStatus()` in `football_admin_logic.dart`.
+  Future<List<Map<String, Object?>>> footballAssetInventory({
+    int sinceDays = 180,
+  }) async {
+    final db = await connection();
+    final rows = await db.execute(
+      Sql.named('''
+        WITH recent_entities AS (
+          SELECT DISTINCT home_team_id AS entity_id,
+                 home_team_name AS entity_name, 'team' AS entity_type
+          FROM football_matches
+          WHERE kickoff_utc >= NOW() - make_interval(days => @since_days)
+            AND home_team_id <> ''
+          UNION
+          SELECT DISTINCT away_team_id, away_team_name, 'team'
+          FROM football_matches
+          WHERE kickoff_utc >= NOW() - make_interval(days => @since_days)
+            AND away_team_id <> ''
+          UNION
+          SELECT DISTINCT league_id, league_name, 'league'
+          FROM football_matches
+          WHERE kickoff_utc >= NOW() - make_interval(days => @since_days)
+            AND league_id <> ''
+        )
+        SELECT e.entity_type, e.entity_id, e.entity_name,
+               a.mime_type, a.updated_at,
+               (a.content IS NOT NULL AND length(a.content) > 0) AS has_bytes
+        FROM recent_entities e
+        LEFT JOIN football_assets a
+          ON a.asset_type = e.entity_type AND a.asset_id = e.entity_id
+        ORDER BY e.entity_type, e.entity_name
+      '''),
+      parameters: {'since_days': sinceDays},
+    );
+    return rows
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  /// Rein lesende Datenqualitäts-Sicht je Match für einen Tag
+  /// (`GET /api/admin/football/data-quality`) - eine Ergänzung zu
+  /// `footballWhitelistCoverage()` (dort: aggregiert je Liga), hier: einzeln
+  /// je Match, sortiert nach schlechtester Qualität zuerst. Nutzt
+  /// ausschließlich real gespeicherte Spalten (`analyses.data_quality`,
+  /// `analyses.confidence`) - keine neu erfundenen Scores.
+  Future<List<Map<String, Object?>>> footballDataQualityRows({
+    required DateTime date,
+    int limit = 200,
+  }) async {
+    final db = await connection();
+    final day = date.toUtc().toIso8601String().substring(0, 10);
+    final rows = await db.execute(
+      Sql.named('''
+        SELECT
+          m.id, m.kickoff_utc, m.league_id, m.league_name,
+          m.home_team_name, m.away_team_name, m.status,
+          a.data_quality, a.confidence, a.model_version, a.analyzed_at,
+          (a.match_id IS NOT NULL) AS has_analysis
+        FROM football_matches m
+        LEFT JOIN LATERAL (
+          SELECT match_id, data_quality, confidence, model_version, analyzed_at
+          FROM analyses
+          WHERE sport = 'football' AND match_id = m.id
+          ORDER BY analyzed_at DESC
+          LIMIT 1
+        ) a ON TRUE
+        WHERE m.kickoff_utc::date = CAST(@day AS DATE)
+        ORDER BY COALESCE(a.data_quality, -1) ASC, m.kickoff_utc ASC
+        LIMIT @limit
+      '''),
+      parameters: {'day': day, 'limit': limit.clamp(1, 500)},
+    );
+    return rows
         .map((row) => Map<String, Object?>.from(row.toColumnMap()))
         .toList();
   }

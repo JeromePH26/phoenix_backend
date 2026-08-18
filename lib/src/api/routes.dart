@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:shelf/shelf.dart';
 import 'package:shelf_router/shelf_router.dart';
@@ -7,7 +8,9 @@ import 'package:postgres/postgres.dart';
 
 import '../config/app_config.dart';
 import '../config/model_lab_config.dart';
+import '../control_center/audit.dart';
 import '../database/database.dart';
+import '../football_admin/football_admin_logic.dart';
 import '../http/json_response.dart';
 import 'control_center_routes.dart';
 import 'model_lab_routes.dart';
@@ -957,6 +960,292 @@ class ApiRoutes {
       return jsonResponse(job);
     });
 
+    // -----------------------------------------------------------------
+    // CONTROL CENTER PHASE 2: Football-Domain-Admin-APIs (Matches,
+    // Teams/Wappen & Assets, Datenqualität). Bewusst innerhalb der
+    // bestehenden /api/admin/football/...-Gruppe und mit demselben
+    // statischen PHOENIX_ADMIN_TOKEN geschützt wie alle anderen Routen
+    // dieser Datei (_isAdmin() unten) - keine Verbindung zur getrennten
+    // Control-Center-Session-Auth (lib/src/control_center/), die
+    // Mitarbeiter-Identität für /api/admin/control-center/... abdeckt.
+    // -----------------------------------------------------------------
+
+    router.get('/api/admin/football/matches', (Request request) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+      final query = request.url.queryParameters;
+      final limit = clampListLimit(int.tryParse(query['limit'] ?? ''));
+      final offset = clampOffset(int.tryParse(query['offset'] ?? ''));
+      try {
+        final result = await database.listFootballMatchesAdmin(
+          date: query['date'],
+          leagueId: query['leagueId'],
+          teamId: query['teamId'],
+          status: query['status'],
+          visible: parseBoolParam(query['visible']),
+          hasAnalysis: parseBoolParam(query['hasAnalysis']),
+          settled: parseBoolParam(query['settled']),
+          limit: limit,
+          offset: offset,
+        );
+        final matches = (result['matches'] as List<Map<String, Object?>>)
+            .map(mapMatchRowToJson)
+            .toList();
+        return jsonResponse(_jsonSafe({
+          'matches': matches,
+          'count': result['total'],
+          'limit': result['limit'],
+          'offset': result['offset'],
+        }));
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
+    router.get('/api/admin/football/matches/<id>', (
+      Request request,
+      String id,
+    ) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+      try {
+        final match = await database.footballMatchAdminDetail(id);
+        if (match == null) {
+          return jsonResponse({'error': 'Spiel nicht gefunden.'},
+              statusCode: 404);
+        }
+        return jsonResponse(_jsonSafe(mapMatchRowToJson(match)));
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
+    router.patch('/api/admin/football/matches/<id>', (
+      Request request,
+      String id,
+    ) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+
+      Map<String, dynamic> body;
+      try {
+        final decoded = jsonDecode(await request.readAsString());
+        if (decoded is! Map<String, dynamic>) {
+          return jsonResponse({'error': 'Ungültiger JSON-Body.'},
+              statusCode: 400);
+        }
+        body = decoded;
+      } catch (error) {
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'},
+            statusCode: 400);
+      }
+
+      final patch = parseMatchFlagsPatch(body);
+      if (!patch.isValid) {
+        return jsonResponse({'error': patch.error}, statusCode: 400);
+      }
+
+      try {
+        final previous = await database.updateFootballMatchFlags(
+          id: id,
+          flags: patch.flags,
+        );
+        if (previous == null) {
+          return jsonResponse({'error': 'Spiel nicht gefunden.'},
+              statusCode: 404);
+        }
+
+        final diff = diffEmployeeFields(
+          before: previous,
+          after: patch.flags,
+        );
+
+        await database.insertAdminAuditLog(
+          employeeId: null,
+          employeeLogin: 'legacy_admin_token',
+          area: 'football',
+          objectType: 'match',
+          objectId: id,
+          action: 'match.flags_update',
+          previousValue: diff.previousValue,
+          newValue: diff.newValue,
+          reason: patch.reason,
+          comment: patch.comment,
+          ip: _clientIp(request),
+        );
+
+        return jsonResponse({
+          'status': 'updated',
+          'matchId': id,
+          'flags': mapFlagsToJsonKeys(patch.flags),
+        });
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
+    router.get('/api/admin/football/assets', (Request request) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+      try {
+        final now = DateTime.now().toUtc();
+        final inventory = await database.footballAssetInventory();
+        final statusFilter =
+            request.url.queryParameters['status']?.trim().toUpperCase();
+
+        final assets = inventory
+            .map((row) {
+              final updatedAt =
+                  row['updated_at'] is DateTime ? row['updated_at'] as DateTime : null;
+              final status = computeAssetStatus(
+                cached: row['mime_type'] != null,
+                hasBytes: row['has_bytes'] == true,
+                updatedAt: updatedAt,
+                now: now,
+              );
+              return <String, Object?>{
+                'type': row['entity_type'],
+                'id': row['entity_id'],
+                'entityName': row['entity_name'],
+                'mimeType': row['mime_type'],
+                'updatedAt': updatedAt?.toIso8601String(),
+                'status': status,
+              };
+            })
+            .where(
+              (row) => statusFilter == null || row['status'] == statusFilter,
+            )
+            .toList();
+
+        return jsonResponse({'count': assets.length, 'assets': assets});
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
+    router.post('/api/admin/football/assets/<type>/<id>/replace', (
+      Request request,
+      String type,
+      String id,
+    ) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+
+      final normalizedType = type.trim().toLowerCase();
+      final normalizedId = id.trim();
+      if (!FootballAssetService.allowedTypes.contains(normalizedType) ||
+          normalizedId.isEmpty) {
+        return jsonResponse({'error': 'Ungültiger Asset-Typ oder -ID.'},
+            statusCode: 400);
+      }
+
+      Map<String, dynamic> body;
+      try {
+        final decoded = jsonDecode(await request.readAsString());
+        if (decoded is! Map<String, dynamic>) {
+          return jsonResponse({'error': 'Ungültiger JSON-Body.'},
+              statusCode: 400);
+        }
+        body = decoded;
+      } catch (error) {
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'},
+            statusCode: 400);
+      }
+
+      final contentType = body['contentType']?.toString();
+      List<int> bytes;
+      try {
+        bytes = base64Decode(body['imageBase64']?.toString() ?? '');
+      } catch (error) {
+        return jsonResponse({'error': 'imageBase64 ist ungültig.'},
+            statusCode: 400);
+      }
+
+      final validationError = validateAssetReplacePayload(
+        contentType: contentType,
+        byteLength: bytes.length,
+      );
+      if (validationError != null) {
+        return jsonResponse({'error': validationError}, statusCode: 400);
+      }
+      final normalizedContentType = contentType!.trim().toLowerCase();
+
+      try {
+        await database.saveFootballAsset(
+          type: normalizedType,
+          id: normalizedId,
+          sourceUrl: 'admin:replace',
+          mimeType: normalizedContentType,
+          bytes: bytes,
+        );
+
+        await database.insertAdminAuditLog(
+          employeeId: null,
+          employeeLogin: 'legacy_admin_token',
+          area: 'football',
+          objectType: 'asset',
+          objectId: '$normalizedType:$normalizedId',
+          action: 'asset.replace',
+          newValue: {
+            'type': normalizedType,
+            'id': normalizedId,
+            'contentType': normalizedContentType,
+            'byteLength': bytes.length,
+          },
+          ip: _clientIp(request),
+        );
+
+        return jsonResponse({
+          'status': 'replaced',
+          'type': normalizedType,
+          'id': normalizedId,
+          'contentType': normalizedContentType,
+          'byteLength': bytes.length,
+        });
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
+    // `data-coverage` (oben) bleibt die aggregierte Whitelist-Sicht je Liga
+    // und Tag. Diese Route ergänzt das um eine Sicht je einzelnem Match,
+    // sortiert nach schlechtester Datenqualität zuerst - nutzt ausschließlich
+    // real gespeicherte `analyses`-Spalten, keine neu erfundenen Scores.
+    router.get('/api/admin/football/data-quality', (Request request) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+      final requested = request.url.queryParameters['date'];
+      final date =
+          requested == null ? DateTime.now() : DateTime.tryParse(requested);
+      if (date == null) {
+        return jsonResponse({
+          'error': 'Datum muss YYYY-MM-DD sein.',
+        }, statusCode: 400);
+      }
+      final limit = clampListLimit(
+        int.tryParse(request.url.queryParameters['limit'] ?? ''),
+        defaultValue: 200,
+        maxValue: 500,
+      );
+      try {
+        final rows =
+            await database.footballDataQualityRows(date: date, limit: limit);
+        return jsonResponse(_jsonSafe({
+          'date': _day(date),
+          'count': rows.length,
+          'matches': rows,
+        }));
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
     router.get('/api/football/performance', (Request request) async {
       final performance = await database.footballPerformanceSummary();
       return jsonResponse({
@@ -1305,6 +1594,22 @@ class ApiRoutes {
     }
 
     return value.toString();
+  }
+
+  /// Bester verfügbarer Client-IP-Wert für den Audit-Log-Eintrag (gleiche
+  /// Logik wie `ControlCenterRoutes._clientIp`, hier separat gehalten, weil
+  /// diese Datei bewusst nicht von `control_center_routes.dart` importiert
+  /// - beide Auth-Wege bleiben unabhängig voneinander).
+  String? _clientIp(Request request) {
+    final forwardedFor = request.headers['x-forwarded-for'];
+    if (forwardedFor != null && forwardedFor.trim().isNotEmpty) {
+      return forwardedFor.split(',').first.trim();
+    }
+    final connectionInfo = request.context['shelf.io.connection_info'];
+    if (connectionInfo is HttpConnectionInfo) {
+      return connectionInfo.remoteAddress.address;
+    }
+    return null;
   }
 
   bool _isAdmin(Request request) {
