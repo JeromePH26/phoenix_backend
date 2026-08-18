@@ -49,7 +49,6 @@ class ControlCenterRoutes {
     router.get('/audit-log', _auditLog);
     router.get('/overview', _overview);
     router.get('/search', _search);
-    router.get('/_diag', _diag);
 
     return router;
   }
@@ -557,39 +556,6 @@ class ControlCenterRoutes {
     } catch (error) {
       return jsonResponse({'error': error.toString()}, statusCode: 500);
     }
-  }
-
-  // -- TEMP diagnostic (remove after bootstrap issue is resolved) --------
-
-  Future<Response> _diag(Request request) async {
-    if (!_isLegacyAdmin(request)) {
-      return jsonResponse({'error': 'unauthorized'}, statusCode: 401);
-    }
-    try {
-      final count = await database.countAdminEmployees();
-      return jsonResponse({
-        'employeeCount': count,
-        'hasBootstrapConfig': config.hasControlCenterBootstrapConfig,
-        'bootstrapLoginSet': config.controlCenterBootstrapOwnerLogin.isNotEmpty,
-        'bootstrapEmailSet': config.controlCenterBootstrapOwnerEmail.isNotEmpty,
-        'bootstrapPasswordSet': config.controlCenterBootstrapOwnerPassword.isNotEmpty,
-        'databaseConfigured': database.isConfigured,
-      });
-    } catch (error) {
-      return jsonResponse({'error': error.toString()}, statusCode: 500);
-    }
-  }
-
-  bool _isLegacyAdmin(Request request) {
-    if (config.adminToken.isEmpty) return false;
-    final header = request.headers['authorization'] ?? '';
-    final expected = 'Bearer ${config.adminToken}';
-    if (header.length != expected.length) return false;
-    var diff = 0;
-    for (var i = 0; i < header.length; i++) {
-      diff |= header.codeUnitAt(i) ^ expected.codeUnitAt(i);
-    }
-    return diff == 0;
   }
 
   // -- Helpers ------------------------------------------------------------
