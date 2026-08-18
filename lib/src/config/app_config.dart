@@ -14,6 +14,9 @@ class AppConfig {
     required this.adminToken,
     required this.firebaseProjectId,
     required this.firebaseServiceAccountJson,
+    required this.controlCenterBootstrapOwnerLogin,
+    required this.controlCenterBootstrapOwnerEmail,
+    required this.controlCenterBootstrapOwnerPassword,
   });
 
   final int port;
@@ -28,6 +31,19 @@ class AppConfig {
   final String adminToken;
   final String firebaseProjectId;
   final String firebaseServiceAccountJson;
+
+  // PHÖNIX CONTROL CENTER (additiv, separat vom `adminToken`-Mechanismus
+  // oben): einmaliger Bootstrap des ersten OWNER-Mitarbeiters, siehe
+  // `lib/src/control_center/bootstrap.dart`. Nur wirksam, solange
+  // `admin_employees` leer ist.
+  final String controlCenterBootstrapOwnerLogin;
+  final String controlCenterBootstrapOwnerEmail;
+  final String controlCenterBootstrapOwnerPassword;
+
+  bool get hasControlCenterBootstrapConfig =>
+      controlCenterBootstrapOwnerLogin.trim().isNotEmpty &&
+      controlCenterBootstrapOwnerEmail.trim().isNotEmpty &&
+      controlCenterBootstrapOwnerPassword.trim().isNotEmpty;
 
   bool get hasDatabase => databaseUrl.trim().isNotEmpty;
   bool get hasFootballApi => apiFootballKey.trim().isNotEmpty;
@@ -67,6 +83,15 @@ class AppConfig {
       adminToken: read('PHOENIX_ADMIN_TOKEN'),
       firebaseProjectId: read('FIREBASE_PROJECT_ID'),
       firebaseServiceAccountJson: read('FIREBASE_SERVICE_ACCOUNT_JSON'),
+      controlCenterBootstrapOwnerLogin: read(
+        'PHOENIX_CC_BOOTSTRAP_OWNER_LOGIN',
+      ),
+      controlCenterBootstrapOwnerEmail: read(
+        'PHOENIX_CC_BOOTSTRAP_OWNER_EMAIL',
+      ),
+      controlCenterBootstrapOwnerPassword: read(
+        'PHOENIX_CC_BOOTSTRAP_OWNER_PASSWORD',
+      ),
     );
   }
 }

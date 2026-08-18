@@ -6,6 +6,7 @@ import 'package:shelf_cors_headers/shelf_cors_headers.dart';
 
 import 'api/routes.dart';
 import 'config/app_config.dart';
+import 'control_center/bootstrap.dart';
 import 'database/database.dart';
 import 'http/football_analysis_api.dart';
 import 'http/json_response.dart';
@@ -65,6 +66,16 @@ class PhoenixBackend {
         await database.migrate();
       } catch (error, stackTrace) {
         stderr.writeln('Database migration failed: $error');
+        stderr.writeln(stackTrace);
+      }
+
+      // PHÖNIX CONTROL CENTER: einmaliger Bootstrap des ersten OWNER-
+      // Mitarbeiters, siehe control_center/bootstrap.dart. Läuft NUR, wenn
+      // admin_employees leer ist und rührt eine nicht-leere Tabelle nie an.
+      try {
+        await ControlCenterBootstrap(database: database, config: config).run();
+      } catch (error, stackTrace) {
+        stderr.writeln('Control Center bootstrap failed: $error');
         stderr.writeln(stackTrace);
       }
     }

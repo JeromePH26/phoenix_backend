@@ -9,6 +9,7 @@ import '../config/app_config.dart';
 import '../config/model_lab_config.dart';
 import '../database/database.dart';
 import '../http/json_response.dart';
+import 'control_center_routes.dart';
 import 'model_lab_routes.dart';
 import '../services/football_phase_one_scan_service.dart';
 import '../services/football_phase_two_scan_service.dart';
@@ -55,6 +56,19 @@ class ApiRoutes {
     router.mount(
       '/api/admin/model-lab/',
       ModelLabRoutes(
+        config: config,
+        modelLabConfig: modelLabConfig,
+        database: database,
+      ).router.call,
+    );
+
+    // PHÖNIX CONTROL CENTER (internes Admin-Webapp-Backend, additiv): eigene
+    // session-basierte Auth (admin_employees/admin_sessions), komplett
+    // getrennt vom statischen PHOENIX_ADMIN_TOKEN oben. Ebenfalls vor allen
+    // anderen Routen eingehängt, aus demselben Grund wie ModelLabRoutes.
+    router.mount(
+      '/api/admin/control-center/',
+      ControlCenterRoutes(
         config: config,
         modelLabConfig: modelLabConfig,
         database: database,

@@ -815,12 +815,98 @@ class PhoenixDatabase {
     ''');
 
     await _migrateModelLab(db);
+    await _migrateControlCenter(db);
 
     await db.execute('''
       INSERT INTO app_meta (key, value)
-      VALUES ('schema_version', '8')
+      VALUES ('schema_version', '9')
       ON CONFLICT (key) DO UPDATE
       SET value = EXCLUDED.value, updated_at = NOW()
+    ''');
+  }
+
+  /// PHÖNIX CONTROL CENTER (internes Admin-Webapp-Backend, additiv): eigene
+  /// Mitarbeiter-/Session-/Audit-Tabellen, komplett getrennt vom bestehenden
+  /// statischen `PHOENIX_ADMIN_TOKEN`, das weiterhin unverändert für die
+  /// bestehenden `/api/admin/*`-Routen genutzt wird. Verändert oder löscht
+  /// keine bestehenden PHÖNIX-Produktionsdaten.
+  Future<void> _migrateControlCenter(Connection db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS admin_employees (
+        id BIGSERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        login TEXT NOT NULL UNIQUE,
+        email TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        role TEXT NOT NULL,
+        permission_overrides JSONB NOT NULL DEFAULT '{}',
+        department TEXT,
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        last_login_at TIMESTAMPTZ,
+        CHECK (role IN ('OWNER', 'ADMIN', 'TECHNICAL', 'SUPPORT', 'CONTENT', 'MARKETING')),
+        CHECK (status IN ('active', 'disabled'))
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_admin_employees_login
+      ON admin_employees (login)
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_admin_employees_role_status
+      ON admin_employees (role, status)
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS admin_sessions (
+        token TEXT PRIMARY KEY,
+        employee_id BIGINT NOT NULL REFERENCES admin_employees(id),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        expires_at TIMESTAMPTZ NOT NULL,
+        revoked_at TIMESTAMPTZ,
+        ip TEXT,
+        user_agent TEXT
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_admin_sessions_employee
+      ON admin_sessions (employee_id)
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_admin_sessions_expiry
+      ON admin_sessions (expires_at)
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS admin_audit_log (
+        id BIGSERIAL PRIMARY KEY,
+        employee_id BIGINT REFERENCES admin_employees(id),
+        employee_login TEXT,
+        area TEXT NOT NULL,
+        object_type TEXT,
+        object_id TEXT,
+        action TEXT NOT NULL,
+        previous_value JSONB,
+        new_value JSONB,
+        reason TEXT,
+        comment TEXT,
+        ip TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        reverted BOOLEAN NOT NULL DEFAULT FALSE,
+        reverted_at TIMESTAMPTZ
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_admin_audit_log_created
+      ON admin_audit_log (created_at DESC)
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_admin_audit_log_area
+      ON admin_audit_log (area, created_at DESC)
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_admin_audit_log_employee
+      ON admin_audit_log (employee_id, created_at DESC)
     ''');
   }
 
@@ -4620,6 +4706,478 @@ class PhoenixDatabase {
         'kickoff': kickoff?.toUtc().toIso8601String(),
       },
     );
+  }
+
+  // ---------------------------------------------------------------------
+  // PHÖNIX CONTROL CENTER (internes Admin-Webapp-Backend, additiv). Eigene
+  // Mitarbeiter-/Session-/Audit-Queries, komplett getrennt vom bestehenden
+  // `PHOENIX_ADMIN_TOKEN`-Mechanismus. Tabellen siehe
+  // `_migrateControlCenter`.
+  // ---------------------------------------------------------------------
+
+  Future<int> countAdminEmployees() async {
+    final db = await connection();
+    final result = await db.execute('SELECT COUNT(*) FROM admin_employees');
+    return (result.first[0] as int?) ?? 0;
+  }
+
+  Future<Map<String, Object?>> insertAdminEmployee({
+    required String name,
+    required String login,
+    required String email,
+    required String passwordHash,
+    required String role,
+    String? department,
+    Map<String, Object?> permissionOverrides = const {},
+    String status = 'active',
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        INSERT INTO admin_employees (
+          name, login, email, password_hash, role, permission_overrides,
+          department, status
+        ) VALUES (
+          @name, @login, @email, @password_hash, @role,
+          CAST(@permission_overrides AS JSONB), @department, @status
+        )
+        RETURNING *
+      '''),
+      parameters: {
+        'name': name,
+        'login': login,
+        'email': email,
+        'password_hash': passwordHash,
+        'role': role,
+        'permission_overrides': jsonEncode(permissionOverrides),
+        'department': department,
+        'status': status,
+      },
+    );
+    return Map<String, Object?>.from(result.first.toColumnMap());
+  }
+
+  Future<Map<String, Object?>?> adminEmployeeByLogin(String login) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT * FROM admin_employees WHERE login = @login LIMIT 1
+      '''),
+      parameters: {'login': login},
+    );
+    if (result.isEmpty) return null;
+    return Map<String, Object?>.from(result.first.toColumnMap());
+  }
+
+  Future<Map<String, Object?>?> adminEmployeeById(int id) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('SELECT * FROM admin_employees WHERE id = @id LIMIT 1'),
+      parameters: {'id': id},
+    );
+    if (result.isEmpty) return null;
+    return Map<String, Object?>.from(result.first.toColumnMap());
+  }
+
+  /// Section "GET /employees": Mitarbeiterliste inkl. Anzahl aktuell aktiver
+  /// (nicht abgelaufener, nicht widerrufener) Sessions je Mitarbeiter.
+  Future<List<Map<String, Object?>>> listAdminEmployeesWithActiveSessionCounts() async {
+    final db = await connection();
+    final result = await db.execute('''
+      SELECT
+        e.*,
+        COUNT(s.token) FILTER (
+          WHERE s.revoked_at IS NULL AND s.expires_at > NOW()
+        ) AS active_session_count
+      FROM admin_employees e
+      LEFT JOIN admin_sessions s ON s.employee_id = e.id
+      GROUP BY e.id
+      ORDER BY e.created_at ASC
+    ''');
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  /// Aktualisiert nur die übergebenen Felder. `department` kann bewusst auf
+  /// NULL gesetzt werden - dafür muss [departmentProvided] `true` sein.
+  Future<Map<String, Object?>?> updateAdminEmployee({
+    required int id,
+    String? role,
+    bool departmentProvided = false,
+    String? department,
+    Map<String, Object?>? permissionOverrides,
+    String? status,
+  }) async {
+    final db = await connection();
+    final setClauses = <String>[];
+    final parameters = <String, Object?>{'id': id};
+
+    if (role != null) {
+      setClauses.add('role = @role');
+      parameters['role'] = role;
+    }
+    if (departmentProvided) {
+      setClauses.add('department = @department');
+      parameters['department'] = department;
+    }
+    if (permissionOverrides != null) {
+      setClauses.add('permission_overrides = CAST(@permission_overrides AS JSONB)');
+      parameters['permission_overrides'] = jsonEncode(permissionOverrides);
+    }
+    if (status != null) {
+      setClauses.add('status = @status');
+      parameters['status'] = status;
+    }
+
+    if (setClauses.isEmpty) {
+      return adminEmployeeById(id);
+    }
+
+    final result = await db.execute(
+      Sql.named('''
+        UPDATE admin_employees
+        SET ${setClauses.join(', ')}
+        WHERE id = @id
+        RETURNING *
+      '''),
+      parameters: parameters,
+    );
+    if (result.isEmpty) return null;
+    return Map<String, Object?>.from(result.first.toColumnMap());
+  }
+
+  /// Setzt `status = 'disabled'` und widerruft in derselben Transaktion alle
+  /// noch aktiven Sessions dieses Mitarbeiters (Section "disable revokes
+  /// sessions"). Der Aufrufer muss den Last-Owner-Schutz vorher separat über
+  /// [countActiveOwners] prüfen.
+  Future<Map<String, Object?>?> disableAdminEmployeeAndRevokeSessions(
+    int id,
+  ) async {
+    final db = await connection();
+    return db.runTx((session) async {
+      final result = await session.execute(
+        Sql.named('''
+          UPDATE admin_employees
+          SET status = 'disabled'
+          WHERE id = @id
+          RETURNING *
+        '''),
+        parameters: {'id': id},
+      );
+      if (result.isEmpty) return null;
+      await session.execute(
+        Sql.named('''
+          UPDATE admin_sessions
+          SET revoked_at = NOW()
+          WHERE employee_id = @id AND revoked_at IS NULL
+        '''),
+        parameters: {'id': id},
+      );
+      return Map<String, Object?>.from(result.first.toColumnMap());
+    });
+  }
+
+  Future<int> countActiveOwners() async {
+    final db = await connection();
+    final result = await db.execute('''
+      SELECT COUNT(*) FROM admin_employees
+      WHERE role = 'OWNER' AND status = 'active'
+    ''');
+    return (result.first[0] as int?) ?? 0;
+  }
+
+  Future<void> touchAdminEmployeeLastLogin(int id) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        UPDATE admin_employees SET last_login_at = NOW() WHERE id = @id
+      '''),
+      parameters: {'id': id},
+    );
+  }
+
+  Future<void> createAdminSession({
+    required int employeeId,
+    required String token,
+    required DateTime expiresAt,
+    String? ip,
+    String? userAgent,
+  }) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        INSERT INTO admin_sessions (
+          token, employee_id, expires_at, ip, user_agent
+        ) VALUES (@token, @employee_id, @expires_at, @ip, @user_agent)
+      '''),
+      parameters: {
+        'token': token,
+        'employee_id': employeeId,
+        'expires_at': expiresAt.toUtc().toIso8601String(),
+        'ip': ip,
+        'user_agent': userAgent,
+      },
+    );
+  }
+
+  /// Liefert eine Session zusammen mit dem zugehörigen Mitarbeiter in einer
+  /// einzigen Abfrage (Auth-Guard, Section "GET /auth/me" etc.). Die
+  /// Employee-Spalten sind so benannt, dass `Employee.fromRow` sie direkt
+  /// einlesen kann; die Session-Gültigkeit selbst wird zusätzlich über
+  /// `session_expires_at`/`session_revoked_at` im Aufrufer geprüft
+  /// (`isSessionActive`).
+  Future<Map<String, Object?>?> adminSessionWithEmployee(String token) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT
+          e.id, e.name, e.login, e.email, e.role, e.permission_overrides,
+          e.department, e.status, e.created_at, e.last_login_at,
+          s.token AS session_token,
+          s.expires_at AS session_expires_at,
+          s.revoked_at AS session_revoked_at
+        FROM admin_sessions s
+        JOIN admin_employees e ON e.id = s.employee_id
+        WHERE s.token = @token
+        LIMIT 1
+      '''),
+      parameters: {'token': token},
+    );
+    if (result.isEmpty) return null;
+    return Map<String, Object?>.from(result.first.toColumnMap());
+  }
+
+  Future<void> revokeAdminSession(String token) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        UPDATE admin_sessions
+        SET revoked_at = NOW()
+        WHERE token = @token AND revoked_at IS NULL
+      '''),
+      parameters: {'token': token},
+    );
+  }
+
+  Future<void> insertAdminAuditLog({
+    int? employeeId,
+    String? employeeLogin,
+    required String area,
+    String? objectType,
+    String? objectId,
+    required String action,
+    Map<String, Object?>? previousValue,
+    Map<String, Object?>? newValue,
+    String? reason,
+    String? comment,
+    String? ip,
+  }) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        INSERT INTO admin_audit_log (
+          employee_id, employee_login, area, object_type, object_id, action,
+          previous_value, new_value, reason, comment, ip
+        ) VALUES (
+          @employee_id, @employee_login, @area, @object_type, @object_id,
+          @action, CAST(@previous_value AS JSONB), CAST(@new_value AS JSONB),
+          @reason, @comment, @ip
+        )
+      '''),
+      parameters: {
+        'employee_id': employeeId,
+        'employee_login': employeeLogin,
+        'area': area,
+        'object_type': objectType,
+        'object_id': objectId,
+        'action': action,
+        'previous_value': previousValue == null ? null : jsonEncode(previousValue),
+        'new_value': newValue == null ? null : jsonEncode(newValue),
+        'reason': reason,
+        'comment': comment,
+        'ip': ip,
+      },
+    );
+  }
+
+  Future<List<Map<String, Object?>>> listAdminAuditLog({
+    String? area,
+    int? employeeId,
+    int limit = 100,
+  }) async {
+    final db = await connection();
+    final safeLimit = limit.clamp(1, 500);
+    final conditions = <String>[];
+    final parameters = <String, Object?>{'limit': safeLimit};
+
+    if (area != null && area.trim().isNotEmpty) {
+      conditions.add('area = @area');
+      parameters['area'] = area;
+    }
+    if (employeeId != null) {
+      conditions.add('employee_id = @employee_id');
+      parameters['employee_id'] = employeeId;
+    }
+
+    final whereClause = conditions.isEmpty ? '' : 'WHERE ${conditions.join(' AND ')}';
+
+    final result = await db.execute(
+      Sql.named('''
+        SELECT * FROM admin_audit_log
+        $whereClause
+        ORDER BY created_at DESC
+        LIMIT @limit
+      '''),
+      parameters: parameters,
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  // -- Control Center /overview -----------------------------------------
+
+  Future<List<Map<String, Object?>>> apiSportsDailyUsageToday() async {
+    final db = await connection();
+    final result = await db.execute('''
+      SELECT api_name, usage_date::text AS usage_date, requests, updated_at
+      FROM api_sports_daily_usage
+      WHERE usage_date = CURRENT_DATE
+      ORDER BY api_name ASC
+    ''');
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  Future<Map<String, int>> footballLeagueManualStatusCounts() async {
+    final db = await connection();
+    final result = await db.execute('''
+      SELECT manual_status, COUNT(*) FROM football_leagues
+      GROUP BY manual_status
+    ''');
+    return {
+      for (final row in result) row[0].toString(): (row[1] as int?) ?? 0,
+    };
+  }
+
+  Future<int> countPendingFootballDailyPipelineJobs() async {
+    final db = await connection();
+    final result = await db.execute('''
+      SELECT COUNT(*) FROM football_daily_pipeline_jobs
+      WHERE status NOT IN ('completed', 'failed')
+    ''');
+    return (result.first[0] as int?) ?? 0;
+  }
+
+  Future<int> countPendingFootballMatchSettlementJobs() async {
+    final db = await connection();
+    final result = await db.execute('''
+      SELECT COUNT(*) FROM football_match_settlement_jobs
+      WHERE status NOT IN ('completed', 'failed')
+    ''');
+    return (result.first[0] as int?) ?? 0;
+  }
+
+  // -- Control Center /search ---------------------------------------------
+
+  Future<List<Map<String, Object?>>> searchFootballLeaguesByText(
+    String query, {
+    int limit = 20,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT league_id, league_name FROM football_leagues
+        WHERE league_name ILIKE @pattern OR league_id ILIKE @pattern
+        ORDER BY league_name ASC
+        LIMIT @limit
+      '''),
+      parameters: {'pattern': '%$query%', 'limit': limit},
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  Future<List<Map<String, Object?>>> searchModelVersionsByText(
+    String query, {
+    int limit = 20,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT id, readable_version, status FROM phoenix_model_versions
+        WHERE readable_version ILIKE @pattern OR status ILIKE @pattern
+        ORDER BY created_at DESC
+        LIMIT @limit
+      '''),
+      parameters: {'pattern': '%$query%', 'limit': limit},
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  Future<List<Map<String, Object?>>> searchLearningRunsByText(
+    String query, {
+    int limit = 20,
+  }) async {
+    final numericId = int.tryParse(query.trim());
+    if (numericId == null) return const <Map<String, Object?>>[];
+
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT id, status, started_at FROM phoenix_learning_runs
+        WHERE id = @id
+        ORDER BY started_at DESC
+        LIMIT @limit
+      '''),
+      parameters: {'id': numericId, 'limit': limit},
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  Future<List<Map<String, Object?>>> searchNewsArticlesByText(
+    String query, {
+    int limit = 20,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT id, title_de FROM news_articles
+        WHERE title_de ILIKE @pattern
+        ORDER BY published_at DESC
+        LIMIT @limit
+      '''),
+      parameters: {'pattern': '%$query%', 'limit': limit},
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  Future<List<Map<String, Object?>>> searchAdminEmployeesByText(
+    String query, {
+    int limit = 20,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT id, name, login, email FROM admin_employees
+        WHERE name ILIKE @pattern OR login ILIKE @pattern OR email ILIKE @pattern
+        ORDER BY name ASC
+        LIMIT @limit
+      '''),
+      parameters: {'pattern': '%$query%', 'limit': limit},
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
   }
 
   Future<void> close() async {
