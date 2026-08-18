@@ -34,7 +34,10 @@ class MonthlyReviewService {
       };
     }
 
-    final locked = await database.acquireModelLabLock(lockName);
+    final locked = await database.acquireModelLabLock(
+      lockName,
+      staleAfterMinutes: config.staleLockMinutes,
+    );
     if (!locked) {
       return {
         'status': 'skipped',

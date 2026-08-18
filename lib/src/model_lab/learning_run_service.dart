@@ -29,13 +29,23 @@ class LearningRunService {
   static const String lockName = 'learning_run';
 
   Future<Map<String, Object?>> run({required String triggerType}) async {
-    final locked = await database.acquireModelLabLock(lockName);
+    final locked = await database.acquireModelLabLock(
+      lockName,
+      staleAfterMinutes: config.staleLockMinutes,
+    );
     if (!locked) {
       return {
         'status': 'skipped',
         'reason': 'Ein anderer Learning Run läuft bereits (Lock aktiv).',
       };
     }
+
+    // Section 64/65: falls der Lock gerade per Stale-Reclaim übernommen
+    // wurde, hängt evtl. noch ein alter Run auf "running" - sauber als
+    // "failed" nachtragen, bevor ein neuer Run beginnt.
+    await database.reconcileOrphanedLearningRuns(
+      staleAfterMinutes: config.staleLockMinutes,
+    );
 
     final runId = await database.createLearningRun(triggerType: triggerType);
     await database.insertModelLabAuditLog(

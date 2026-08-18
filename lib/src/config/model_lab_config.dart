@@ -33,6 +33,7 @@ class ModelLabConfig {
     required this.monthlyReviewWeekday,
     required this.monthlyReviewMaxDayOfMonth,
     required this.maxChallengersPerLeagueMarket,
+    required this.staleLockMinutes,
   });
 
   /// Section 53/54: Solange false, wird KEINE echte Promotion durchgeführt -
@@ -115,6 +116,14 @@ class ModelLabConfig {
   /// damit ein Learning Run nicht unbegrenzt viele immutable Modelle erzeugt.
   final int maxChallengersPerLeagueMarket;
 
+  /// Section 64: ein Advisory-Lock (`phoenix_model_lab_locks`), der älter als
+  /// dieser Wert ist, gilt als verwaist (Prozess wurde vermutlich durch einen
+  /// Deploy/Crash beendet, bevor `finally { releaseModelLabLock(...) }`
+  /// erreicht wurde) und darf automatisch neu vergeben werden. Ein
+  /// gleichzeitig noch als "running" markierter Learning Run wird dabei als
+  /// "failed" nachgetragen, statt für immer hängen zu bleiben.
+  final int staleLockMinutes;
+
   factory ModelLabConfig.fromEnvironment() {
     String read(String key, [String fallback = '']) =>
         Platform.environment[key]?.trim() ?? fallback;
@@ -195,6 +204,8 @@ class ModelLabConfig {
           readInt('PHOENIX_MODEL_LAB_MONTHLY_REVIEW_MAX_DAY', 7),
       maxChallengersPerLeagueMarket:
           readInt('PHOENIX_MODEL_LAB_MAX_CHALLENGERS', 4),
+      staleLockMinutes:
+          readInt('PHOENIX_MODEL_LAB_STALE_LOCK_MINUTES', 180),
     );
   }
 }

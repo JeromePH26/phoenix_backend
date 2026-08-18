@@ -4190,18 +4190,60 @@ class PhoenixDatabase {
 
   /// Section 64: einfaches Advisory-Lock. Gibt `true` zurück, wenn der Lock
   /// erfolgreich erworben wurde (kein anderer Learning Run/Review aktiv).
-  Future<bool> acquireModelLabLock(String lockName) async {
+  ///
+  /// Ist der bestehende Lock älter als [staleAfterMinutes], gilt er als
+  /// verwaist (der Prozess, der ihn hielt, wurde vermutlich durch einen
+  /// Deploy/Crash beendet, bevor `releaseModelLabLock` je erreicht wurde) und
+  /// wird atomar neu vergeben, statt für immer jeden künftigen Lauf zu
+  /// blockieren.
+  Future<bool> acquireModelLabLock(
+    String lockName, {
+    required int staleAfterMinutes,
+  }) async {
     final db = await connection();
     final result = await db.execute(
       Sql.named('''
         INSERT INTO phoenix_model_lab_locks (lock_name, locked_by)
         VALUES (@name, 'model_lab')
-        ON CONFLICT (lock_name) DO NOTHING
+        ON CONFLICT (lock_name) DO UPDATE SET
+          locked_at = NOW(),
+          locked_by = 'model_lab'
+        WHERE phoenix_model_lab_locks.locked_at
+          < NOW() - make_interval(mins => @stale_minutes)
         RETURNING lock_name
       '''),
-      parameters: {'name': lockName},
+      parameters: {'name': lockName, 'stale_minutes': staleAfterMinutes},
     );
     return result.isNotEmpty;
+  }
+
+  /// Section 64/65: markiert Learning Runs, die noch als "running" gelten,
+  /// aber älter als [staleAfterMinutes] sind, als "failed" nach. Wird direkt
+  /// nach dem (ggf. per Stale-Reclaim erfolgreichen) Lock-Erwerb aufgerufen,
+  /// damit die UI nie unbegrenzt einen toten Run als RUNNING anzeigt.
+  Future<void> reconcileOrphanedLearningRuns({
+    required int staleAfterMinutes,
+  }) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        UPDATE phoenix_learning_runs SET
+          status = 'failed',
+          completed_at = NOW(),
+          current_step = 'orphaned',
+          errors = CAST(@errors AS JSONB)
+        WHERE status = 'running'
+          AND started_at < NOW() - make_interval(mins => @stale_minutes)
+      '''),
+      parameters: {
+        'stale_minutes': staleAfterMinutes,
+        'errors': jsonEncode([
+          'Orphaned: Prozess wurde vor Abschluss beendet (z.B. durch einen '
+              'Deploy) und automatisch per Stale-Lock-Reconciliation als '
+              'failed markiert.',
+        ]),
+      },
+    );
   }
 
   Future<void> releaseModelLabLock(String lockName) async {

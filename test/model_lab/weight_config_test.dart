@@ -30,6 +30,7 @@ ModelLabConfig _config({int shrinkageK = 150}) => ModelLabConfig(
   monthlyReviewWeekday: DateTime.wednesday,
   monthlyReviewMaxDayOfMonth: 7,
   maxChallengersPerLeagueMarket: 4,
+  staleLockMinutes: 180,
 );
 
 void main() {

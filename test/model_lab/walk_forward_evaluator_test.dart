@@ -37,6 +37,7 @@ ModelLabConfig _config({
   monthlyReviewWeekday: DateTime.wednesday,
   monthlyReviewMaxDayOfMonth: 7,
   maxChallengersPerLeagueMarket: 4,
+  staleLockMinutes: 180,
 );
 
 List<LearningSample> _chronologicalSamples(int count) {

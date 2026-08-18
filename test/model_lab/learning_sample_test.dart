@@ -31,6 +31,7 @@ ModelLabConfig _config() => ModelLabConfig(
   monthlyReviewWeekday: DateTime.wednesday,
   monthlyReviewMaxDayOfMonth: 7,
   maxChallengersPerLeagueMarket: 4,
+  staleLockMinutes: 180,
 );
 
 LearningSample _sample({
