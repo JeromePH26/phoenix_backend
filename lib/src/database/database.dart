@@ -1010,11 +1010,18 @@ class PhoenixDatabase {
     // Mitarbeiteraktion (created_by_employee_id NOT NULL, kein System-Actor
     // möglich) - Anti-Abuse (unten) kann nur markieren, niemals selbst eine
     // Zeile hier erzeugen.
+    // `TO_CHAR(timestamptz, ...)` und `EXTRACT(... FROM timestamptz)` sind in
+    // Postgres NICHT immutable (Ergebnis hängt von der Session-TimeZone ab)
+    // und werden deshalb in einer STORED Generated Column abgelehnt
+    // (42P17). `created_at AT TIME ZONE 'UTC'` konvertiert mit einer FEST
+    // codierten Zone (kein Session-State) zu `timestamp` und macht den
+    // Ausdruck dadurch deterministisch/immutable.
     await db.execute('''
       CREATE TABLE IF NOT EXISTS user_bans (
         id BIGSERIAL PRIMARY KEY,
         case_number TEXT GENERATED ALWAYS AS (
-          'BAN-' || TO_CHAR(created_at, 'YYYY') || '-' || LPAD(id::text, 5, '0')
+          'BAN-' || EXTRACT(YEAR FROM (created_at AT TIME ZONE 'UTC'))::text
+          || '-' || LPAD(id::text, 5, '0')
         ) STORED,
         user_id BIGINT NOT NULL REFERENCES users(id),
         status TEXT NOT NULL DEFAULT 'ACTIVE',
