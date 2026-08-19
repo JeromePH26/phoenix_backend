@@ -53,6 +53,13 @@ class ControlCenterRoutes {
     router.get('/jobs', _jobs);
     router.get('/app-control/status', _appControlStatus);
     router.post('/app-control/status', _updateAppControlStatus);
+    router.get('/devices', _listDevices);
+    router.get('/devices/<installationId>', _deviceDetail);
+    router.get('/support/assignable-employees', _assignableEmployees);
+    router.get('/support/tickets', _listSupportTickets);
+    router.get('/support/tickets/<id|[0-9]+>', _supportTicketDetail);
+    router.patch('/support/tickets/<id|[0-9]+>', _updateSupportTicket);
+    router.post('/support/tickets/<id|[0-9]+>/reply', _replySupportTicket);
 
     return router;
   }
@@ -603,6 +610,216 @@ class ControlCenterRoutes {
       );
 
       return jsonResponse({'status': _jsonSafe(updated)});
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  // -- Devices (Phase 4, installation-based - kein Nutzerkonto-System) ----
+
+  Future<Response> _listDevices(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    if (!auth.employee!.hasPermission('devices.view')) return _forbidden();
+
+    try {
+      final devices = await database.listPushDevices();
+      return jsonResponse({'devices': devices.map(_jsonSafe).toList()});
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  Future<Response> _deviceDetail(Request request, String installationId) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    if (!auth.employee!.hasPermission('devices.view')) return _forbidden();
+
+    try {
+      final device = await database.pushDeviceDetail(installationId);
+      if (device == null) {
+        return jsonResponse({'error': 'Gerät nicht gefunden.'}, statusCode: 404);
+      }
+      final tickets = await database.supportTicketsForInstallation(installationId);
+      return jsonResponse({
+        'device': _jsonSafe(device),
+        'tickets': tickets.map(_jsonSafe).toList(),
+      });
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  // -- Support Tickets (Phase 4, installation-based) -----------------------
+
+  Future<Response> _assignableEmployees(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    if (!auth.employee!.hasPermission('support.view')) return _forbidden();
+
+    try {
+      final employees = await database.listActiveAdminEmployeesMinimal();
+      return jsonResponse({'employees': employees.map(_jsonSafe).toList()});
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  Future<Response> _listSupportTickets(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    if (!auth.employee!.hasPermission('support.view')) return _forbidden();
+
+    final query = request.url.queryParameters;
+    try {
+      final tickets = await database.listSupportTickets(
+        status: query['status'],
+        category: query['category'],
+        assignedEmployeeId: int.tryParse(query['assignedEmployeeId'] ?? ''),
+      );
+      return jsonResponse({'tickets': tickets.map(_jsonSafe).toList()});
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  Future<Response> _supportTicketDetail(Request request, String id) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    if (!auth.employee!.hasPermission('support.view')) return _forbidden();
+
+    final ticketId = int.parse(id);
+    try {
+      final ticket = await database.supportTicket(ticketId);
+      if (ticket == null) {
+        return jsonResponse({'error': 'Ticket nicht gefunden.'}, statusCode: 404);
+      }
+      final messages = await database.supportTicketMessages(ticketId);
+      return jsonResponse({
+        'ticket': _jsonSafe(ticket),
+        'messages': messages.map(_jsonSafe).toList(),
+      });
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  Future<Response> _updateSupportTicket(Request request, String id) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    final actor = auth.employee!;
+    if (!actor.hasPermission('support.manage')) return _forbidden();
+
+    final ticketId = int.parse(id);
+    const validStatuses = {'NEU', 'IN_BEARBEITUNG', 'WARTET_AUF_NUTZER', 'GELOEST', 'GESCHLOSSEN'};
+    const validPriorities = {'niedrig', 'normal', 'hoch', 'dringend'};
+    const validCategories = {'frage', 'bug', 'premium', 'match', 'sonstiges'};
+
+    try {
+      final before = await database.supportTicket(ticketId);
+      if (before == null) {
+        return jsonResponse({'error': 'Ticket nicht gefunden.'}, statusCode: 404);
+      }
+
+      final body = jsonDecode(await request.readAsString());
+      if (body is! Map<String, dynamic>) {
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+      }
+      final status = body['status']?.toString();
+      final priority = body['priority']?.toString();
+      final category = body['category']?.toString();
+      final hasAssignedKey = body.containsKey('assignedEmployeeId');
+      final assignedEmployeeId = body['assignedEmployeeId'] == null
+          ? null
+          : int.tryParse(body['assignedEmployeeId'].toString());
+
+      if (status != null && !validStatuses.contains(status)) {
+        return jsonResponse({'error': 'Ungültiger status.'}, statusCode: 400);
+      }
+      if (priority != null && !validPriorities.contains(priority)) {
+        return jsonResponse({'error': 'Ungültige priority.'}, statusCode: 400);
+      }
+      if (category != null && !validCategories.contains(category)) {
+        return jsonResponse({'error': 'Ungültige category.'}, statusCode: 400);
+      }
+
+      final updated = await database.updateSupportTicket(
+        id: ticketId,
+        status: status,
+        priority: priority,
+        category: category,
+        assignedEmployeeId: assignedEmployeeId,
+        clearAssignedEmployee: hasAssignedKey && body['assignedEmployeeId'] == null,
+      );
+
+      final diff = diffEmployeeFields(before: before, after: updated!);
+      if (diff.previousValue.isNotEmpty) {
+        await database.insertAdminAuditLog(
+          employeeId: actor.id,
+          employeeLogin: actor.login,
+          area: 'support',
+          objectType: 'ticket',
+          objectId: id,
+          action: 'ticket.update',
+          previousValue: diff.previousValue,
+          newValue: diff.newValue,
+          ip: _clientIp(request),
+        );
+      }
+
+      return jsonResponse({'ticket': _jsonSafe(updated)});
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  Future<Response> _replySupportTicket(Request request, String id) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    final actor = auth.employee!;
+    if (!actor.hasPermission('support.manage')) return _forbidden();
+
+    final ticketId = int.parse(id);
+    try {
+      final ticket = await database.supportTicket(ticketId);
+      if (ticket == null) {
+        return jsonResponse({'error': 'Ticket nicht gefunden.'}, statusCode: 404);
+      }
+
+      final body = jsonDecode(await request.readAsString());
+      if (body is! Map<String, dynamic>) {
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+      }
+      final message = body['message']?.toString().trim() ?? '';
+      final internalNote = body['internalNote'] == true;
+      if (message.isEmpty) {
+        return jsonResponse({'error': 'message ist erforderlich.'}, statusCode: 400);
+      }
+
+      final saved = await database.addSupportTicketMessage(
+        ticketId: ticketId,
+        authorType: 'employee',
+        employeeId: actor.id,
+        message: message,
+        internalNote: internalNote,
+      );
+      // Eine sichtbare Mitarbeiterantwort setzt das Ticket auf "wartet auf
+      // Nutzer" (Section 22/23), eine interne Notiz ändert den Status nicht.
+      if (!internalNote) {
+        await database.updateSupportTicket(id: ticketId, status: 'WARTET_AUF_NUTZER');
+      }
+
+      await database.insertAdminAuditLog(
+        employeeId: actor.id,
+        employeeLogin: actor.login,
+        area: 'support',
+        objectType: 'ticket',
+        objectId: id,
+        action: internalNote ? 'ticket.internal_note' : 'ticket.reply',
+        ip: _clientIp(request),
+      );
+
+      return jsonResponse({'message': _jsonSafe(saved)}, statusCode: 201);
     } catch (error) {
       return jsonResponse({'error': error.toString()}, statusCode: 500);
     }

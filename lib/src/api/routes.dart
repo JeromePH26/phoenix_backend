@@ -503,6 +503,112 @@ class ApiRoutes {
       return jsonResponse({'newsEnabled': enabled});
     });
 
+    // Section 22: Support-Tickets. PHÖNIX hat kein Nutzerkonto-System, daher
+    // an installation_id geknüpft statt an einen Account - gleiche
+    // Auth-Konvention wie /api/push/*: x-phoenix-installation-id-Header bzw.
+    // installationId im Body, kein Admin-Token.
+    const validCategories = {'frage', 'bug', 'premium', 'match', 'sonstiges'};
+
+    router.post('/api/support/tickets', (Request request) async {
+      try {
+        final body = jsonDecode(await request.readAsString());
+        if (body is! Map<String, dynamic>) {
+          return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+        }
+        final installationId = body['installationId']?.toString().trim() ?? '';
+        final subject = body['subject']?.toString().trim() ?? '';
+        final message = body['message']?.toString().trim() ?? '';
+        final category = body['category']?.toString().trim().toLowerCase() ?? 'sonstiges';
+        if (installationId.length < 16 || subject.isEmpty || message.isEmpty) {
+          return jsonResponse({
+            'error': 'installationId, subject und message sind erforderlich.',
+          }, statusCode: 400);
+        }
+        if (!validCategories.contains(category)) {
+          return jsonResponse({
+            'error': 'category muss eines von ${validCategories.join(', ')} sein.',
+          }, statusCode: 400);
+        }
+        final ticket = await database.createSupportTicket(
+          installationId: installationId,
+          category: category,
+          subject: subject,
+          message: message,
+          appVersion: body['appVersion']?.toString(),
+          platform: body['platform']?.toString(),
+          osVersion: body['osVersion']?.toString(),
+          deviceModel: body['deviceModel']?.toString(),
+          matchId: body['matchId']?.toString(),
+          screen: body['screen']?.toString(),
+        );
+        return jsonResponse({'ticket': ticket}, statusCode: 201);
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 400);
+      }
+    });
+
+    router.get('/api/support/tickets', (Request request) async {
+      final installationId =
+          request.headers['x-phoenix-installation-id']?.trim() ?? '';
+      if (installationId.length < 16) {
+        return jsonResponse({'error': 'Installation-ID fehlt.'}, statusCode: 401);
+      }
+      final tickets = await database.supportTicketsForInstallation(installationId);
+      return jsonResponse({'tickets': tickets});
+    });
+
+    router.get('/api/support/tickets/<id|[0-9]+>', (
+      Request request,
+      String id,
+    ) async {
+      final installationId =
+          request.headers['x-phoenix-installation-id']?.trim() ?? '';
+      if (installationId.length < 16) {
+        return jsonResponse({'error': 'Installation-ID fehlt.'}, statusCode: 401);
+      }
+      final ticket = await database.supportTicket(int.parse(id));
+      if (ticket == null || ticket['installation_id'] != installationId) {
+        return jsonResponse({'error': 'Ticket nicht gefunden.'}, statusCode: 404);
+      }
+      final messages = await database.supportTicketMessages(
+        int.parse(id),
+        includeInternal: false,
+      );
+      return jsonResponse({'ticket': ticket, 'messages': messages});
+    });
+
+    router.post('/api/support/tickets/<id|[0-9]+>/reply', (
+      Request request,
+      String id,
+    ) async {
+      final installationId =
+          request.headers['x-phoenix-installation-id']?.trim() ?? '';
+      if (installationId.length < 16) {
+        return jsonResponse({'error': 'Installation-ID fehlt.'}, statusCode: 401);
+      }
+      final ticket = await database.supportTicket(int.parse(id));
+      if (ticket == null || ticket['installation_id'] != installationId) {
+        return jsonResponse({'error': 'Ticket nicht gefunden.'}, statusCode: 404);
+      }
+      try {
+        final body = jsonDecode(await request.readAsString());
+        final message = body is Map ? body['message']?.toString().trim() ?? '' : '';
+        if (message.isEmpty) {
+          return jsonResponse({'error': 'message ist erforderlich.'}, statusCode: 400);
+        }
+        // Nutzerantwort setzt ein wartendes Ticket wieder auf "neu für uns".
+        await database.updateSupportTicket(id: int.parse(id), status: 'IN_BEARBEITUNG');
+        final saved = await database.addSupportTicketMessage(
+          ticketId: int.parse(id),
+          authorType: 'user',
+          message: message,
+        );
+        return jsonResponse({'message': saved}, statusCode: 201);
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 400);
+      }
+    });
+
     router.post('/api/admin/football/scan/phase1', (Request request) async {
       if (!_isAdmin(request)) {
         return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);

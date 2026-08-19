@@ -816,6 +816,7 @@ class PhoenixDatabase {
 
     await _migrateModelLab(db);
     await _migrateControlCenter(db);
+    await _migrateSupport(db);
     await _migrateFootballMatchControls(db);
 
     await db.execute('''
@@ -958,6 +959,63 @@ class PhoenixDatabase {
       INSERT INTO app_control_state (id, status)
       VALUES (1, 'ACTIVE')
       ON CONFLICT (id) DO NOTHING
+    ''');
+  }
+
+  /// PHÖNIX CONTROL CENTER Phase 4 (Section 22-25, additiv): Support-Tickets.
+  /// PHÖNIX hat bisher KEIN Nutzerkonto-System (nur anonyme
+  /// installation_id-Geräte über push_devices, siehe Migration weiter oben) -
+  /// Tickets werden deshalb an installation_id statt an einen Nutzer-Account
+  /// geknüpft. Sobald echte Accounts existieren, kann eine Migration die
+  /// bestehenden Tickets nachträglich verknüpfen.
+  Future<void> _migrateSupport(Connection db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS support_tickets (
+        id BIGSERIAL PRIMARY KEY,
+        installation_id TEXT NOT NULL REFERENCES push_devices(installation_id),
+        category TEXT NOT NULL DEFAULT 'sonstiges',
+        subject TEXT NOT NULL,
+        message TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'NEU',
+        priority TEXT NOT NULL DEFAULT 'normal',
+        assigned_employee_id BIGINT REFERENCES admin_employees(id),
+        app_version TEXT,
+        platform TEXT,
+        os_version TEXT,
+        device_model TEXT,
+        match_id TEXT,
+        screen TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CHECK (status IN ('NEU', 'IN_BEARBEITUNG', 'WARTET_AUF_NUTZER', 'GELOEST', 'GESCHLOSSEN')),
+        CHECK (category IN ('frage', 'bug', 'premium', 'match', 'sonstiges')),
+        CHECK (priority IN ('niedrig', 'normal', 'hoch', 'dringend'))
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_support_tickets_installation
+      ON support_tickets (installation_id, created_at DESC)
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_support_tickets_status
+      ON support_tickets (status, created_at DESC)
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS support_ticket_messages (
+        id BIGSERIAL PRIMARY KEY,
+        ticket_id BIGINT NOT NULL REFERENCES support_tickets(id),
+        author_type TEXT NOT NULL,
+        employee_id BIGINT REFERENCES admin_employees(id),
+        message TEXT NOT NULL,
+        internal_note BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CHECK (author_type IN ('user', 'employee'))
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_support_ticket_messages_ticket
+      ON support_ticket_messages (ticket_id, created_at ASC)
     ''');
   }
 
@@ -4875,6 +4933,22 @@ class PhoenixDatabase {
         .toList();
   }
 
+  /// Minimaler Mitarbeiterauszug (nur id/name, keine Login/E-Mail/Rolle) für
+  /// z.B. Ticket-Zuweisungs-Dropdowns - erlaubt Rollen ohne `employees.view`
+  /// (etwa SUPPORT) trotzdem, Kollegen für die Zuweisung auszuwählen, ohne
+  /// die vollen Mitarbeiterdaten offenzulegen.
+  Future<List<Map<String, Object?>>> listActiveAdminEmployeesMinimal() async {
+    final db = await connection();
+    final result = await db.execute('''
+      SELECT id, name FROM admin_employees
+      WHERE status = 'active'
+      ORDER BY name ASC
+    ''');
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
   /// Aktualisiert nur die übergebenen Felder. `department` kann bewusst auf
   /// NULL gesetzt werden - dafür muss [departmentProvided] `true` sein.
   Future<Map<String, Object?>?> updateAdminEmployee({
@@ -5648,6 +5722,263 @@ class PhoenixDatabase {
     return result
         .map((row) => Map<String, Object?>.from(row.toColumnMap()))
         .toList();
+  }
+
+  // -- Control Center /devices (Phase 4, installation-based) --------------
+
+  Future<List<Map<String, Object?>>> listPushDevices({
+    int limit = 100,
+    int offset = 0,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT
+          d.installation_id, d.platform, d.locale, d.enabled, d.news_enabled,
+          d.created_at::text AS created_at,
+          d.updated_at::text AS updated_at,
+          d.last_seen_at::text AS last_seen_at,
+          (SELECT COUNT(*) FROM football_favorites f WHERE f.installation_id = d.installation_id) AS favorite_count,
+          (SELECT COUNT(*) FROM support_tickets t WHERE t.installation_id = d.installation_id) AS ticket_count
+        FROM push_devices d
+        ORDER BY d.last_seen_at DESC
+        LIMIT @limit OFFSET @offset
+      '''),
+      parameters: {'limit': limit.clamp(1, 500), 'offset': offset.clamp(0, 1000000)},
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  Future<Map<String, Object?>?> pushDeviceDetail(String installationId) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT
+          installation_id, platform, locale, enabled, news_enabled,
+          created_at::text AS created_at,
+          updated_at::text AS updated_at,
+          last_seen_at::text AS last_seen_at
+        FROM push_devices
+        WHERE installation_id = @id
+      '''),
+      parameters: {'id': installationId},
+    );
+    if (result.isEmpty) return null;
+    return Map<String, Object?>.from(result.first.toColumnMap());
+  }
+
+  Future<int> countPushDevices() async {
+    final db = await connection();
+    final result = await db.execute('SELECT COUNT(*) FROM push_devices');
+    return (result.first[0] as int?) ?? 0;
+  }
+
+  // -- Control Center /support (Phase 4, installation-based) ---------------
+
+  Future<Map<String, Object?>> createSupportTicket({
+    required String installationId,
+    required String category,
+    required String subject,
+    required String message,
+    String? appVersion,
+    String? platform,
+    String? osVersion,
+    String? deviceModel,
+    String? matchId,
+    String? screen,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        INSERT INTO support_tickets (
+          installation_id, category, subject, message,
+          app_version, platform, os_version, device_model, match_id, screen
+        ) VALUES (
+          @installation_id, @category, @subject, @message,
+          @app_version, @platform, @os_version, @device_model, @match_id, @screen
+        )
+        RETURNING *
+      '''),
+      parameters: {
+        'installation_id': installationId,
+        'category': category,
+        'subject': subject,
+        'message': message,
+        'app_version': appVersion,
+        'platform': platform,
+        'os_version': osVersion,
+        'device_model': deviceModel,
+        'match_id': matchId,
+        'screen': screen,
+      },
+    );
+    return _supportTicketRow(result.first.toColumnMap());
+  }
+
+  Future<List<Map<String, Object?>>> supportTicketsForInstallation(
+    String installationId, {
+    int limit = 50,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT * FROM support_tickets
+        WHERE installation_id = @installation_id
+        ORDER BY created_at DESC
+        LIMIT @limit
+      '''),
+      parameters: {'installation_id': installationId, 'limit': limit.clamp(1, 200)},
+    );
+    return result.map((row) => _supportTicketRow(row.toColumnMap())).toList();
+  }
+
+  Future<Map<String, Object?>?> supportTicket(int id) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('SELECT * FROM support_tickets WHERE id = @id'),
+      parameters: {'id': id},
+    );
+    if (result.isEmpty) return null;
+    return _supportTicketRow(result.first.toColumnMap());
+  }
+
+  Future<List<Map<String, Object?>>> listSupportTickets({
+    String? status,
+    String? category,
+    int? assignedEmployeeId,
+    int limit = 100,
+  }) async {
+    final db = await connection();
+    final conditions = <String>[];
+    final parameters = <String, Object?>{'limit': limit.clamp(1, 500)};
+
+    if (status != null && status.trim().isNotEmpty) {
+      conditions.add('status = @status');
+      parameters['status'] = status;
+    }
+    if (category != null && category.trim().isNotEmpty) {
+      conditions.add('category = @category');
+      parameters['category'] = category;
+    }
+    if (assignedEmployeeId != null) {
+      conditions.add('assigned_employee_id = @assigned_employee_id');
+      parameters['assigned_employee_id'] = assignedEmployeeId;
+    }
+    final where = conditions.isEmpty ? '' : 'WHERE ${conditions.join(' AND ')}';
+
+    final result = await db.execute(
+      Sql.named('''
+        SELECT * FROM support_tickets
+        $where
+        ORDER BY created_at DESC
+        LIMIT @limit
+      '''),
+      parameters: parameters,
+    );
+    return result.map((row) => _supportTicketRow(row.toColumnMap())).toList();
+  }
+
+  Future<Map<String, Object?>?> updateSupportTicket({
+    required int id,
+    String? status,
+    String? priority,
+    String? category,
+    int? assignedEmployeeId,
+    bool clearAssignedEmployee = false,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        UPDATE support_tickets SET
+          status = COALESCE(@status, status),
+          priority = COALESCE(@priority, priority),
+          category = COALESCE(@category, category),
+          assigned_employee_id = CASE
+            WHEN @clear_assigned THEN NULL
+            ELSE COALESCE(@assigned_employee_id, assigned_employee_id)
+          END,
+          updated_at = NOW()
+        WHERE id = @id
+        RETURNING *
+      '''),
+      parameters: {
+        'id': id,
+        'status': status,
+        'priority': priority,
+        'category': category,
+        'assigned_employee_id': assignedEmployeeId,
+        'clear_assigned': clearAssignedEmployee,
+      },
+    );
+    if (result.isEmpty) return null;
+    return _supportTicketRow(result.first.toColumnMap());
+  }
+
+  Future<Map<String, Object?>> addSupportTicketMessage({
+    required int ticketId,
+    required String authorType,
+    int? employeeId,
+    required String message,
+    bool internalNote = false,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        INSERT INTO support_ticket_messages (
+          ticket_id, author_type, employee_id, message, internal_note
+        ) VALUES (@ticket_id, @author_type, @employee_id, @message, @internal_note)
+        RETURNING id, ticket_id, author_type, employee_id, message, internal_note,
+          created_at::text AS created_at
+      '''),
+      parameters: {
+        'ticket_id': ticketId,
+        'author_type': authorType,
+        'employee_id': employeeId,
+        'message': message,
+        'internal_note': internalNote,
+      },
+    );
+    await db.execute(
+      Sql.named('UPDATE support_tickets SET updated_at = NOW() WHERE id = @id'),
+      parameters: {'id': ticketId},
+    );
+    return Map<String, Object?>.from(result.first.toColumnMap());
+  }
+
+  Future<List<Map<String, Object?>>> supportTicketMessages(
+    int ticketId, {
+    bool includeInternal = true,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT id, ticket_id, author_type, employee_id, message, internal_note,
+          created_at::text AS created_at
+        FROM support_ticket_messages
+        WHERE ticket_id = @ticket_id ${includeInternal ? '' : 'AND internal_note = FALSE'}
+        ORDER BY created_at ASC
+      '''),
+      parameters: {'ticket_id': ticketId},
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  Map<String, Object?> _supportTicketRow(Map<String, dynamic> row) {
+    final map = Map<String, Object?>.from(row);
+    // created_at/updated_at come back as DateTime from `SELECT *`; normalize
+    // to text like the rest of this file's read paths (RETURNING * above
+    // can't cast inline the way a plain SELECT can).
+    if (map['created_at'] is DateTime) {
+      map['created_at'] = (map['created_at'] as DateTime).toUtc().toIso8601String();
+    }
+    if (map['updated_at'] is DateTime) {
+      map['updated_at'] = (map['updated_at'] as DateTime).toUtc().toIso8601String();
+    }
+    return map;
   }
 
   Future<void> close() async {
