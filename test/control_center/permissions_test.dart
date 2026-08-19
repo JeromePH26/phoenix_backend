@@ -43,13 +43,59 @@ void main() {
   });
 
   group('hasPermissionForRole - ADMIN', () {
-    test('ADMIN has all defined permissions by default', () {
-      for (final permission in kAllPermissions) {
-        expect(
-          hasPermissionForRole(role: 'ADMIN', permission: permission),
-          isTrue,
-        );
-      }
+    test(
+      'ADMIN has all defined permissions by default, except employees.passwordResetApprove '
+      '(Account-System Abschnitt 21: explizit "NEIN" fuer ADMIN, nur OWNER/VICE_OWNER)',
+      () {
+        for (final permission in kAllPermissions) {
+          final expected = permission != 'employees.passwordResetApprove';
+          expect(
+            hasPermissionForRole(role: 'ADMIN', permission: permission),
+            expected,
+            reason: 'ADMIN / $permission',
+          );
+        }
+      },
+    );
+  });
+
+  group('hasPermissionForRole - VICE_OWNER', () {
+    test(
+      'VICE_OWNER has all defined permissions by default, including employees.passwordResetApprove',
+      () {
+        for (final permission in kAllPermissions) {
+          expect(
+            hasPermissionForRole(role: 'VICE_OWNER', permission: permission),
+            isTrue,
+            reason: 'VICE_OWNER / $permission',
+          );
+        }
+      },
+    );
+  });
+
+  group('hasPermissionForRole - SECURITY', () {
+    test('SECURITY can suspend/unsuspend users and view security reports by default', () {
+      expect(hasPermissionForRole(role: 'SECURITY', permission: 'users.suspend'), isTrue);
+      expect(hasPermissionForRole(role: 'SECURITY', permission: 'users.unsuspend'), isTrue);
+      expect(hasPermissionForRole(role: 'SECURITY', permission: 'users.viewSecurityReport'), isTrue);
+      expect(hasPermissionForRole(role: 'SECURITY', permission: 'ipBlocks.manage'), isTrue);
+    });
+
+    test('SECURITY cannot manage employees or premium by default', () {
+      expect(hasPermissionForRole(role: 'SECURITY', permission: 'employees.manage'), isFalse);
+      expect(hasPermissionForRole(role: 'SECURITY', permission: 'premium.manualGrant'), isFalse);
+      expect(hasPermissionForRole(role: 'SECURITY', permission: 'refunds.decide'), isFalse);
+    });
+  });
+
+  group('hasPermissionForRole - SUPPORT and user data (Abschnitt 77)', () {
+    test('SUPPORT can view users but not suspend them or see sensitive data by default', () {
+      expect(hasPermissionForRole(role: 'SUPPORT', permission: 'users.view'), isTrue);
+      expect(hasPermissionForRole(role: 'SUPPORT', permission: 'users.suspend'), isFalse);
+      expect(hasPermissionForRole(role: 'SUPPORT', permission: 'users.unsuspend'), isFalse);
+      expect(hasPermissionForRole(role: 'SUPPORT', permission: 'users.viewSecurityReport'), isFalse);
+      expect(hasPermissionForRole(role: 'SUPPORT', permission: 'users.viewBettingHistory'), isFalse);
     });
   });
 

@@ -822,12 +822,339 @@ class PhoenixDatabase {
     await _migrateModuleControl(db);
     await _migrateSystemAuditHistory(db);
     await _migrateFootballMatchControls(db);
+    await _migrateUserAccounts(db);
 
     await db.execute('''
       INSERT INTO app_meta (key, value)
-      VALUES ('schema_version', '10')
+      VALUES ('schema_version', '11')
       ON CONFLICT (key) DO UPDATE
       SET value = EXCLUDED.value, updated_at = NOW()
+    ''');
+  }
+
+  /// PHÖNIX ACCOUNT SYSTEM (additiv, Phase 1 laut "anweisungen claude.txt"
+  /// Abschnitt 99: Datenmodell + Migrationen + Permissions). Muss NACH
+  /// `_migrateControlCenter` (admin_employees) und `_migrateSupport`
+  /// (support_tickets) laufen, da beide per Foreign Key referenziert werden.
+  ///
+  /// Wiederverwendet bewusst bestehende Strukturen statt zu duplizieren
+  /// (Abschnitt 98): `admin_audit_log` dient auch als Audit-Trail für
+  /// Account-System-Ereignisse (Abschnitt 92 verlangt exakt actor/action/
+  /// target_type/target_id/before/after/reason/created_at - das deckt sich
+  /// vollständig mit dem bestehenden Schema); die bestehenden deutschen
+  /// Support-Ticket-Status (NEU/IN_BEARBEITUNG/WARTET_AUF_NUTZER/GELOEST/
+  /// GESCHLOSSEN) entsprechen bereits exakt Abschnitt 39; `support_ticket_
+  /// messages.internal_note` (Abschnitt 40) existiert bereits.
+  ///
+  /// `admin_employees` bleibt die alleinige Control-Center-RBAC-Quelle
+  /// (Abschnitt 93 Backward Compatibility) - Mitarbeiter, die zusätzlich in
+  /// der normalen App auftreten sollen (Abschnitt 16/17), bekommen über die
+  /// neue `user_id`-Spalte optional eine verknüpfte `users`-Zeile.
+  Future<void> _migrateUserAccounts(Connection db) async {
+    // Abschnitt 8/11/84: dauerhafte PHX-U-Nummer als STORED Generated Column
+    // direkt aus der Primärschlüssel-Sequenz - kollisionsfrei per
+    // Konstruktion, kein App-seitiges Race-Condition-Risiko bei Retries.
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS users (
+        id BIGSERIAL PRIMARY KEY,
+        phoenix_user_id TEXT GENERATED ALWAYS AS
+          ('PHX-U-' || LPAD(id::text, 8, '0')) STORED,
+        account_type TEXT NOT NULL DEFAULT 'USER',
+        email TEXT NOT NULL,
+        email_lower TEXT GENERATED ALWAYS AS (LOWER(email)) STORED,
+        email_verified BOOLEAN NOT NULL DEFAULT FALSE,
+        username TEXT,
+        username_lower TEXT GENERATED ALWAYS AS (LOWER(username)) STORED,
+        display_name TEXT,
+        username_changed_at TIMESTAMPTZ,
+        date_of_birth DATE NOT NULL,
+        age_gate_passed BOOLEAN NOT NULL DEFAULT FALSE,
+        age_gate_checked_at TIMESTAMPTZ,
+        account_status TEXT NOT NULL DEFAULT 'PENDING_EMAIL_VERIFICATION',
+        language TEXT,
+        country TEXT,
+        terms_version TEXT,
+        terms_accepted_at TIMESTAMPTZ,
+        privacy_version TEXT,
+        privacy_accepted_at TIMESTAMPTZ,
+        community_guidelines_version TEXT,
+        community_guidelines_accepted_at TIMESTAMPTZ,
+        trial_available BOOLEAN NOT NULL DEFAULT TRUE,
+        trial_started_at TIMESTAMPTZ,
+        trial_ends_at TIMESTAMPTZ,
+        trial_used BOOLEAN NOT NULL DEFAULT FALSE,
+        intro_offer_used BOOLEAN NOT NULL DEFAULT FALSE,
+        notification_settings JSONB NOT NULL DEFAULT '{}',
+        current_app_version TEXT,
+        deletion_status TEXT,
+        deletion_requested_at TIMESTAMPTZ,
+        deletion_scheduled_at TIMESTAMPTZ,
+        deletion_cancelled_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        last_login_at TIMESTAMPTZ,
+        last_active_at TIMESTAMPTZ,
+        CHECK (account_type IN ('USER', 'EMPLOYEE', 'OWNER')),
+        CHECK (account_status IN (
+          'PENDING_EMAIL_VERIFICATION', 'ACTIVE', 'SUSPENDED',
+          'PERMANENTLY_SUSPENDED', 'DELETION_PENDING', 'DELETED'
+        )),
+        CHECK (
+          deletion_status IS NULL
+          OR deletion_status IN ('PENDING', 'CANCELLED', 'COMPLETED')
+        )
+      )
+    ''');
+    // Abschnitt 6/85: E-Mail und Username case-insensitive eindeutig,
+    // DB-seitig erzwungen (nicht nur Frontend-Prüfung). Username ist
+    // nullable (erst beim Onboarding vergeben) - partial index lässt
+    // mehrere NULLs zu, erzwingt Eindeutigkeit nur für tatsächlich gesetzte
+    // Namen.
+    await db.execute('''
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_lower
+      ON users (email_lower)
+    ''');
+    await db.execute('''
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_lower
+      ON users (username_lower) WHERE username_lower IS NOT NULL
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_users_account_status
+      ON users (account_status)
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_users_deletion_scheduled
+      ON users (deletion_scheduled_at) WHERE deletion_scheduled_at IS NOT NULL
+    ''');
+
+    // Abschnitt 6: Account Linking. Ein PHÖNIX User kann mehrere Auth-
+    // Provider verknüpft haben (z.B. zuerst E-Mail+Passwort, später
+    // zusätzlich Google) - niemals ein zweites PHÖNIX-Konto für dieselbe
+    // E-Mail.
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS user_auth_providers (
+        id BIGSERIAL PRIMARY KEY,
+        user_id BIGINT NOT NULL REFERENCES users(id),
+        provider TEXT NOT NULL,
+        provider_uid TEXT NOT NULL,
+        email_at_link TEXT,
+        linked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CHECK (provider IN ('google', 'password')),
+        UNIQUE (provider, provider_uid)
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_user_auth_providers_user
+      ON user_auth_providers (user_id)
+    ''');
+
+    // Abschnitt 78: App-seitige Sessions/Geräte, getrennt von den
+    // bestehenden `admin_sessions` (Control-Center-Mitarbeiter-Logins).
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS user_sessions (
+        token TEXT PRIMARY KEY,
+        user_id BIGINT NOT NULL REFERENCES users(id),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        expires_at TIMESTAMPTZ NOT NULL,
+        revoked_at TIMESTAMPTZ,
+        ip TEXT,
+        user_agent TEXT,
+        device_model TEXT,
+        platform TEXT,
+        app_version TEXT
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_user_sessions_user
+      ON user_sessions (user_id)
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_user_sessions_expiry
+      ON user_sessions (expires_at)
+    ''');
+
+    // Abschnitt 28/29: Premiumquellen strikt getrennt speichern - niemals
+    // ein einzelnes premium=true. `effective_premium` wird zentral aus
+    // aktiven, nicht abgelaufenen Zeilen berechnet (siehe
+    // `effectivePremiumForUser` weiter unten), nicht als eigene Spalte
+    // dupliziert (würde veralten können).
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS user_premium_entitlements (
+        id BIGSERIAL PRIMARY KEY,
+        user_id BIGINT NOT NULL REFERENCES users(id),
+        source TEXT NOT NULL,
+        active BOOLEAN NOT NULL DEFAULT TRUE,
+        tier TEXT,
+        starts_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        expires_at TIMESTAMPTZ,
+        auto_renew BOOLEAN NOT NULL DEFAULT FALSE,
+        cancelled_at TIMESTAMPTZ,
+        provider_product_id TEXT,
+        provider_purchase_token TEXT,
+        provider_reference JSONB NOT NULL DEFAULT '{}',
+        granted_by_employee_id BIGINT REFERENCES admin_employees(id),
+        reason TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CHECK (source IN (
+          'GOOGLE_PLAY', 'WEBSITE', 'MANUAL', 'PROMOTION', 'STAFF', 'PARTNER'
+        ))
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_user_premium_entitlements_user
+      ON user_premium_entitlements (user_id, active)
+    ''');
+
+    // Abschnitt 44/47/48: Sperrfälle. Sperre bleibt IMMER eine manuelle
+    // Mitarbeiteraktion (created_by_employee_id NOT NULL, kein System-Actor
+    // möglich) - Anti-Abuse (unten) kann nur markieren, niemals selbst eine
+    // Zeile hier erzeugen.
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS user_bans (
+        id BIGSERIAL PRIMARY KEY,
+        case_number TEXT GENERATED ALWAYS AS (
+          'BAN-' || TO_CHAR(created_at, 'YYYY') || '-' || LPAD(id::text, 5, '0')
+        ) STORED,
+        user_id BIGINT NOT NULL REFERENCES users(id),
+        status TEXT NOT NULL DEFAULT 'ACTIVE',
+        reason TEXT NOT NULL,
+        internal_report TEXT NOT NULL,
+        duration_type TEXT NOT NULL,
+        expires_at TIMESTAMPTZ,
+        refund_decision TEXT,
+        refund_reason TEXT,
+        support_ticket_id BIGINT REFERENCES support_tickets(id),
+        created_by_employee_id BIGINT NOT NULL REFERENCES admin_employees(id),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        lifted_by_employee_id BIGINT REFERENCES admin_employees(id),
+        lifted_at TIMESTAMPTZ,
+        lift_reason TEXT,
+        CHECK (status IN ('ACTIVE', 'LIFTED', 'EXPIRED')),
+        CHECK (duration_type IN (
+          '1_HOUR', '24_HOURS', '7_DAYS', '30_DAYS', 'CUSTOM', 'PERMANENT'
+        )),
+        CHECK (
+          refund_decision IS NULL
+          OR refund_decision IN ('NONE', 'PARTIAL', 'FULL', 'CREDIT')
+        )
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_user_bans_user
+      ON user_bans (user_id, status)
+    ''');
+
+    // Abschnitt 59: IP-/Netzwerksperren mit granularem Scope
+    // (Registrierung/Trial/Login getrennt blockierbar).
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS ip_blocks (
+        id BIGSERIAL PRIMARY KEY,
+        ip TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        scope JSONB NOT NULL DEFAULT '{}',
+        duration_type TEXT NOT NULL,
+        expires_at TIMESTAMPTZ,
+        status TEXT NOT NULL DEFAULT 'ACTIVE',
+        created_by_employee_id BIGINT NOT NULL REFERENCES admin_employees(id),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        lifted_by_employee_id BIGINT REFERENCES admin_employees(id),
+        lifted_at TIMESTAMPTZ,
+        CHECK (duration_type IN (
+          '24_HOURS', '7_DAYS', '30_DAYS', 'CUSTOM', 'PERMANENT'
+        )),
+        CHECK (status IN ('ACTIVE', 'LIFTED', 'EXPIRED'))
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_ip_blocks_ip ON ip_blocks (ip, status)
+    ''');
+
+    // Abschnitt 93: additive Verknüpfung, bestehende installation_id-
+    // basierte Tickets bleiben unverändert funktionsfähig.
+    await db.execute('''
+      ALTER TABLE support_tickets
+      ADD COLUMN IF NOT EXISTS user_id BIGINT REFERENCES users(id)
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_support_tickets_user
+      ON support_tickets (user_id)
+    ''');
+
+    // Abschnitt 16/17/19-21: Mitarbeiter = auch App-Nutzer (optional
+    // verknüpfte users-Zeile), Staff-App-Access getrennt von Control-
+    // Center-Rechten, verpflichtendes 2FA, Owner/Vize-Owner-genehmigter
+    // Passwort-Reset-Workflow statt Selbst-Reset.
+    await db.execute('''
+      ALTER TABLE admin_employees
+      ADD COLUMN IF NOT EXISTS user_id BIGINT REFERENCES users(id)
+    ''');
+    await db.execute('''
+      ALTER TABLE admin_employees
+      ADD COLUMN IF NOT EXISTS two_factor_enabled BOOLEAN NOT NULL DEFAULT FALSE
+    ''');
+    await db.execute('''
+      ALTER TABLE admin_employees ADD COLUMN IF NOT EXISTS two_factor_method TEXT
+    ''');
+    await db.execute('''
+      ALTER TABLE admin_employees
+      ADD COLUMN IF NOT EXISTS staff_app_access BOOLEAN NOT NULL DEFAULT FALSE
+    ''');
+    await db.execute('''
+      ALTER TABLE admin_employees
+      ADD COLUMN IF NOT EXISTS maintenance_bypass BOOLEAN NOT NULL DEFAULT FALSE
+    ''');
+    await db.execute('''
+      ALTER TABLE admin_employees
+      ADD COLUMN IF NOT EXISTS premium_bypass BOOLEAN NOT NULL DEFAULT FALSE
+    ''');
+    await db.execute('''
+      ALTER TABLE admin_employees
+      ADD COLUMN IF NOT EXISTS beta_access BOOLEAN NOT NULL DEFAULT FALSE
+    ''');
+    await db.execute('''
+      ALTER TABLE admin_employees
+      ADD COLUMN IF NOT EXISTS feature_flag_bypass BOOLEAN NOT NULL DEFAULT FALSE
+    ''');
+    await db.execute('''
+      ALTER TABLE admin_employees ADD COLUMN IF NOT EXISTS password_reset_status TEXT
+    ''');
+    await db.execute('''
+      ALTER TABLE admin_employees
+      ADD COLUMN IF NOT EXISTS password_reset_requested_at TIMESTAMPTZ
+    ''');
+    await db.execute('''
+      ALTER TABLE admin_employees ADD COLUMN IF NOT EXISTS password_reset_approved_by
+      BIGINT REFERENCES admin_employees(id)
+    ''');
+    await db.execute('''
+      ALTER TABLE admin_employees
+      ADD COLUMN IF NOT EXISTS password_reset_approved_at TIMESTAMPTZ
+    ''');
+
+    // Abschnitt 15: neue Rollen VICE_OWNER + SECURITY. Postgres kennt kein
+    // ALTER CONSTRAINT für CHECKs - sauber ersetzen (idempotent: DROP IF
+    // EXISTS + ADD läuft bei jedem Migrationslauf gefahrlos erneut).
+    await db.execute('''
+      ALTER TABLE admin_employees DROP CONSTRAINT IF EXISTS admin_employees_role_check
+    ''');
+    await db.execute('''
+      ALTER TABLE admin_employees ADD CONSTRAINT admin_employees_role_check
+      CHECK (role IN (
+        'OWNER', 'VICE_OWNER', 'ADMIN', 'TECHNICAL', 'SUPPORT', 'CONTENT',
+        'MARKETING', 'SECURITY'
+      ))
+    ''');
+    await db.execute('''
+      ALTER TABLE admin_employees
+      DROP CONSTRAINT IF EXISTS admin_employees_password_reset_status_check
+    ''');
+    await db.execute('''
+      ALTER TABLE admin_employees ADD CONSTRAINT admin_employees_password_reset_status_check
+      CHECK (
+        password_reset_status IS NULL
+        OR password_reset_status IN ('REQUESTED', 'APPROVED', 'COMPLETED')
+      )
     ''');
   }
 
