@@ -92,6 +92,8 @@ class ControlCenterRoutes {
     router.post('/security/sessions/<token>/revoke', _revokeSession);
     router.get('/security/failed-logins', _listFailedLogins);
     router.get('/system-health', _systemHealth);
+    router.get('/permissions/catalog', _permissionsCatalog);
+    router.get('/system-audit', _systemAudit);
 
     return router;
   }
@@ -1823,6 +1825,133 @@ class ControlCenterRoutes {
         'database': _jsonSafe(dbStats),
         'openTicketCount': openTickets.length,
         'openIncidentCount': openIncidents.length,
+      });
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  // -- Rechte / Permissions catalog (Phase 6) ---------------------------------
+
+  // Jede eingeloggte Person darf die RBAC-Struktur selbst einsehen (keine
+  // sensiblen Daten, nur die Rollen-Standardmatrix) - kein eigenes Recht.
+  Future<Response> _permissionsCatalog(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+
+    return jsonResponse({
+      'allPermissions': kAllPermissions.toList()..sort(),
+      'roleDefaults': {
+        for (final entry in kRoleDefaultPermissions.entries)
+          entry.key: entry.value.toList()..sort(),
+      },
+      'roles': kValidRoles.toList()..sort(),
+    });
+  }
+
+  // -- System Audit (Phase 6, Section 74-76 - bewusst reduzierter Umfang: ---
+  // ein On-Demand-Report über echte, bereits vorhandene Kennzahlen statt
+  // eines monatlich geplanten Jobs mit stabilen AUDIT-XXX-Fehlercodes. Keine
+  // Kennzahl wird erfunden - jede Zeile stammt aus einer echten Abfrage.
+
+  Future<Response> _systemAudit(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    if (!auth.employee!.hasPermission('systemHealth.view')) return _forbidden();
+
+    try {
+      final apiUsage = await database.apiSportsDailyUsageToday();
+      final whitelistCounts = await database.footballLeagueManualStatusCounts();
+      final champions = await database.allModelVersions(status: 'champion');
+      final challengers = await database.allModelVersions(status: 'challenger');
+      final pendingPipelineJobs = await database.countPendingFootballDailyPipelineJobs();
+      final pendingSettlementJobs = await database.countPendingFootballMatchSettlementJobs();
+      final openTickets = await database.listSupportTickets(status: 'NEU');
+      final openIncidents = await database.listIncidents(status: 'OPEN');
+      final appStatus = await database.appControlStatus();
+      final dbStats = await database.databaseStats();
+
+      final warnings = <String>[];
+      final critical = <String>[];
+
+      for (final row in apiUsage) {
+        final requests = (row['requests'] as num?) ?? 0;
+        final apiName = row['api_name']?.toString() ?? 'API';
+        if (requests >= 95) {
+          critical.add('$apiName: API-Budget bei $requests (>=95).');
+        } else if (requests >= 85) {
+          warnings.add('$apiName: API-Budget bei $requests (>=85).');
+        }
+      }
+      if (pendingPipelineJobs > 0) warnings.add('$pendingPipelineJobs offene Daily-Pipeline-Läufe.');
+      if (pendingSettlementJobs > 0) warnings.add('$pendingSettlementJobs offene Settlement-Läufe.');
+      if (openTickets.isNotEmpty) warnings.add('${openTickets.length} neue, unbearbeitete Support-Tickets.');
+      if (openIncidents.isNotEmpty) critical.add('${openIncidents.length} offene(r) Incident(s).');
+      if (appStatus['status'] != 'ACTIVE') {
+        warnings.add('App-Status ist "${appStatus['status']}", nicht ACTIVE.');
+      }
+
+      final sections = <String, List<String>>{
+        'SETTLEMENT': [
+          'Offene Daily-Pipeline-Läufe: $pendingPipelineJobs',
+          'Offene Settlement-Läufe: $pendingSettlementJobs',
+        ],
+        'MODEL LAB': [
+          'Aktive Champions: ${champions.length}',
+          'Aktive Challenger: ${challengers.length}',
+          'Model Promotion aktiviert: ${modelLabConfig.promotionEnabled}',
+          'Generative AI Runtime: OFF (Section 56/97, hartkodiert deaktiviert)',
+        ],
+        'API': [for (final row in apiUsage) '${row['api_name']}: ${row['requests']} Requests heute'],
+        'WHITELIST': [
+          'Auto: ${whitelistCounts['auto'] ?? 0}',
+          'Whitelist: ${whitelistCounts['whitelist'] ?? 0}',
+          'Blacklist: ${whitelistCounts['blacklist'] ?? 0}',
+        ],
+        'SUPPORT / INCIDENTS': [
+          'Neue Support-Tickets: ${openTickets.length}',
+          'Offene Incidents: ${openIncidents.length}',
+        ],
+        'DATENBANK': [
+          'Größe: ${((dbStats['sizeBytes'] as num?) ?? 0) ~/ (1024 * 1024)} MB',
+        ],
+      };
+
+      final buffer = StringBuffer()
+        ..writeln('PHÖNIX SYSTEM AUDIT')
+        ..writeln('Datum: ${DateTime.now().toUtc().toIso8601String()}')
+        ..writeln('Critical: ${critical.length}')
+        ..writeln('Warnings: ${warnings.length}')
+        ..writeln();
+      for (final entry in sections.entries) {
+        buffer.writeln(entry.key);
+        for (final line in entry.value) {
+          buffer.writeln('- $line');
+        }
+        buffer.writeln();
+      }
+      if (critical.isNotEmpty) {
+        buffer.writeln('CRITICAL');
+        for (final line in critical) {
+          buffer.writeln('- $line');
+        }
+        buffer.writeln();
+      }
+      if (warnings.isNotEmpty) {
+        buffer.writeln('WARNINGS');
+        for (final line in warnings) {
+          buffer.writeln('- $line');
+        }
+      }
+
+      return jsonResponse({
+        'generatedAt': DateTime.now().toUtc().toIso8601String(),
+        'criticalCount': critical.length,
+        'warningCount': warnings.length,
+        'critical': critical,
+        'warnings': warnings,
+        'sections': sections,
+        'reportText': buffer.toString(),
       });
     } catch (error) {
       return jsonResponse({'error': error.toString()}, statusCode: 500);
