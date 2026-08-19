@@ -557,6 +557,35 @@ class ApiRoutes {
       return jsonResponse({'features': features});
     });
 
+    // Section 39/40: öffentlich lesbar, damit die App bei Start/Resume/
+    // periodisch selbst prüfen kann, statt dass nur das Backend intern davon
+    // weiß. Kein Admin-Token/Session nötig - dieselbe Auth-Konvention wie
+    // /health (rein informativ, keine sensiblen Daten).
+    router.get('/api/app-status', (Request request) async {
+      try {
+        final status = await database.appControlStatus();
+        return jsonResponse({
+          'status': status['status'],
+          'message': status['message'],
+        });
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
+    router.get('/api/modules', (Request request) async {
+      try {
+        final modules = await database.listModuleControls();
+        return jsonResponse({
+          'modules': {
+            for (final module in modules) module['module_key'].toString(): module['enabled'],
+          },
+        });
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
     // Section 22: Support-Tickets. PHÖNIX hat kein Nutzerkonto-System, daher
     // an installation_id geknüpft statt an einen Account - gleiche
     // Auth-Konvention wie /api/push/*: x-phoenix-installation-id-Header bzw.
