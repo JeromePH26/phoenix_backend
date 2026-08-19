@@ -79,6 +79,19 @@ class ControlCenterRoutes {
     router.post('/push/broadcasts', _sendPushBroadcast);
     router.get('/premium/features', _listPremiumFeaturesAdmin);
     router.patch('/premium/features/<featureKey>', _updatePremiumFeature);
+    router.get('/feature-flags', _listFeatureFlags);
+    router.post('/feature-flags', _createFeatureFlag);
+    router.patch('/feature-flags/<flagKey>', _updateFeatureFlag);
+    router.get('/release', _getReleaseConfig);
+    router.patch('/release', _updateReleaseConfig);
+    router.get('/incidents', _listIncidents);
+    router.post('/incidents', _createIncident);
+    router.get('/incidents/<id|[0-9]+>', _incidentDetail);
+    router.patch('/incidents/<id|[0-9]+>', _updateIncident);
+    router.get('/security/sessions', _listSessions);
+    router.post('/security/sessions/<token>/revoke', _revokeSession);
+    router.get('/security/failed-logins', _listFailedLogins);
+    router.get('/system-health', _systemHealth);
 
     return router;
   }
@@ -96,13 +109,19 @@ class ControlCenterRoutes {
       if (login.isEmpty || password.isEmpty) return _invalidCredentials();
 
       final row = await database.adminEmployeeByLogin(login);
-      if (row == null) return _invalidCredentials();
+      if (row == null) {
+        await database.recordFailedLogin(login: login, ip: _clientIp(request));
+        return _invalidCredentials();
+      }
 
       final passwordHash = row['password_hash']?.toString() ?? '';
       final employee = Employee.fromRow(row);
       final passwordOk =
           passwordHash.isNotEmpty && BCrypt.checkpw(password, passwordHash);
-      if (!passwordOk || !employee.isActive) return _invalidCredentials();
+      if (!passwordOk || !employee.isActive) {
+        await database.recordFailedLogin(login: login, ip: _clientIp(request));
+        return _invalidCredentials();
+      }
 
       final token = generateSessionToken();
       final expiresAt = DateTime.now().toUtc().add(kControlCenterSessionTtl);
@@ -1442,6 +1461,369 @@ class ControlCenterRoutes {
         ip: _clientIp(request),
       );
       return jsonResponse({'feature': _jsonSafe(updated)});
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  // -- Feature Flags (Phase 6, deckt Section 42-44 ab) -----------------------
+
+  Future<Response> _listFeatureFlags(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    if (!auth.employee!.hasPermission('featureFlags.view')) return _forbidden();
+
+    try {
+      final flags = await database.listFeatureFlags();
+      return jsonResponse({'flags': flags.map(_jsonSafe).toList()});
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  Future<Response> _createFeatureFlag(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    final actor = auth.employee!;
+    if (!actor.hasPermission('featureFlags.manage')) return _forbidden();
+
+    const validAudiences = {'ALL', 'FREE', 'PREMIUM', 'BETA', 'CUSTOM_SEGMENT'};
+    const validStages = {'STAGING', 'PRODUCTION'};
+
+    try {
+      final body = jsonDecode(await request.readAsString());
+      if (body is! Map<String, dynamic>) {
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+      }
+      final flagKey = body['flagKey']?.toString().trim() ?? '';
+      final label = body['label']?.toString().trim() ?? '';
+      if (flagKey.isEmpty || label.isEmpty) {
+        return jsonResponse({'error': 'flagKey und label sind erforderlich.'}, statusCode: 400);
+      }
+      final audience = body['audience']?.toString() ?? 'ALL';
+      final stage = body['stage']?.toString() ?? 'STAGING';
+      if (!validAudiences.contains(audience) || !validStages.contains(stage)) {
+        return jsonResponse({'error': 'Ungültige audience oder stage.'}, statusCode: 400);
+      }
+
+      final created = await database.createFeatureFlag(
+        flagKey: flagKey,
+        label: label,
+        description: body['description']?.toString() ?? '',
+        enabled: body['enabled'] == true,
+        rolloutPercentage: int.tryParse(body['rolloutPercentage']?.toString() ?? '') ?? 0,
+        audience: audience,
+        stage: stage,
+        updatedBy: actor.login,
+      );
+      await database.insertAdminAuditLog(
+        employeeId: actor.id,
+        employeeLogin: actor.login,
+        area: 'featureFlags',
+        objectType: 'flag',
+        objectId: flagKey,
+        action: 'flag.create',
+        newValue: created,
+        ip: _clientIp(request),
+      );
+      return jsonResponse({'flag': _jsonSafe(created)}, statusCode: 201);
+    } catch (error) {
+      final message = error.toString();
+      if (message.toLowerCase().contains('duplicate key')) {
+        return jsonResponse({'error': 'flagKey bereits vergeben.'}, statusCode: 409);
+      }
+      return jsonResponse({'error': message}, statusCode: 400);
+    }
+  }
+
+  Future<Response> _updateFeatureFlag(Request request, String flagKey) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    final actor = auth.employee!;
+    if (!actor.hasPermission('featureFlags.manage')) return _forbidden();
+
+    try {
+      final body = jsonDecode(await request.readAsString());
+      if (body is! Map<String, dynamic>) {
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+      }
+      final updated = await database.updateFeatureFlag(
+        flagKey: flagKey,
+        enabled: body['enabled'] as bool?,
+        rolloutPercentage: body['rolloutPercentage'] == null
+            ? null
+            : int.tryParse(body['rolloutPercentage'].toString()),
+        audience: body['audience']?.toString(),
+        stage: body['stage']?.toString(),
+        updatedBy: actor.login,
+      );
+      if (updated == null) {
+        return jsonResponse({'error': 'Feature Flag nicht gefunden.'}, statusCode: 404);
+      }
+      await database.insertAdminAuditLog(
+        employeeId: actor.id,
+        employeeLogin: actor.login,
+        area: 'featureFlags',
+        objectType: 'flag',
+        objectId: flagKey,
+        action: 'flag.update',
+        newValue: updated,
+        ip: _clientIp(request),
+      );
+      return jsonResponse({'flag': _jsonSafe(updated)});
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  // -- Release Center (Phase 6) ----------------------------------------------
+
+  Future<Response> _getReleaseConfig(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    if (!auth.employee!.hasPermission('release.view')) return _forbidden();
+
+    try {
+      final config = await database.appReleaseConfig();
+      return jsonResponse({'release': _jsonSafe(config)});
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  Future<Response> _updateReleaseConfig(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    final actor = auth.employee!;
+    if (!actor.hasPermission('release.manage')) return _forbidden();
+
+    try {
+      final body = jsonDecode(await request.readAsString());
+      if (body is! Map<String, dynamic>) {
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+      }
+      final updated = await database.updateAppReleaseConfig(
+        currentVersion: body['currentVersion']?.toString(),
+        minimumSupportedVersion: body['minimumSupportedVersion']?.toString(),
+        forcedUpdate: body['forcedUpdate'] as bool?,
+        changelog: body['changelog']?.toString(),
+        updatedBy: actor.login,
+      );
+      await database.insertAdminAuditLog(
+        employeeId: actor.id,
+        employeeLogin: actor.login,
+        area: 'release',
+        objectType: 'config',
+        objectId: '1',
+        action: 'release.update',
+        newValue: updated,
+        ip: _clientIp(request),
+      );
+      return jsonResponse({'release': _jsonSafe(updated)});
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  // -- Incidents (Phase 6) ----------------------------------------------------
+
+  Future<Response> _listIncidents(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    if (!auth.employee!.hasPermission('incidents.view')) return _forbidden();
+
+    try {
+      final incidents = await database.listIncidents(status: request.url.queryParameters['status']);
+      return jsonResponse({'incidents': incidents.map(_jsonSafe).toList()});
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  Future<Response> _createIncident(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    final actor = auth.employee!;
+    if (!actor.hasPermission('incidents.manage')) return _forbidden();
+
+    const validSeverities = {'minor', 'major', 'critical'};
+    try {
+      final body = jsonDecode(await request.readAsString());
+      if (body is! Map<String, dynamic>) {
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+      }
+      final title = body['title']?.toString().trim() ?? '';
+      if (title.isEmpty) {
+        return jsonResponse({'error': 'title ist erforderlich.'}, statusCode: 400);
+      }
+      final severity = body['severity']?.toString() ?? 'minor';
+      if (!validSeverities.contains(severity)) {
+        return jsonResponse({'error': 'Ungültige severity.'}, statusCode: 400);
+      }
+      final created = await database.createIncident(
+        title: title,
+        severity: severity,
+        affectedSystems: body['affectedSystems']?.toString() ?? '',
+        responsibleEmployeeId: int.tryParse(body['responsibleEmployeeId']?.toString() ?? ''),
+      );
+      await database.insertAdminAuditLog(
+        employeeId: actor.id,
+        employeeLogin: actor.login,
+        area: 'incidents',
+        objectType: 'incident',
+        objectId: created['id'].toString(),
+        action: 'incident.create',
+        newValue: created,
+        ip: _clientIp(request),
+      );
+      return jsonResponse({'incident': _jsonSafe(created)}, statusCode: 201);
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 400);
+    }
+  }
+
+  Future<Response> _incidentDetail(Request request, String id) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    if (!auth.employee!.hasPermission('incidents.view')) return _forbidden();
+
+    try {
+      final incident = await database.incident(int.parse(id));
+      if (incident == null) {
+        return jsonResponse({'error': 'Incident nicht gefunden.'}, statusCode: 404);
+      }
+      return jsonResponse({'incident': _jsonSafe(incident)});
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  Future<Response> _updateIncident(Request request, String id) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    final actor = auth.employee!;
+    if (!actor.hasPermission('incidents.manage')) return _forbidden();
+
+    const validStatuses = {'OPEN', 'MONITORING', 'RESOLVED'};
+    final incidentId = int.parse(id);
+    try {
+      final body = jsonDecode(await request.readAsString());
+      if (body is! Map<String, dynamic>) {
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+      }
+      final status = body['status']?.toString();
+      if (status != null && !validStatuses.contains(status)) {
+        return jsonResponse({'error': 'Ungültiger status.'}, statusCode: 400);
+      }
+      final updated = await database.updateIncident(
+        id: incidentId,
+        status: status,
+        severity: body['severity']?.toString(),
+        actionsTaken: body['actionsTaken']?.toString(),
+        postmortem: body['postmortem']?.toString(),
+        responsibleEmployeeId: int.tryParse(body['responsibleEmployeeId']?.toString() ?? ''),
+        closeNow: status == 'RESOLVED',
+      );
+      if (updated == null) {
+        return jsonResponse({'error': 'Incident nicht gefunden.'}, statusCode: 404);
+      }
+      await database.insertAdminAuditLog(
+        employeeId: actor.id,
+        employeeLogin: actor.login,
+        area: 'incidents',
+        objectType: 'incident',
+        objectId: id,
+        action: 'incident.update',
+        newValue: updated,
+        ip: _clientIp(request),
+      );
+      return jsonResponse({'incident': _jsonSafe(updated)});
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  // -- Security (Phase 6) ------------------------------------------------------
+
+  Future<Response> _listSessions(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    if (!auth.employee!.hasPermission('security.view')) return _forbidden();
+
+    try {
+      final sessions = await database.listActiveAdminSessions();
+      return jsonResponse({'sessions': sessions.map(_jsonSafe).toList()});
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  Future<Response> _revokeSession(Request request, String token) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    final actor = auth.employee!;
+    if (!actor.hasPermission('security.manage')) return _forbidden();
+
+    try {
+      final revoked = await database.revokeAdminSessionByToken(token);
+      if (!revoked) {
+        return jsonResponse({'error': 'Session nicht gefunden oder bereits beendet.'}, statusCode: 404);
+      }
+      await database.insertAdminAuditLog(
+        employeeId: actor.id,
+        employeeLogin: actor.login,
+        area: 'security',
+        objectType: 'session',
+        objectId: token,
+        action: 'session.revoke',
+        ip: _clientIp(request),
+      );
+      return jsonResponse({'status': 'revoked'});
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  Future<Response> _listFailedLogins(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    if (!auth.employee!.hasPermission('security.view')) return _forbidden();
+
+    try {
+      final attempts = await database.recentFailedLogins();
+      return jsonResponse({'attempts': attempts.map(_jsonSafe).toList()});
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  // -- System Health (Phase 6) --------------------------------------------------
+
+  Future<Response> _systemHealth(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    if (!auth.employee!.hasPermission('systemHealth.view')) return _forbidden();
+
+    try {
+      final apiUsage = await database.apiSportsDailyUsageToday();
+      final pendingPipelineJobs = await database.countPendingFootballDailyPipelineJobs();
+      final pendingSettlementJobs = await database.countPendingFootballMatchSettlementJobs();
+      final appStatus = await database.appControlStatus();
+      final dbStats = await database.databaseStats();
+      final openTickets = await database.listSupportTickets(status: 'NEU');
+      final openIncidents = await database.listIncidents(status: 'OPEN');
+
+      return jsonResponse({
+        'apiUsage': apiUsage.map(_jsonSafe).toList(),
+        'pendingJobs': {
+          'footballDailyPipeline': pendingPipelineJobs,
+          'footballMatchSettlement': pendingSettlementJobs,
+        },
+        'appStatus': _jsonSafe(appStatus),
+        'database': _jsonSafe(dbStats),
+        'openTicketCount': openTickets.length,
+        'openIncidentCount': openIncidents.length,
+      });
     } catch (error) {
       return jsonResponse({'error': error.toString()}, statusCode: 500);
     }

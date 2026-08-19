@@ -818,6 +818,7 @@ class PhoenixDatabase {
     await _migrateControlCenter(db);
     await _migrateSupport(db);
     await _migrateContent(db);
+    await _migrateOps(db);
     await _migrateFootballMatchControls(db);
 
     await db.execute('''
@@ -1138,6 +1139,89 @@ class PhoenixDatabase {
         ('phoenix_live', 'PHÖNIX Live', 'FREE'),
         ('historical_twins', 'Historical Twins', 'PREMIUM')
       ON CONFLICT (feature_key) DO NOTHING
+    ''');
+  }
+
+  /// PHÖNIX CONTROL CENTER Phase 6 (Section 42-45/52/74, additiv):
+  /// Feature Flags (deckt auch Rollout/Staging ab, Section 42-44),
+  /// Release-Konfiguration (Section 45), Incidents (Section 52) und
+  /// fehlgeschlagene Login-Versuche (Section 13, Sicherheits-Vorbereitung).
+  Future<void> _migrateOps(Connection db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS feature_flags (
+        flag_key TEXT PRIMARY KEY,
+        label TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        enabled BOOLEAN NOT NULL DEFAULT FALSE,
+        rollout_percentage INTEGER NOT NULL DEFAULT 0,
+        audience TEXT NOT NULL DEFAULT 'ALL',
+        stage TEXT NOT NULL DEFAULT 'STAGING',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_by TEXT,
+        CHECK (rollout_percentage BETWEEN 0 AND 100),
+        CHECK (audience IN ('ALL', 'FREE', 'PREMIUM', 'BETA', 'CUSTOM_SEGMENT')),
+        CHECK (stage IN ('STAGING', 'PRODUCTION'))
+      )
+    ''');
+
+    // Section 45: Single-Row-Konfiguration für Mindestversion/aktuelle
+    // Version. Kein echtes Nutzer-pro-Version-Tracking - dafür gibt es keine
+    // Telemetrie (siehe app_version nur als Freitext auf Support-Tickets).
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS app_release_config (
+        id INTEGER PRIMARY KEY DEFAULT 1,
+        current_version TEXT,
+        minimum_supported_version TEXT,
+        forced_update BOOLEAN NOT NULL DEFAULT FALSE,
+        changelog TEXT NOT NULL DEFAULT '',
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_by TEXT,
+        CHECK (id = 1)
+      )
+    ''');
+    await db.execute('''
+      INSERT INTO app_release_config (id) VALUES (1) ON CONFLICT (id) DO NOTHING
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS incidents (
+        id BIGSERIAL PRIMARY KEY,
+        title TEXT NOT NULL,
+        severity TEXT NOT NULL DEFAULT 'minor',
+        status TEXT NOT NULL DEFAULT 'OPEN',
+        affected_systems TEXT NOT NULL DEFAULT '',
+        responsible_employee_id BIGINT REFERENCES admin_employees(id),
+        actions_taken TEXT NOT NULL DEFAULT '',
+        postmortem TEXT NOT NULL DEFAULT '',
+        started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        ended_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CHECK (severity IN ('minor', 'major', 'critical')),
+        CHECK (status IN ('OPEN', 'MONITORING', 'RESOLVED'))
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_incidents_status
+      ON incidents (status, started_at DESC)
+    ''');
+
+    // Section 13: Sicherheits-Vorbereitung. Noch kein 2FA/Login-Historie-UI,
+    // aber fehlgeschlagene Login-Versuche werden ab jetzt festgehalten, damit
+    // spätere Sicherheitswarnungen echte Daten haben statt bei Null zu
+    // starten.
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS admin_failed_logins (
+        id BIGSERIAL PRIMARY KEY,
+        login TEXT NOT NULL,
+        ip TEXT,
+        attempted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_admin_failed_logins_login
+      ON admin_failed_logins (login, attempted_at DESC)
     ''');
   }
 
@@ -6690,6 +6774,300 @@ class PhoenixDatabase {
       }
     }
     return map;
+  }
+
+  // -- Control Center /feature-flags (Phase 6) -----------------------------
+
+  Future<List<Map<String, Object?>>> listFeatureFlags() async {
+    final db = await connection();
+    final result = await db.execute('''
+      SELECT flag_key, label, description, enabled, rollout_percentage, audience, stage,
+        created_at::text AS created_at, updated_at::text AS updated_at, updated_by
+      FROM feature_flags
+      ORDER BY label
+    ''');
+    return result.map((row) => Map<String, Object?>.from(row.toColumnMap())).toList();
+  }
+
+  Future<Map<String, Object?>> createFeatureFlag({
+    required String flagKey,
+    required String label,
+    String description = '',
+    bool enabled = false,
+    int rolloutPercentage = 0,
+    String audience = 'ALL',
+    String stage = 'STAGING',
+    required String updatedBy,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        INSERT INTO feature_flags (flag_key, label, description, enabled, rollout_percentage, audience, stage, updated_by)
+        VALUES (@flag_key, @label, @description, @enabled, @rollout_percentage, @audience, @stage, @updated_by)
+        RETURNING flag_key, label, description, enabled, rollout_percentage, audience, stage,
+          created_at::text AS created_at, updated_at::text AS updated_at, updated_by
+      '''),
+      parameters: {
+        'flag_key': flagKey,
+        'label': label,
+        'description': description,
+        'enabled': enabled,
+        'rollout_percentage': rolloutPercentage,
+        'audience': audience,
+        'stage': stage,
+        'updated_by': updatedBy,
+      },
+    );
+    return Map<String, Object?>.from(result.first.toColumnMap());
+  }
+
+  Future<Map<String, Object?>?> updateFeatureFlag({
+    required String flagKey,
+    bool? enabled,
+    int? rolloutPercentage,
+    String? audience,
+    String? stage,
+    required String updatedBy,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        UPDATE feature_flags SET
+          enabled = COALESCE(@enabled, enabled),
+          rollout_percentage = COALESCE(@rollout_percentage, rollout_percentage),
+          audience = COALESCE(@audience, audience),
+          stage = COALESCE(@stage, stage),
+          updated_at = NOW(),
+          updated_by = @updated_by
+        WHERE flag_key = @flag_key
+        RETURNING flag_key, label, description, enabled, rollout_percentage, audience, stage,
+          created_at::text AS created_at, updated_at::text AS updated_at, updated_by
+      '''),
+      parameters: {
+        'flag_key': flagKey,
+        'enabled': enabled,
+        'rollout_percentage': rolloutPercentage,
+        'audience': audience,
+        'stage': stage,
+        'updated_by': updatedBy,
+      },
+    );
+    if (result.isEmpty) return null;
+    return Map<String, Object?>.from(result.first.toColumnMap());
+  }
+
+  // -- Control Center /release (Phase 6) ------------------------------------
+
+  Future<Map<String, Object?>> appReleaseConfig() async {
+    final db = await connection();
+    final result = await db.execute('''
+      SELECT current_version, minimum_supported_version, forced_update, changelog,
+        updated_at::text AS updated_at, updated_by
+      FROM app_release_config WHERE id = 1
+    ''');
+    if (result.isEmpty) {
+      return {
+        'current_version': null,
+        'minimum_supported_version': null,
+        'forced_update': false,
+        'changelog': '',
+        'updated_at': null,
+        'updated_by': null,
+      };
+    }
+    return Map<String, Object?>.from(result.first.toColumnMap());
+  }
+
+  Future<Map<String, Object?>> updateAppReleaseConfig({
+    String? currentVersion,
+    String? minimumSupportedVersion,
+    bool? forcedUpdate,
+    String? changelog,
+    required String updatedBy,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        UPDATE app_release_config SET
+          current_version = COALESCE(@current_version, current_version),
+          minimum_supported_version = COALESCE(@minimum_supported_version, minimum_supported_version),
+          forced_update = COALESCE(@forced_update, forced_update),
+          changelog = COALESCE(@changelog, changelog),
+          updated_at = NOW(),
+          updated_by = @updated_by
+        WHERE id = 1
+        RETURNING current_version, minimum_supported_version, forced_update, changelog,
+          updated_at::text AS updated_at, updated_by
+      '''),
+      parameters: {
+        'current_version': currentVersion,
+        'minimum_supported_version': minimumSupportedVersion,
+        'forced_update': forcedUpdate,
+        'changelog': changelog,
+        'updated_by': updatedBy,
+      },
+    );
+    return Map<String, Object?>.from(result.first.toColumnMap());
+  }
+
+  // -- Control Center /incidents (Phase 6) ----------------------------------
+
+  Future<List<Map<String, Object?>>> listIncidents({String? status}) async {
+    final db = await connection();
+    final where = status != null && status.trim().isNotEmpty ? 'WHERE status = @status' : '';
+    final result = await db.execute(
+      Sql.named('SELECT * FROM incidents $where ORDER BY started_at DESC'),
+      parameters: {'status': status},
+    );
+    return result.map((row) => _dateSafeRow(row.toColumnMap())).toList();
+  }
+
+  Future<Map<String, Object?>?> incident(int id) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('SELECT * FROM incidents WHERE id = @id'),
+      parameters: {'id': id},
+    );
+    if (result.isEmpty) return null;
+    return _dateSafeRow(result.first.toColumnMap());
+  }
+
+  Future<Map<String, Object?>> createIncident({
+    required String title,
+    String severity = 'minor',
+    String affectedSystems = '',
+    int? responsibleEmployeeId,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        INSERT INTO incidents (title, severity, affected_systems, responsible_employee_id)
+        VALUES (@title, @severity, @affected_systems, @responsible_employee_id)
+        RETURNING *
+      '''),
+      parameters: {
+        'title': title,
+        'severity': severity,
+        'affected_systems': affectedSystems,
+        'responsible_employee_id': responsibleEmployeeId,
+      },
+    );
+    return _dateSafeRow(result.first.toColumnMap());
+  }
+
+  Future<Map<String, Object?>?> updateIncident({
+    required int id,
+    String? status,
+    String? severity,
+    String? actionsTaken,
+    String? postmortem,
+    int? responsibleEmployeeId,
+    bool closeNow = false,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        UPDATE incidents SET
+          status = COALESCE(@status, status),
+          severity = COALESCE(@severity, severity),
+          actions_taken = COALESCE(@actions_taken, actions_taken),
+          postmortem = COALESCE(@postmortem, postmortem),
+          responsible_employee_id = COALESCE(@responsible_employee_id, responsible_employee_id),
+          ended_at = CASE WHEN @close_now THEN NOW() ELSE ended_at END,
+          updated_at = NOW()
+        WHERE id = @id
+        RETURNING *
+      '''),
+      parameters: {
+        'id': id,
+        'status': status,
+        'severity': severity,
+        'actions_taken': actionsTaken,
+        'postmortem': postmortem,
+        'responsible_employee_id': responsibleEmployeeId,
+        'close_now': closeNow,
+      },
+    );
+    if (result.isEmpty) return null;
+    return _dateSafeRow(result.first.toColumnMap());
+  }
+
+  // -- Control Center Security (Phase 6) -------------------------------------
+
+  Future<void> recordFailedLogin({required String login, String? ip}) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('INSERT INTO admin_failed_logins (login, ip) VALUES (@login, @ip)'),
+      parameters: {'login': login, 'ip': ip},
+    );
+  }
+
+  Future<List<Map<String, Object?>>> recentFailedLogins({int limit = 50}) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT login, ip, attempted_at::text AS attempted_at
+        FROM admin_failed_logins
+        ORDER BY attempted_at DESC
+        LIMIT @limit
+      '''),
+      parameters: {'limit': limit.clamp(1, 500)},
+    );
+    return result.map((row) => Map<String, Object?>.from(row.toColumnMap())).toList();
+  }
+
+  /// Aktive Sessions je Mitarbeiter - dient sowohl der Security-Ansicht
+  /// (einzelne Session beenden) als auch als Online-Status-Näherung (Section
+  /// 12): kein echtes Heartbeat/Presence-System, "online" = mind. eine nicht
+  /// abgelaufene, nicht widerrufene Session.
+  Future<List<Map<String, Object?>>> listActiveAdminSessions() async {
+    final db = await connection();
+    final result = await db.execute('''
+      SELECT s.token, s.employee_id, e.name AS employee_name, e.login AS employee_login,
+        s.created_at::text AS created_at, s.expires_at::text AS expires_at,
+        s.ip, s.user_agent
+      FROM admin_sessions s
+      JOIN admin_employees e ON e.id = s.employee_id
+      WHERE s.revoked_at IS NULL AND s.expires_at > NOW()
+      ORDER BY s.created_at DESC
+    ''');
+    return result.map((row) => Map<String, Object?>.from(row.toColumnMap())).toList();
+  }
+
+  Future<bool> revokeAdminSessionByToken(String token) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        UPDATE admin_sessions SET revoked_at = NOW()
+        WHERE token = @token AND revoked_at IS NULL
+        RETURNING token
+      '''),
+      parameters: {'token': token},
+    );
+    return result.isNotEmpty;
+  }
+
+  // -- Control Center /system-health (Phase 6) ------------------------------
+
+  /// Rein lesende DB-Kennzahlen (Section 50 "Database"/"Storage") - direkte
+  /// Postgres-Introspektion, keine externe Anbindung nötig.
+  Future<Map<String, Object?>> databaseStats() async {
+    final db = await connection();
+    final sizeResult = await db.execute('''
+      SELECT pg_database_size(current_database()) AS size_bytes
+    ''');
+    final tableResult = await db.execute('''
+      SELECT relname, n_live_tup
+      FROM pg_stat_user_tables
+      ORDER BY n_live_tup DESC
+      LIMIT 15
+    ''');
+    return {
+      'sizeBytes': sizeResult.first[0],
+      'largestTables': tableResult
+          .map((row) => {'table': row[0].toString(), 'rows': row[1]})
+          .toList(),
+    };
   }
 
   Future<void> close() async {
