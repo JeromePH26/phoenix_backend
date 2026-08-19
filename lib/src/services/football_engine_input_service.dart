@@ -7,7 +7,10 @@ class FootballEngineInputService {
 
   final PhoenixDatabase database;
 
-  static const modelVersion = 'goal_rate_normalization_v4_gemini_context';
+  // "gemini_context" bewusst entfernt: der KI-Kontext-Schritt ist
+  // deaktiviert, dieser Dienst fällt immer auf die statistische Basis
+  // zurück (siehe _normalize weiter unten).
+  static const modelVersion = 'goal_rate_normalization_v4_stat_only';
 
   Future<Map<String, Object?>> prepare({
     int? phaseTwoScanRunId,

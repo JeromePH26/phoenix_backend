@@ -24,6 +24,43 @@ class FootballMarketSelectionService {
     for (final row in rows) {
       final fixtureId = _string(row['fixture_id']);
       final simulation = _map(row['result']);
+      final selection = selectForFixture(
+        fixtureId: fixtureId,
+        simulation: simulation,
+        minimumProbabilityDecimal: minimumProbabilityDecimal,
+      );
+      if (selection == null) continue;
+
+      await database.saveFootballMarketSelection(
+        phaseTwoScanRunId: phaseTwoScanRunId,
+        fixtureId: fixtureId,
+        modelVersion: modelVersion,
+        selection: selection,
+      );
+
+      outputs.add(selection);
+    }
+
+    return {
+      'status': 'completed',
+      'phaseTwoScanRunId': phaseTwoScanRunId,
+      'modelVersion': modelVersion,
+      'processed': outputs.length,
+      'results': outputs,
+    };
+  }
+
+  /// Reine, DB-freie Auswahllogik für ein einzelnes Fixture - testbar ohne
+  /// Datenbank. Gibt `null` zurück, wenn kein Kernmarkt (1X2/BTTS/O-U 2,5)
+  /// eine verwertbare Wahrscheinlichkeit hat (Publish Gate: Fixture wird
+  /// dann von select() übersprungen statt eine künstliche Empfehlung zu
+  /// erzeugen).
+  Map<String, Object?>? selectForFixture({
+    required String fixtureId,
+    required Map<String, Object?> simulation,
+    required double minimumProbabilityDecimal,
+  }) {
+    {
       final probabilities = _map(simulation['probabilities']);
       final fairOdds = _map(simulation['fairOdds']);
       final goalExpectations = _map(simulation['goalExpectations']);
@@ -154,15 +191,24 @@ class FootballMarketSelectionService {
         return pB.compareTo(pA);
       });
 
-      // Extrem sichere Linien wie Über 0,5 oder Unter 5,5 haben fast immer
-      // unspielbar kleine Quoten. Sie bleiben in der Marktübersicht, dürfen
-      // aber nicht automatisch jeden sinnvolleren Pick verdrängen.
-      // Der Phoenix-Top-Tipp soll eine echte Spielthese sein. 1X und X2
-      // bleiben als nachvollziehbare Absicherung verfügbar, DC 12 und
-      // Kombimärkte werden dagegen niemals als Tipp veröffentlicht. DNB ist
-      // allein unter der oben geprüften Mindestquote als selektiver
-      // Ausweichmarkt erlaubt.
-      const primaryTipKeys = <String>{
+      // Produktregel (verbindlich): Die PHÖNIX-Hauptempfehlung (phoenixTip)
+      // darf AUSSCHLIESSLICH aus 1X2, BTTS oder Über/Unter 2,5 stammen.
+      // Doppelte Chance, Draw No Bet, Team-Torlinien, erweiterte Linien
+      // (3,5 Tore) und Kombimärkte dürfen niemals der veröffentlichte Tipp
+      // sein - sie bleiben ausschließlich informativ im Marktcheck
+      // (topMarkets/allMarkets) sichtbar. displayTipKeys steuert nur diese
+      // informative Ansicht, mainTipKeys steuert ausschließlich, was
+      // überhaupt als phoenixTip infrage kommt.
+      const mainTipKeys = <String>{
+        'homeWin',
+        'draw',
+        'awayWin',
+        'over25',
+        'under25',
+        'bttsYes',
+        'bttsNo',
+      };
+      const displayTipKeys = <String>{
         'homeWin',
         'draw',
         'awayWin',
@@ -177,67 +223,68 @@ class FootballMarketSelectionService {
         'dnbHome',
         'dnbAway',
       };
-      const reserveTipKeys = <String>{
-        'over35',
-        'under35',
-      };
-      final selectable = candidates.where((candidate) {
+      bool isContradictoryDraw(Map<String, Object?> candidate) {
+        final key = _string(candidate['key']);
+        final probability = _asProbability(candidate['probability']);
+        return key == 'draw' &&
+            probability <
+                _asProbability(
+                    probabilities['homeWin'] ?? probabilities['home']) &&
+            probability <
+                _asProbability(
+                    probabilities['awayWin'] ?? probabilities['away']);
+      }
+
+      final selectableMain = candidates.where((candidate) {
         final key = _string(candidate['key']);
         final probability = _asProbability(candidate['probability']);
         final fair = _number(candidate['fairOdds']) ?? 0;
-        final isContradictoryDraw = key == 'draw' &&
-            probability <
-                _asProbability(
-                    probabilities['homeWin'] ?? probabilities['home']) &&
-            probability <
-                _asProbability(
-                    probabilities['awayWin'] ?? probabilities['away']);
-        return primaryTipKeys.contains(key) &&
-            !isContradictoryDraw &&
+        return mainTipKeys.contains(key) &&
+            !isContradictoryDraw(candidate) &&
             probability >= minimumProbabilityDecimal.clamp(0.0, 1.0) &&
             fair >= 1.20;
       }).toList(growable: false);
-      final fallbackCore = candidates.where((candidate) {
+      final fallbackCoreMain = candidates.where((candidate) {
         final key = _string(candidate['key']);
-        final probability = _asProbability(candidate['probability']);
-        final isContradictoryDraw = key == 'draw' &&
-            probability <
-                _asProbability(
-                    probabilities['homeWin'] ?? probabilities['home']) &&
-            probability <
-                _asProbability(
-                    probabilities['awayWin'] ?? probabilities['away']);
-        return primaryTipKeys.contains(key) && !isContradictoryDraw;
+        return mainTipKeys.contains(key) && !isContradictoryDraw(candidate);
       }).toList(growable: false);
-      final ranked = List<Map<String, Object?>>.from(
-        selectable.isNotEmpty
-            ? selectable
-            : fallbackCore.isNotEmpty
-                ? fallbackCore
-                : candidates.where((candidate) {
-                    final key = _string(candidate['key']);
-                    // Nur wenn die Kernmärkte vollständig fehlen, greifen wir
-                    // auf eine breite Torlinie zurück. Kombi- und DC-12-
-                    // Märkte werden niemals als Notlösung veröffentlicht.
-                    return reserveTipKeys.contains(key);
-                  }).toList(growable: false),
-      )..sort((a, b) {
-          final scoreA = _selectionScore(a);
-          final scoreB = _selectionScore(b);
-          final scoreComparison = scoreB.compareTo(scoreA);
-          if (scoreComparison != 0) return scoreComparison;
-          return (_number(b['probability']) ?? 0)
-              .compareTo(_number(a['probability']) ?? 0);
-        });
 
-      if (ranked.isEmpty) {
-        // Kein Markt mit verwertbarer Wahrscheinlichkeit: keine künstliche
-        // Empfehlung erzeugen und den Scan robust fortsetzen.
-        continue;
+      int byScoreThenProbability(
+        Map<String, Object?> a,
+        Map<String, Object?> b,
+      ) {
+        final scoreComparison =
+            _selectionScore(b).compareTo(_selectionScore(a));
+        if (scoreComparison != 0) return scoreComparison;
+        return (_number(b['probability']) ?? 0)
+            .compareTo(_number(a['probability']) ?? 0);
       }
 
-      final best = ranked.first;
-      final second = ranked.length > 1 ? ranked[1] : ranked.first;
+      // rankedMain bestimmt AUSSCHLIESSLICH den phoenixTip. Bleibt sie leer
+      // (kein Kernmarkt mit verwertbarer Wahrscheinlichkeit), gibt es
+      // absichtlich keine Empfehlung für dieses Fixture - keine DC/Kombi-
+      // Notlösung mehr.
+      final rankedMain = List<Map<String, Object?>>.from(
+        selectableMain.isNotEmpty ? selectableMain : fallbackCoreMain,
+      )..sort(byScoreThenProbability);
+
+      // rankedDisplay speist nur die informative Marktübersicht (Marktcheck)
+      // und darf bewusst breiter sein als rankedMain.
+      final rankedDisplay = List<Map<String, Object?>>.from(
+        candidates.where(
+          (candidate) => displayTipKeys.contains(_string(candidate['key'])),
+        ),
+      )..sort(byScoreThenProbability);
+
+      if (rankedMain.isEmpty) {
+        // Kein Kernmarkt (1X2/BTTS/O-U 2,5) mit verwertbarer Wahrscheinlichkeit:
+        // keine künstliche Empfehlung erzeugen und den Scan robust fortsetzen.
+        return null;
+      }
+
+      final best = rankedMain.first;
+      final second = rankedMain.length > 1 ? rankedMain[1] : rankedMain.first;
+      final ranked = rankedDisplay.isNotEmpty ? rankedDisplay : rankedMain;
 
       final bestProbability = _asProbability(best['probability']);
       final selectionScoreGap =
@@ -250,7 +297,9 @@ class FootballMarketSelectionService {
 
       final dataQuality = _int(simulation['dataQuality'], fallback: 0);
       final realXgAvailable = goalExpectations['realXgAvailable'] == true;
-      final simulations = _int(simulation['simulations'], fallback: 100000);
+      // Fehlt der reale Wert, MUSS das ehrlich als "0 Simulationen" sichtbar
+      // werden statt fälschlich 100.000 echte Läufe vorzutäuschen.
+      final simulations = _int(simulation['simulations'], fallback: 0);
 
       final trustScore = _trustScore(
         bestProbabilityPercent: bestProbabilityPercent,
@@ -260,8 +309,13 @@ class FootballMarketSelectionService {
         realXgAvailable: realXgAvailable,
       );
 
+      // Publish Gate: ohne echte Simulationsläufe oder Datenqualität keine
+      // vertrauenswürdige Empfehlung veröffentlichen - das Spiel bleibt
+      // sichtbar, aber ohne Tipp (qualifiesForTip: false).
       final qualifiesForTip =
-          bestProbability >= minimumProbabilityDecimal.clamp(0.0, 1.0);
+          bestProbability >= minimumProbabilityDecimal.clamp(0.0, 1.0) &&
+              simulations > 0 &&
+              dataQuality > 0;
 
       final selection = <String, Object?>{
         'fixtureId': fixtureId,
@@ -327,23 +381,8 @@ class FootballMarketSelectionService {
         ],
       };
 
-      await database.saveFootballMarketSelection(
-        phaseTwoScanRunId: phaseTwoScanRunId,
-        fixtureId: fixtureId,
-        modelVersion: modelVersion,
-        selection: selection,
-      );
-
-      outputs.add(selection);
+      return selection;
     }
-
-    return {
-      'status': 'completed',
-      'phaseTwoScanRunId': phaseTwoScanRunId,
-      'modelVersion': modelVersion,
-      'processed': outputs.length,
-      'results': outputs,
-    };
   }
 
   Map<String, Object?> _candidate({
@@ -430,7 +469,9 @@ class FootballMarketSelectionService {
 
     final dataQualityComponent = (dataQuality.clamp(0, 100) / 100) * 30;
 
-    final simulationComponent = (simulations.clamp(1000, 100000) / 100000) * 10;
+    // Kein künstlicher Mindestwert mehr: 0 echte Simulationen ergeben 0
+    // Punkte statt eine vorgetäuschte Basis-Vertrauenswürdigkeit.
+    final simulationComponent = (simulations.clamp(0, 100000) / 100000) * 10;
 
     final xgComponent = realXgAvailable ? 5.0 : 0.0;
 

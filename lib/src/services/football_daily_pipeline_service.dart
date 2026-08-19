@@ -19,8 +19,11 @@ class FootballDailyPipelineService {
   final PhoenixDatabase database;
   final FootballService football;
 
+  // "gemini" bewusst NICHT mehr im Namen: der KI-Kontext-Schritt ist
+  // deaktiviert (siehe Kommentar weiter unten), diese Version rechnet rein
+  // statistisch. Ein Name mit "gemini" würde live KI-Beteiligung vortäuschen.
   static const publishedModelVersion =
-      'phoenix_daily_pipeline_v9_gemini_all_matches_100k';
+      'phoenix_daily_pipeline_v10_stat_all_matches_100k';
 
   Future<void> run({
     required int jobId,
