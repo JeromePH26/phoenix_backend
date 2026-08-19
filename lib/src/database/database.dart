@@ -1165,6 +1165,336 @@ class PhoenixDatabase {
     ''');
   }
 
+  // ===========================================================================
+  // PHÖNIX ACCOUNT SYSTEM - Phase 2 (Auth + 18+ + Registrierung + User
+  // Profiles). Query-Methoden für `users`/`user_auth_providers`/
+  // `user_sessions`, analog zum bestehenden `admin_sessions`-Muster
+  // (`createAdminSession`/`adminSessionWithEmployee`/`revokeAdminSession`).
+  // ===========================================================================
+
+  /// Abschnitt 6: Auth-Provider-Lookup für einen bereits verifizierten
+  /// Firebase-Token (provider + provider_uid). Liefert `null`, wenn dieser
+  /// Provider/UID noch mit keinem PHÖNIX-Account verknüpft ist (entweder
+  /// komplett neuer Nutzer ODER eine neue Verknüpfung zu einem bestehenden
+  /// Account per E-Mail, siehe [userByEmail]).
+  Future<Map<String, Object?>?> userByAuthProvider({
+    required String provider,
+    required String providerUid,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT u.* FROM users u
+        JOIN user_auth_providers p ON p.user_id = u.id
+        WHERE p.provider = @provider AND p.provider_uid = @provider_uid
+        LIMIT 1
+      '''),
+      parameters: {'provider': provider, 'provider_uid': providerUid},
+    );
+    if (result.isEmpty) return null;
+    return Map<String, Object?>.from(result.first.toColumnMap());
+  }
+
+  /// Abschnitt 6: Lookup per E-Mail (case-insensitive) für Account-Linking -
+  /// verhindert ein zweites PHÖNIX-Konto für dieselbe E-Mail-Adresse.
+  Future<Map<String, Object?>?> userByEmail(String email) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT * FROM users WHERE email_lower = LOWER(@email) LIMIT 1
+      '''),
+      parameters: {'email': email},
+    );
+    if (result.isEmpty) return null;
+    return Map<String, Object?>.from(result.first.toColumnMap());
+  }
+
+  Future<Map<String, Object?>?> userById(int id) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('SELECT * FROM users WHERE id = @id LIMIT 1'),
+      parameters: {'id': id},
+    );
+    if (result.isEmpty) return null;
+    return Map<String, Object?>.from(result.first.toColumnMap());
+  }
+
+  /// Abschnitt 6: verknüpft einen zusätzlichen Auth-Provider (z.B. Google)
+  /// mit einem bereits bestehenden PHÖNIX-Account (z.B. ursprünglich per
+  /// E-Mail+Passwort registriert). `ON CONFLICT DO NOTHING` macht den Aufruf
+  /// idempotent, falls derselbe Link-Request retried wird (Abschnitt 84).
+  Future<void> linkAuthProvider({
+    required int userId,
+    required String provider,
+    required String providerUid,
+    String? emailAtLink,
+  }) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        INSERT INTO user_auth_providers (user_id, provider, provider_uid, email_at_link)
+        VALUES (@user_id, @provider, @provider_uid, @email_at_link)
+        ON CONFLICT (provider, provider_uid) DO NOTHING
+      '''),
+      parameters: {
+        'user_id': userId,
+        'provider': provider,
+        'provider_uid': providerUid,
+        'email_at_link': emailAtLink,
+      },
+    );
+  }
+
+  /// Abschnitt 3/84: erzeugt einen komplett neuen PHÖNIX-Account + die
+  /// verknüpfte Auth-Provider-Zeile ATOMAR in einer Transaktion - entweder
+  /// entsteht ein vollständiger Nutzer mit Login-Möglichkeit, oder gar
+  /// nichts ("kein halb kaputter User", Abschnitt 84). Die Altersprüfung
+  /// selbst passiert VOR diesem Aufruf im Route-Handler (mit
+  /// `calculateAge`/`passesAgeGate`), damit unter-18-Anfragen niemals auch
+  /// nur transaktional eine Zeile anlegen.
+  Future<Map<String, Object?>> createUserAccount({
+    required String email,
+    required bool emailVerified,
+    required DateTime dateOfBirth,
+    required String provider,
+    required String providerUid,
+    String? termsVersion,
+    String? privacyVersion,
+  }) async {
+    final db = await connection();
+    return db.runTx((session) async {
+      final result = await session.execute(
+        Sql.named('''
+          INSERT INTO users (
+            email, email_verified, date_of_birth, age_gate_passed,
+            age_gate_checked_at, account_status, terms_version,
+            terms_accepted_at, privacy_version, privacy_accepted_at,
+            created_at, updated_at, last_login_at
+          ) VALUES (
+            @email, @email_verified, @date_of_birth, TRUE, NOW(),
+            @account_status, @terms_version,
+            CASE WHEN @terms_version IS NULL THEN NULL ELSE NOW() END,
+            @privacy_version,
+            CASE WHEN @privacy_version IS NULL THEN NULL ELSE NOW() END,
+            NOW(), NOW(), NOW()
+          )
+          RETURNING *
+        '''),
+        parameters: {
+          'email': email,
+          'email_verified': emailVerified,
+          'date_of_birth': dateOfBirth.toUtc().toIso8601String().substring(0, 10),
+          // Abschnitt 82: E-Mail bereits vom Provider verifiziert (z.B.
+          // Google) -> direkt ACTIVE, sonst erst nach Verifizierung.
+          'account_status':
+              emailVerified ? 'ACTIVE' : 'PENDING_EMAIL_VERIFICATION',
+          'terms_version': termsVersion,
+          'privacy_version': privacyVersion,
+        },
+      );
+      final row = Map<String, Object?>.from(result.first.toColumnMap());
+      final userId = row['id'] as int;
+
+      await session.execute(
+        Sql.named('''
+          INSERT INTO user_auth_providers (user_id, provider, provider_uid, email_at_link)
+          VALUES (@user_id, @provider, @provider_uid, @email)
+        '''),
+        parameters: {
+          'user_id': userId,
+          'provider': provider,
+          'provider_uid': providerUid,
+          'email': email,
+        },
+      );
+
+      return row;
+    });
+  }
+
+  Future<void> touchUserLastLogin(int userId) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('UPDATE users SET last_login_at = NOW() WHERE id = @id'),
+      parameters: {'id': userId},
+    );
+  }
+
+  Future<void> markUserEmailVerified(int userId) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        UPDATE users SET
+          email_verified = TRUE,
+          account_status = CASE
+            WHEN account_status = 'PENDING_EMAIL_VERIFICATION' THEN 'ACTIVE'
+            ELSE account_status
+          END,
+          updated_at = NOW()
+        WHERE id = @id
+      '''),
+      parameters: {'id': userId},
+    );
+  }
+
+  /// Abschnitt 91 "update allowed profile fields" - bewusst eine feste,
+  /// kleine Menge selbst änderbarer Felder statt eines generischen
+  /// UPDATE-Endpunkts (`date_of_birth`/`account_status`/`account_type`/etc.
+  /// sind explizit NICHT hier drin, siehe Abschnitt 4/76).
+  Future<Map<String, Object?>?> updateOwnUserProfile({
+    required int userId,
+    String? username,
+    String? displayName,
+    String? language,
+    String? country,
+    Map<String, Object?>? notificationSettings,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        UPDATE users SET
+          username = COALESCE(@username, username),
+          username_changed_at = CASE
+            WHEN @username IS NOT NULL AND @username IS DISTINCT FROM username
+            THEN NOW() ELSE username_changed_at
+          END,
+          display_name = COALESCE(@display_name, display_name),
+          language = COALESCE(@language, language),
+          country = COALESCE(@country, country),
+          notification_settings = COALESCE(@notification_settings, notification_settings),
+          updated_at = NOW()
+        WHERE id = @id
+        RETURNING *
+      '''),
+      parameters: {
+        'id': userId,
+        'username': username,
+        'display_name': displayName,
+        'language': language,
+        'country': country,
+        'notification_settings': notificationSettings == null
+            ? null
+            : jsonEncode(notificationSettings),
+      },
+    );
+    if (result.isEmpty) return null;
+    return Map<String, Object?>.from(result.first.toColumnMap());
+  }
+
+  Future<bool> isUsernameTaken(String username, {int? excludingUserId}) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT 1 FROM users
+        WHERE username_lower = LOWER(@username)
+        AND (@excluding_user_id IS NULL OR id != @excluding_user_id)
+        LIMIT 1
+      '''),
+      parameters: {'username': username, 'excluding_user_id': excludingUserId},
+    );
+    return result.isNotEmpty;
+  }
+
+  // --- App-seitige Sessions (Abschnitt 78, analog admin_sessions) --------
+
+  Future<void> createUserSession({
+    required int userId,
+    required String token,
+    required DateTime expiresAt,
+    String? ip,
+    String? userAgent,
+    String? deviceModel,
+    String? platform,
+    String? appVersion,
+  }) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        INSERT INTO user_sessions (
+          token, user_id, expires_at, ip, user_agent, device_model,
+          platform, app_version
+        ) VALUES (
+          @token, @user_id, @expires_at, @ip, @user_agent, @device_model,
+          @platform, @app_version
+        )
+      '''),
+      parameters: {
+        'token': token,
+        'user_id': userId,
+        'expires_at': expiresAt.toUtc().toIso8601String(),
+        'ip': ip,
+        'user_agent': userAgent,
+        'device_model': deviceModel,
+        'platform': platform,
+        'app_version': appVersion,
+      },
+    );
+  }
+
+  /// Analog `adminSessionWithEmployee` - eine Abfrage für Session +
+  /// zugehöriges Nutzerprofil, für den App-Auth-Guard.
+  Future<Map<String, Object?>?> userSessionWithProfile(String token) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT
+          u.*,
+          s.token AS session_token,
+          s.expires_at AS session_expires_at,
+          s.revoked_at AS session_revoked_at
+        FROM user_sessions s
+        JOIN users u ON u.id = s.user_id
+        WHERE s.token = @token
+        LIMIT 1
+      '''),
+      parameters: {'token': token},
+    );
+    if (result.isEmpty) return null;
+    return Map<String, Object?>.from(result.first.toColumnMap());
+  }
+
+  Future<void> revokeUserSession(String token) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        UPDATE user_sessions SET revoked_at = NOW()
+        WHERE token = @token AND revoked_at IS NULL
+      '''),
+      parameters: {'token': token},
+    );
+  }
+
+  /// Abschnitt 78: "Alle anderen Geräte abmelden" - widerruft jede Session
+  /// des Nutzers außer der aktuell verwendeten.
+  Future<void> revokeOtherUserSessions({
+    required int userId,
+    required String exceptToken,
+  }) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        UPDATE user_sessions SET revoked_at = NOW()
+        WHERE user_id = @user_id AND token != @except_token AND revoked_at IS NULL
+      '''),
+      parameters: {'user_id': userId, 'except_token': exceptToken},
+    );
+  }
+
+  Future<List<Map<String, Object?>>> listUserSessions(int userId) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT token, created_at, expires_at, revoked_at, ip, user_agent,
+          device_model, platform, app_version
+        FROM user_sessions
+        WHERE user_id = @user_id
+        ORDER BY created_at DESC
+      '''),
+      parameters: {'user_id': userId},
+    );
+    return result.map((row) => Map<String, Object?>.from(row.toColumnMap())).toList();
+  }
+
   /// PHÖNIX CONTROL CENTER PHASE 2 (Football-Domain-Admin-APIs, additiv):
   /// Pro-Match-Steuerflags für Matches/Teams/Wappen-Verwaltung. Rein additiv
   /// über `ADD COLUMN IF NOT EXISTS` mit `DEFAULT TRUE`, damit bestehende

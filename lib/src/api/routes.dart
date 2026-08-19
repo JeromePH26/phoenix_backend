@@ -13,6 +13,7 @@ import '../control_center/audit.dart';
 import '../database/database.dart';
 import '../football_admin/football_admin_logic.dart';
 import '../http/json_response.dart';
+import 'app_account_routes.dart';
 import 'control_center_routes.dart';
 import 'model_lab_routes.dart';
 import '../services/football_phase_one_scan_service.dart';
@@ -78,6 +79,14 @@ class ApiRoutes {
         database: database,
         push: news.push,
       ).router.call,
+    );
+
+    // PHÖNIX ACCOUNT SYSTEM (Abschnitt 91, additiv): öffentlich erreichbare
+    // App-Nutzer-Auth/-Profil-API, komplett getrennt von der
+    // Control-Center-Mitarbeiter-Auth und vom statischen Admin-Token oben.
+    router.mount(
+      '/api/app/',
+      AppAccountRoutes(config: config, database: database).router.call,
     );
 
     router.get('/health', (Request request) async {

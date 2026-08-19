@@ -15,6 +15,7 @@ dependencies:
   googleapis_auth: ^2.0.0
   xml: ^6.6.1
   bcrypt: ^1.2.0
+  dart_jsonwebtoken: ^3.1.1
 dev_dependencies:
   lints: ^5.1.1
   test: ^1.25.0
