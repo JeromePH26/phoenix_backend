@@ -817,6 +817,7 @@ class PhoenixDatabase {
     await _migrateModelLab(db);
     await _migrateControlCenter(db);
     await _migrateSupport(db);
+    await _migrateContent(db);
     await _migrateFootballMatchControls(db);
 
     await db.execute('''
@@ -1016,6 +1017,127 @@ class PhoenixDatabase {
     await db.execute('''
       CREATE INDEX IF NOT EXISTS idx_support_ticket_messages_ticket
       ON support_ticket_messages (ticket_id, created_at ASC)
+    ''');
+  }
+
+  /// PHÖNIX CONTROL CENTER Phase 5 (Section 30-32/46, additiv): manuell
+  /// verfasste News (getrennt von `news_articles`, das ausschließlich
+  /// importierte Publisher-Artikel und automatisch generierte Phoenix-
+  /// Berichte via `PhoenixEditorialComposer` enthält - siehe
+  /// football_news_service.dart), FAQ, Werbekampagnen, Push-Broadcasts und
+  /// die Premium-Feature-Matrix.
+  Future<void> _migrateContent(Connection db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS phoenix_editorial_articles (
+        id BIGSERIAL PRIMARY KEY,
+        title TEXT NOT NULL,
+        summary TEXT NOT NULL DEFAULT '',
+        body TEXT NOT NULL DEFAULT '',
+        category TEXT NOT NULL DEFAULT 'allgemein',
+        image_url TEXT,
+        author_employee_id BIGINT REFERENCES admin_employees(id),
+        status TEXT NOT NULL DEFAULT 'DRAFT',
+        homepage_feature BOOLEAN NOT NULL DEFAULT FALSE,
+        breaking BOOLEAN NOT NULL DEFAULT FALSE,
+        send_push BOOLEAN NOT NULL DEFAULT FALSE,
+        push_sent_at TIMESTAMPTZ,
+        scheduled_at TIMESTAMPTZ,
+        published_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CHECK (status IN ('DRAFT', 'SCHEDULED', 'PUBLISHED', 'HIDDEN', 'ARCHIVED'))
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_phoenix_editorial_articles_status
+      ON phoenix_editorial_articles (status, published_at DESC)
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS phoenix_faq_articles (
+        id BIGSERIAL PRIMARY KEY,
+        title TEXT NOT NULL,
+        body TEXT NOT NULL DEFAULT '',
+        category TEXT NOT NULL DEFAULT 'allgemein',
+        position INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'DRAFT',
+        author_employee_id BIGINT REFERENCES admin_employees(id),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CHECK (status IN ('DRAFT', 'PUBLISHED', 'ARCHIVED'))
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_phoenix_faq_articles_status
+      ON phoenix_faq_articles (status, category, position)
+    ''');
+
+    // Section 32: Slots sind serverseitig fest vordefiniert (nicht frei
+    // wählbar) - die App entscheidet, welche Slots sie überhaupt rendert.
+    // Noch nicht in der Flutter-App verdrahtet (out of scope), deshalb rein
+    // additiv und ohne Verhaltensänderung.
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS ad_campaigns (
+        id BIGSERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        slot TEXT NOT NULL,
+        image_url TEXT NOT NULL,
+        link_url TEXT NOT NULL,
+        active BOOLEAN NOT NULL DEFAULT TRUE,
+        start_date DATE,
+        end_date DATE,
+        target_country TEXT,
+        target_audience TEXT NOT NULL DEFAULT 'ALL',
+        impressions BIGINT NOT NULL DEFAULT 0,
+        clicks BIGINT NOT NULL DEFAULT 0,
+        created_by_employee_id BIGINT REFERENCES admin_employees(id),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CHECK (slot IN ('home_banner', 'match_detail_infeed', 'news_infeed')),
+        CHECK (target_audience IN ('ALL', 'FREE', 'PREMIUM'))
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_ad_campaigns_slot_active
+      ON ad_campaigns (slot, active)
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS push_broadcasts (
+        id BIGSERIAL PRIMARY KEY,
+        title TEXT NOT NULL,
+        body TEXT NOT NULL,
+        target_type TEXT NOT NULL,
+        target_value TEXT,
+        sent_count INTEGER NOT NULL DEFAULT 0,
+        failed_count INTEGER NOT NULL DEFAULT 0,
+        sent_by_employee_id BIGINT REFERENCES admin_employees(id),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CHECK (target_type IN ('all', 'league'))
+      )
+    ''');
+
+    // Section 46: nur bereits implementierte Features können hier
+    // umklassifiziert werden. Die App liest diese Matrix noch nicht (out of
+    // scope) - Zweck aktuell: Backend/Admin-Seite vorbereiten.
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS premium_feature_matrix (
+        feature_key TEXT PRIMARY KEY,
+        feature_label TEXT NOT NULL,
+        tier TEXT NOT NULL DEFAULT 'FREE',
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_by TEXT,
+        CHECK (tier IN ('FREE', 'PREMIUM', 'DISABLED'))
+      )
+    ''');
+    await db.execute('''
+      INSERT INTO premium_feature_matrix (feature_key, feature_label, tier) VALUES
+        ('all_tips', 'Alle Tipps', 'FREE'),
+        ('advanced_analysis', 'Erweiterte Analyse', 'PREMIUM'),
+        ('history', 'Historie', 'PREMIUM'),
+        ('phoenix_live', 'PHÖNIX Live', 'FREE'),
+        ('historical_twins', 'Historical Twins', 'PREMIUM')
+      ON CONFLICT (feature_key) DO NOTHING
     ''');
   }
 
@@ -6011,6 +6133,561 @@ class PhoenixDatabase {
     }
     if (map['updated_at'] is DateTime) {
       map['updated_at'] = (map['updated_at'] as DateTime).toUtc().toIso8601String();
+    }
+    return map;
+  }
+
+  // -- Control Center /news (Phase 5, manuell verfasst) -------------------
+
+  Future<Map<String, Object?>> createEditorialArticle({
+    required String title,
+    String summary = '',
+    String body = '',
+    String category = 'allgemein',
+    String? imageUrl,
+    int? authorEmployeeId,
+    bool homepageFeature = false,
+    bool breaking = false,
+    bool sendPush = false,
+    DateTime? scheduledAt,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        INSERT INTO phoenix_editorial_articles (
+          title, summary, body, category, image_url, author_employee_id,
+          homepage_feature, breaking, send_push, scheduled_at,
+          status
+        ) VALUES (
+          @title, @summary, @body, @category, @image_url, @author_employee_id,
+          @homepage_feature, @breaking, @send_push, @scheduled_at,
+          CASE WHEN @scheduled_at IS NULL THEN 'DRAFT' ELSE 'SCHEDULED' END
+        )
+        RETURNING *
+      '''),
+      parameters: {
+        'title': title,
+        'summary': summary,
+        'body': body,
+        'category': category,
+        'image_url': imageUrl,
+        'author_employee_id': authorEmployeeId,
+        'homepage_feature': homepageFeature,
+        'breaking': breaking,
+        'send_push': sendPush,
+        'scheduled_at': scheduledAt,
+      },
+    );
+    return _dateSafeRow(result.first.toColumnMap());
+  }
+
+  Future<List<Map<String, Object?>>> listEditorialArticles({
+    String? status,
+    String? category,
+    int limit = 100,
+  }) async {
+    final db = await connection();
+    final conditions = <String>[];
+    final parameters = <String, Object?>{'limit': limit.clamp(1, 500)};
+    if (status != null && status.trim().isNotEmpty) {
+      conditions.add('status = @status');
+      parameters['status'] = status;
+    }
+    if (category != null && category.trim().isNotEmpty) {
+      conditions.add('category = @category');
+      parameters['category'] = category;
+    }
+    final where = conditions.isEmpty ? '' : 'WHERE ${conditions.join(' AND ')}';
+    final result = await db.execute(
+      Sql.named('''
+        SELECT * FROM phoenix_editorial_articles
+        $where
+        ORDER BY created_at DESC
+        LIMIT @limit
+      '''),
+      parameters: parameters,
+    );
+    return result.map((row) => _dateSafeRow(row.toColumnMap())).toList();
+  }
+
+  Future<Map<String, Object?>?> editorialArticle(int id) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('SELECT * FROM phoenix_editorial_articles WHERE id = @id'),
+      parameters: {'id': id},
+    );
+    if (result.isEmpty) return null;
+    return _dateSafeRow(result.first.toColumnMap());
+  }
+
+  Future<Map<String, Object?>?> updateEditorialArticle({
+    required int id,
+    String? title,
+    String? summary,
+    String? body,
+    String? category,
+    Object? imageUrl = unsetSentinel,
+    String? status,
+    bool? homepageFeature,
+    bool? breaking,
+    bool? sendPush,
+    Object? scheduledAt = unsetSentinel,
+    DateTime? publishedAt,
+    bool pushSent = false,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        UPDATE phoenix_editorial_articles SET
+          title = COALESCE(@title, title),
+          summary = COALESCE(@summary, summary),
+          body = COALESCE(@body, body),
+          category = COALESCE(@category, category),
+          image_url = CASE WHEN @image_url_set THEN @image_url ELSE image_url END,
+          status = COALESCE(@status, status),
+          homepage_feature = COALESCE(@homepage_feature, homepage_feature),
+          breaking = COALESCE(@breaking, breaking),
+          send_push = COALESCE(@send_push, send_push),
+          scheduled_at = CASE WHEN @scheduled_at_set THEN @scheduled_at ELSE scheduled_at END,
+          published_at = COALESCE(@published_at, published_at),
+          push_sent_at = CASE WHEN @push_sent THEN NOW() ELSE push_sent_at END,
+          updated_at = NOW()
+        WHERE id = @id
+        RETURNING *
+      '''),
+      parameters: {
+        'id': id,
+        'title': title,
+        'summary': summary,
+        'body': body,
+        'category': category,
+        'image_url_set': !identical(imageUrl, unsetSentinel),
+        'image_url': identical(imageUrl, unsetSentinel) ? null : imageUrl,
+        'status': status,
+        'homepage_feature': homepageFeature,
+        'breaking': breaking,
+        'send_push': sendPush,
+        'scheduled_at_set': !identical(scheduledAt, unsetSentinel),
+        'scheduled_at': identical(scheduledAt, unsetSentinel) ? null : scheduledAt,
+        'published_at': publishedAt,
+        'push_sent': pushSent,
+      },
+    );
+    if (result.isEmpty) return null;
+    return _dateSafeRow(result.first.toColumnMap());
+  }
+
+  /// Für den öffentlichen Feed: veröffentlicht ODER geplant mit bereits
+  /// erreichtem Zeitpunkt. Kein Cron nötig, der Status selbst bleibt bis zu
+  /// einer manuellen/erneuten Prüfung "SCHEDULED", nur die Sichtbarkeit wird
+  /// hier lazy berechnet.
+  Future<List<Map<String, Object?>>> publicEditorialArticles({int limit = 50}) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT * FROM phoenix_editorial_articles
+        WHERE status = 'PUBLISHED'
+           OR (status = 'SCHEDULED' AND scheduled_at <= NOW())
+        ORDER BY breaking DESC, homepage_feature DESC, COALESCE(published_at, scheduled_at, created_at) DESC
+        LIMIT @limit
+      '''),
+      parameters: {'limit': limit.clamp(1, 200)},
+    );
+    return result.map((row) => _dateSafeRow(row.toColumnMap())).toList();
+  }
+
+  // -- Control Center /faq (Phase 5) ---------------------------------------
+
+  Future<Map<String, Object?>> createFaqArticle({
+    required String title,
+    String body = '',
+    String category = 'allgemein',
+    int position = 0,
+    int? authorEmployeeId,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        INSERT INTO phoenix_faq_articles (title, body, category, position, author_employee_id)
+        VALUES (@title, @body, @category, @position, @author_employee_id)
+        RETURNING *
+      '''),
+      parameters: {
+        'title': title,
+        'body': body,
+        'category': category,
+        'position': position,
+        'author_employee_id': authorEmployeeId,
+      },
+    );
+    return _dateSafeRow(result.first.toColumnMap());
+  }
+
+  Future<List<Map<String, Object?>>> listFaqArticles({String? status, String? category}) async {
+    final db = await connection();
+    final conditions = <String>[];
+    final parameters = <String, Object?>{};
+    if (status != null && status.trim().isNotEmpty) {
+      conditions.add('status = @status');
+      parameters['status'] = status;
+    }
+    if (category != null && category.trim().isNotEmpty) {
+      conditions.add('category = @category');
+      parameters['category'] = category;
+    }
+    final where = conditions.isEmpty ? '' : 'WHERE ${conditions.join(' AND ')}';
+    final result = await db.execute(
+      Sql.named('SELECT * FROM phoenix_faq_articles $where ORDER BY category, position, id'),
+      parameters: parameters,
+    );
+    return result.map((row) => _dateSafeRow(row.toColumnMap())).toList();
+  }
+
+  Future<Map<String, Object?>?> faqArticle(int id) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('SELECT * FROM phoenix_faq_articles WHERE id = @id'),
+      parameters: {'id': id},
+    );
+    if (result.isEmpty) return null;
+    return _dateSafeRow(result.first.toColumnMap());
+  }
+
+  Future<Map<String, Object?>?> updateFaqArticle({
+    required int id,
+    String? title,
+    String? body,
+    String? category,
+    int? position,
+    String? status,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        UPDATE phoenix_faq_articles SET
+          title = COALESCE(@title, title),
+          body = COALESCE(@body, body),
+          category = COALESCE(@category, category),
+          position = COALESCE(@position, position),
+          status = COALESCE(@status, status),
+          updated_at = NOW()
+        WHERE id = @id
+        RETURNING *
+      '''),
+      parameters: {
+        'id': id,
+        'title': title,
+        'body': body,
+        'category': category,
+        'position': position,
+        'status': status,
+      },
+    );
+    if (result.isEmpty) return null;
+    return _dateSafeRow(result.first.toColumnMap());
+  }
+
+  Future<List<Map<String, Object?>>> publicFaqArticles() async {
+    final db = await connection();
+    final result = await db.execute('''
+      SELECT * FROM phoenix_faq_articles
+      WHERE status = 'PUBLISHED'
+      ORDER BY category, position, id
+    ''');
+    return result.map((row) => _dateSafeRow(row.toColumnMap())).toList();
+  }
+
+  // -- Control Center /advertising (Phase 5) -------------------------------
+
+  Future<Map<String, Object?>> createAdCampaign({
+    required String name,
+    required String slot,
+    required String imageUrl,
+    required String linkUrl,
+    bool active = true,
+    DateTime? startDate,
+    DateTime? endDate,
+    String? targetCountry,
+    String targetAudience = 'ALL',
+    int? createdByEmployeeId,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        INSERT INTO ad_campaigns (
+          name, slot, image_url, link_url, active, start_date, end_date,
+          target_country, target_audience, created_by_employee_id
+        ) VALUES (
+          @name, @slot, @image_url, @link_url, @active, @start_date, @end_date,
+          @target_country, @target_audience, @created_by_employee_id
+        )
+        RETURNING *
+      '''),
+      parameters: {
+        'name': name,
+        'slot': slot,
+        'image_url': imageUrl,
+        'link_url': linkUrl,
+        'active': active,
+        'start_date': startDate,
+        'end_date': endDate,
+        'target_country': targetCountry,
+        'target_audience': targetAudience,
+        'created_by_employee_id': createdByEmployeeId,
+      },
+    );
+    return _dateSafeRow(result.first.toColumnMap());
+  }
+
+  Future<List<Map<String, Object?>>> listAdCampaigns({String? slot, bool? active}) async {
+    final db = await connection();
+    final conditions = <String>[];
+    final parameters = <String, Object?>{};
+    if (slot != null && slot.trim().isNotEmpty) {
+      conditions.add('slot = @slot');
+      parameters['slot'] = slot;
+    }
+    if (active != null) {
+      conditions.add('active = @active');
+      parameters['active'] = active;
+    }
+    final where = conditions.isEmpty ? '' : 'WHERE ${conditions.join(' AND ')}';
+    final result = await db.execute(
+      Sql.named('SELECT * FROM ad_campaigns $where ORDER BY created_at DESC'),
+      parameters: parameters,
+    );
+    return result.map((row) => _dateSafeRow(row.toColumnMap())).toList();
+  }
+
+  Future<Map<String, Object?>?> adCampaign(int id) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('SELECT * FROM ad_campaigns WHERE id = @id'),
+      parameters: {'id': id},
+    );
+    if (result.isEmpty) return null;
+    return _dateSafeRow(result.first.toColumnMap());
+  }
+
+  Future<Map<String, Object?>?> updateAdCampaign({
+    required int id,
+    String? name,
+    String? imageUrl,
+    String? linkUrl,
+    bool? active,
+    Object? startDate = unsetSentinel,
+    Object? endDate = unsetSentinel,
+    Object? targetCountry = unsetSentinel,
+    String? targetAudience,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        UPDATE ad_campaigns SET
+          name = COALESCE(@name, name),
+          image_url = COALESCE(@image_url, image_url),
+          link_url = COALESCE(@link_url, link_url),
+          active = COALESCE(@active, active),
+          start_date = CASE WHEN @start_date_set THEN @start_date ELSE start_date END,
+          end_date = CASE WHEN @end_date_set THEN @end_date ELSE end_date END,
+          target_country = CASE WHEN @target_country_set THEN @target_country ELSE target_country END,
+          target_audience = COALESCE(@target_audience, target_audience),
+          updated_at = NOW()
+        WHERE id = @id
+        RETURNING *
+      '''),
+      parameters: {
+        'id': id,
+        'name': name,
+        'image_url': imageUrl,
+        'link_url': linkUrl,
+        'active': active,
+        'start_date_set': !identical(startDate, unsetSentinel),
+        'start_date': identical(startDate, unsetSentinel) ? null : startDate,
+        'end_date_set': !identical(endDate, unsetSentinel),
+        'end_date': identical(endDate, unsetSentinel) ? null : endDate,
+        'target_country_set': !identical(targetCountry, unsetSentinel),
+        'target_country': identical(targetCountry, unsetSentinel) ? null : targetCountry,
+        'target_audience': targetAudience,
+      },
+    );
+    if (result.isEmpty) return null;
+    return _dateSafeRow(result.first.toColumnMap());
+  }
+
+  Future<void> recordAdImpression(int id) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('UPDATE ad_campaigns SET impressions = impressions + 1 WHERE id = @id'),
+      parameters: {'id': id},
+    );
+  }
+
+  Future<void> recordAdClick(int id) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('UPDATE ad_campaigns SET clicks = clicks + 1 WHERE id = @id'),
+      parameters: {'id': id},
+    );
+  }
+
+  Future<List<Map<String, Object?>>> activeAdCampaignsForSlot(String slot) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT * FROM ad_campaigns
+        WHERE slot = @slot AND active = TRUE
+          AND (start_date IS NULL OR start_date <= CURRENT_DATE)
+          AND (end_date IS NULL OR end_date >= CURRENT_DATE)
+        ORDER BY created_at DESC
+      '''),
+      parameters: {'slot': slot},
+    );
+    return result.map((row) => _dateSafeRow(row.toColumnMap())).toList();
+  }
+
+  /// Für den "Push senden"-Haken an einem manuell verfassten Artikel -
+  /// respektiert (anders als der allgemeine Push-Broadcast) gezielt die
+  /// News-Push-Präferenz, nicht nur den globalen Push-Schalter.
+  Future<List<Map<String, String>>> newsEnabledPushTargets() async {
+    final db = await connection();
+    final result = await db.execute('''
+      SELECT installation_id, push_token FROM push_devices
+      WHERE enabled = TRUE AND news_enabled = TRUE
+    ''');
+    return result
+        .map((row) => {'installationId': row[0].toString(), 'pushToken': row[1].toString()})
+        .toList();
+  }
+
+  // -- Control Center /push (Phase 5, Broadcast) ---------------------------
+
+  Future<List<Map<String, String>>> broadcastPushTargets({
+    required String targetType,
+    String? targetValue,
+  }) async {
+    final db = await connection();
+    if (targetType == 'league') {
+      final result = await db.execute(
+        Sql.named('''
+          SELECT DISTINCT d.installation_id, d.push_token
+          FROM push_devices d
+          JOIN football_favorite_entities f ON f.installation_id = d.installation_id
+          WHERE d.enabled = TRUE AND f.entity_type = 'league' AND f.entity_id = @league_id
+        '''),
+        parameters: {'league_id': targetValue},
+      );
+      return result
+          .map((row) => {'installationId': row[0].toString(), 'pushToken': row[1].toString()})
+          .toList();
+    }
+    final result = await db.execute('''
+      SELECT installation_id, push_token FROM push_devices WHERE enabled = TRUE
+    ''');
+    return result
+        .map((row) => {'installationId': row[0].toString(), 'pushToken': row[1].toString()})
+        .toList();
+  }
+
+  Future<int> createPushBroadcast({
+    required String title,
+    required String body,
+    required String targetType,
+    String? targetValue,
+    int? sentByEmployeeId,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        INSERT INTO push_broadcasts (title, body, target_type, target_value, sent_by_employee_id)
+        VALUES (@title, @body, @target_type, @target_value, @sent_by_employee_id)
+        RETURNING id
+      '''),
+      parameters: {
+        'title': title,
+        'body': body,
+        'target_type': targetType,
+        'target_value': targetValue,
+        'sent_by_employee_id': sentByEmployeeId,
+      },
+    );
+    return result.first[0] as int;
+  }
+
+  Future<void> updatePushBroadcastCounts({
+    required int id,
+    required int sentCount,
+    required int failedCount,
+  }) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        UPDATE push_broadcasts SET sent_count = @sent_count, failed_count = @failed_count
+        WHERE id = @id
+      '''),
+      parameters: {'id': id, 'sent_count': sentCount, 'failed_count': failedCount},
+    );
+  }
+
+  Future<List<Map<String, Object?>>> listPushBroadcasts({int limit = 50}) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT * FROM push_broadcasts ORDER BY created_at DESC LIMIT @limit
+      '''),
+      parameters: {'limit': limit.clamp(1, 200)},
+    );
+    return result.map((row) => _dateSafeRow(row.toColumnMap())).toList();
+  }
+
+  // -- Control Center /premium-features (Phase 5) --------------------------
+
+  Future<List<Map<String, Object?>>> listPremiumFeatures() async {
+    final db = await connection();
+    final result = await db.execute('''
+      SELECT feature_key, feature_label, tier, updated_at::text AS updated_at, updated_by
+      FROM premium_feature_matrix
+      ORDER BY feature_label
+    ''');
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  Future<Map<String, Object?>?> updatePremiumFeatureTier({
+    required String featureKey,
+    required String tier,
+    required String updatedBy,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        UPDATE premium_feature_matrix SET
+          tier = @tier, updated_at = NOW(), updated_by = @updated_by
+        WHERE feature_key = @feature_key
+        RETURNING feature_key, feature_label, tier, updated_at::text AS updated_at, updated_by
+      '''),
+      parameters: {'feature_key': featureKey, 'tier': tier, 'updated_by': updatedBy},
+    );
+    if (result.isEmpty) return null;
+    return Map<String, Object?>.from(result.first.toColumnMap());
+  }
+
+  /// Sentinel für optionale Parameter, bei denen `null` ein gültiger,
+  /// explizit zu setzender Wert ist (z.B. ein Bild oder Enddatum löschen) -
+  /// unterscheidet "nicht übergeben" von "bewusst auf NULL setzen".
+  static const Object unsetSentinel = Object();
+
+  /// Normalisiert alle DateTime-Werte einer `SELECT *`/`RETURNING *`-Zeile zu
+  /// ISO8601-Strings, konsistent mit den expliziten `::text`-Casts, die der
+  /// Rest dieser Datei für einzeln aufgezählte SELECTs verwendet.
+  Map<String, Object?> _dateSafeRow(Map<String, dynamic> row) {
+    final map = Map<String, Object?>.from(row);
+    for (final key in map.keys.toList()) {
+      final value = map[key];
+      if (value is DateTime) {
+        map[key] = value.toUtc().toIso8601String();
+      }
     }
     return map;
   }

@@ -31,6 +31,15 @@ const Set<String> kAllPermissions = {
   'devices.view',
   'support.view',
   'support.manage',
+  'news.view',
+  'news.manage',
+  'faq.view',
+  'faq.manage',
+  'advertising.view',
+  'advertising.manage',
+  'push.manage',
+  'premium.view',
+  'premium.manage',
 };
 
 /// Standard-Berechtigungen je Rolle. `OWNER` taucht hier absichtlich nicht
@@ -51,6 +60,15 @@ const Map<String, Set<String>> kRoleDefaultPermissions = {
     'devices.view',
     'support.view',
     'support.manage',
+    'news.view',
+    'news.manage',
+    'faq.view',
+    'faq.manage',
+    'advertising.view',
+    'advertising.manage',
+    'push.manage',
+    'premium.view',
+    'premium.manage',
   },
   'TECHNICAL': {
     'overview.view',
@@ -68,8 +86,21 @@ const Map<String, Set<String>> kRoleDefaultPermissions = {
     'support.view',
     'support.manage',
   },
-  'CONTENT': {'overview.view', 'search.view'},
-  'MARKETING': {'overview.view', 'search.view'},
+  'CONTENT': {
+    'overview.view',
+    'search.view',
+    'news.view',
+    'news.manage',
+    'faq.view',
+    'faq.manage',
+  },
+  'MARKETING': {
+    'overview.view',
+    'search.view',
+    'advertising.view',
+    'advertising.manage',
+    'push.manage',
+  },
 };
 
 /// Prüft, ob [role] mit [permission] laut Rollen-Standardmatrix und

@@ -76,6 +76,7 @@ class ApiRoutes {
         config: config,
         modelLabConfig: modelLabConfig,
         database: database,
+        push: news.push,
       ).router.call,
     );
 
@@ -502,6 +503,49 @@ class ApiRoutes {
         enabled: enabled,
       );
       return jsonResponse({'newsEnabled': enabled});
+    });
+
+    // Section 30/31: manuell verfasste PHÖNIX-News/FAQ (Control-Center-CMS).
+    // Bewusst getrennt von /api/news (importierter + automatisch generierter
+    // Feed, siehe FootballNewsService/PhoenixEditorialComposer).
+    router.get('/api/news/phoenix', (Request request) async {
+      final articles = await database.publicEditorialArticles();
+      return jsonResponse({'count': articles.length, 'articles': articles});
+    });
+
+    router.get('/api/faq', (Request request) async {
+      final articles = await database.publicFaqArticles();
+      return jsonResponse({'count': articles.length, 'articles': articles});
+    });
+
+    // Section 32: Werbeflächen sind serverseitig fest vordefinierte Slots -
+    // die App fragt gezielt einen Slot ab, keine freie Slot-Erstellung.
+    router.get('/api/ads/<slot>', (Request request, String slot) async {
+      final campaigns = await database.activeAdCampaignsForSlot(slot);
+      return jsonResponse({'slot': slot, 'campaigns': campaigns});
+    });
+
+    router.post('/api/ads/<id|[0-9]+>/impression', (
+      Request request,
+      String id,
+    ) async {
+      await database.recordAdImpression(int.parse(id));
+      return jsonResponse({'status': 'recorded'});
+    });
+
+    router.post('/api/ads/<id|[0-9]+>/click', (
+      Request request,
+      String id,
+    ) async {
+      await database.recordAdClick(int.parse(id));
+      return jsonResponse({'status': 'recorded'});
+    });
+
+    // Section 46: nur Lesezugriff für die App - Änderungen ausschließlich
+    // über die Control-Center-Session-Auth (siehe control_center_routes.dart).
+    router.get('/api/premium/features', (Request request) async {
+      final features = await database.listPremiumFeatures();
+      return jsonResponse({'features': features});
     });
 
     // Section 22: Support-Tickets. PHÖNIX hat kein Nutzerkonto-System, daher

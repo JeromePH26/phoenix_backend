@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -16,6 +17,7 @@ import '../control_center/session_policy.dart';
 import '../database/database.dart';
 import '../http/json_response.dart';
 import '../model_lab/learning_dataset_builder.dart';
+import '../services/firebase_push_service.dart';
 
 /// PHÖNIX CONTROL CENTER Admin-API. Wird über
 /// `router.mount('/api/admin/control-center/', ControlCenterRoutes(...).router)`
@@ -29,11 +31,13 @@ class ControlCenterRoutes {
     required this.config,
     required this.modelLabConfig,
     required this.database,
+    required this.push,
   }) : guard = ControlCenterAuthGuard(database: database);
 
   final AppConfig config;
   final ModelLabConfig modelLabConfig;
   final PhoenixDatabase database;
+  final FirebasePushService push;
   final ControlCenterAuthGuard guard;
 
   Router get router {
@@ -60,6 +64,21 @@ class ControlCenterRoutes {
     router.get('/support/tickets/<id|[0-9]+>', _supportTicketDetail);
     router.patch('/support/tickets/<id|[0-9]+>', _updateSupportTicket);
     router.post('/support/tickets/<id|[0-9]+>/reply', _replySupportTicket);
+    router.get('/news/articles', _listEditorialArticles);
+    router.post('/news/articles', _createEditorialArticle);
+    router.get('/news/articles/<id|[0-9]+>', _editorialArticleDetail);
+    router.patch('/news/articles/<id|[0-9]+>', _updateEditorialArticle);
+    router.get('/faq/articles', _listFaqArticles);
+    router.post('/faq/articles', _createFaqArticle);
+    router.patch('/faq/articles/<id|[0-9]+>', _updateFaqArticle);
+    router.get('/advertising/campaigns', _listAdCampaigns);
+    router.post('/advertising/campaigns', _createAdCampaign);
+    router.get('/advertising/campaigns/<id|[0-9]+>', _adCampaignDetail);
+    router.patch('/advertising/campaigns/<id|[0-9]+>', _updateAdCampaign);
+    router.get('/push/broadcasts', _listPushBroadcasts);
+    router.post('/push/broadcasts', _sendPushBroadcast);
+    router.get('/premium/features', _listPremiumFeaturesAdmin);
+    router.patch('/premium/features/<featureKey>', _updatePremiumFeature);
 
     return router;
   }
@@ -820,6 +839,609 @@ class ControlCenterRoutes {
       );
 
       return jsonResponse({'message': _jsonSafe(saved)}, statusCode: 201);
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  // -- News CMS (Phase 5, manuell verfasst) --------------------------------
+
+  Future<Response> _listEditorialArticles(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    if (!auth.employee!.hasPermission('news.view')) return _forbidden();
+
+    final query = request.url.queryParameters;
+    try {
+      final articles = await database.listEditorialArticles(
+        status: query['status'],
+        category: query['category'],
+      );
+      return jsonResponse({'articles': articles.map(_jsonSafe).toList()});
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  Future<Response> _createEditorialArticle(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    final actor = auth.employee!;
+    if (!actor.hasPermission('news.manage')) return _forbidden();
+
+    try {
+      final body = jsonDecode(await request.readAsString());
+      if (body is! Map<String, dynamic>) {
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+      }
+      final title = body['title']?.toString().trim() ?? '';
+      if (title.isEmpty) {
+        return jsonResponse({'error': 'title ist erforderlich.'}, statusCode: 400);
+      }
+      final scheduledAt = body['scheduledAt'] == null
+          ? null
+          : DateTime.tryParse(body['scheduledAt'].toString());
+
+      final created = await database.createEditorialArticle(
+        title: title,
+        summary: body['summary']?.toString() ?? '',
+        body: body['body']?.toString() ?? '',
+        category: body['category']?.toString().trim().isNotEmpty == true
+            ? body['category'].toString().trim()
+            : 'allgemein',
+        imageUrl: body['imageUrl']?.toString(),
+        authorEmployeeId: actor.id,
+        homepageFeature: body['homepageFeature'] == true,
+        breaking: body['breaking'] == true,
+        sendPush: body['sendPush'] == true,
+        scheduledAt: scheduledAt,
+      );
+
+      await database.insertAdminAuditLog(
+        employeeId: actor.id,
+        employeeLogin: actor.login,
+        area: 'news',
+        objectType: 'article',
+        objectId: created['id'].toString(),
+        action: 'article.create',
+        newValue: created,
+        ip: _clientIp(request),
+      );
+
+      return jsonResponse({'article': _jsonSafe(created)}, statusCode: 201);
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 400);
+    }
+  }
+
+  Future<Response> _editorialArticleDetail(Request request, String id) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    if (!auth.employee!.hasPermission('news.view')) return _forbidden();
+
+    try {
+      final article = await database.editorialArticle(int.parse(id));
+      if (article == null) {
+        return jsonResponse({'error': 'Artikel nicht gefunden.'}, statusCode: 404);
+      }
+      return jsonResponse({'article': _jsonSafe(article)});
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  Future<Response> _updateEditorialArticle(Request request, String id) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    final actor = auth.employee!;
+    if (!actor.hasPermission('news.manage')) return _forbidden();
+
+    const validStatuses = {'DRAFT', 'SCHEDULED', 'PUBLISHED', 'HIDDEN', 'ARCHIVED'};
+    final articleId = int.parse(id);
+
+    try {
+      final before = await database.editorialArticle(articleId);
+      if (before == null) {
+        return jsonResponse({'error': 'Artikel nicht gefunden.'}, statusCode: 404);
+      }
+
+      final body = jsonDecode(await request.readAsString());
+      if (body is! Map<String, dynamic>) {
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+      }
+      final status = body['status']?.toString();
+      if (status != null && !validStatuses.contains(status)) {
+        return jsonResponse({'error': 'Ungültiger status.'}, statusCode: 400);
+      }
+
+      final hasImageKey = body.containsKey('imageUrl');
+      final hasScheduledKey = body.containsKey('scheduledAt');
+      final sendPush = body['sendPush'] as bool?;
+
+      final willPublishNow = status == 'PUBLISHED' && before['published_at'] == null;
+      final shouldSendPush = willPublishNow &&
+          (sendPush ?? before['send_push'] == true) &&
+          before['push_sent_at'] == null;
+
+      final updated = await database.updateEditorialArticle(
+        id: articleId,
+        title: body['title']?.toString(),
+        summary: body['summary']?.toString(),
+        body: body['body']?.toString(),
+        category: body['category']?.toString(),
+        imageUrl: hasImageKey ? body['imageUrl']?.toString() : PhoenixDatabase.unsetSentinel,
+        status: status,
+        homepageFeature: body['homepageFeature'] as bool?,
+        breaking: body['breaking'] as bool?,
+        sendPush: sendPush,
+        scheduledAt: hasScheduledKey
+            ? (body['scheduledAt'] == null ? null : DateTime.tryParse(body['scheduledAt'].toString()))
+            : PhoenixDatabase.unsetSentinel,
+        publishedAt: willPublishNow ? DateTime.now().toUtc() : null,
+        pushSent: shouldSendPush,
+      );
+      if (updated == null) {
+        return jsonResponse({'error': 'Artikel nicht gefunden.'}, statusCode: 404);
+      }
+
+      if (shouldSendPush) {
+        unawaited(_broadcastNewsArticlePush(updated));
+      }
+
+      final diff = diffEmployeeFields(before: before, after: updated);
+      if (diff.previousValue.isNotEmpty) {
+        await database.insertAdminAuditLog(
+          employeeId: actor.id,
+          employeeLogin: actor.login,
+          area: 'news',
+          objectType: 'article',
+          objectId: id,
+          action: 'article.update',
+          previousValue: diff.previousValue,
+          newValue: diff.newValue,
+          ip: _clientIp(request),
+        );
+      }
+
+      return jsonResponse({'article': _jsonSafe(updated)});
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  Future<void> _broadcastNewsArticlePush(Map<String, Object?> article) async {
+    final targets = await database.newsEnabledPushTargets();
+    for (final target in targets) {
+      try {
+        await push.send(
+          token: target['pushToken']!,
+          title: 'PHÖNIX News',
+          body: article['title'].toString(),
+          androidChannelId: 'phoenix_news_v1',
+          data: {'type': 'phoenix_editorial', 'articleId': article['id'].toString()},
+        );
+      } catch (error) {
+        stderr.writeln('[PHOENIX EDITORIAL PUSH] ${target['installationId']}: $error');
+      }
+    }
+  }
+
+  // -- FAQ / Knowledge Base (Phase 5) --------------------------------------
+
+  Future<Response> _listFaqArticles(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    if (!auth.employee!.hasPermission('faq.view')) return _forbidden();
+
+    final query = request.url.queryParameters;
+    try {
+      final articles = await database.listFaqArticles(
+        status: query['status'],
+        category: query['category'],
+      );
+      return jsonResponse({'articles': articles.map(_jsonSafe).toList()});
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  Future<Response> _createFaqArticle(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    final actor = auth.employee!;
+    if (!actor.hasPermission('faq.manage')) return _forbidden();
+
+    try {
+      final body = jsonDecode(await request.readAsString());
+      if (body is! Map<String, dynamic>) {
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+      }
+      final title = body['title']?.toString().trim() ?? '';
+      if (title.isEmpty) {
+        return jsonResponse({'error': 'title ist erforderlich.'}, statusCode: 400);
+      }
+      final created = await database.createFaqArticle(
+        title: title,
+        body: body['body']?.toString() ?? '',
+        category: body['category']?.toString().trim().isNotEmpty == true
+            ? body['category'].toString().trim()
+            : 'allgemein',
+        position: int.tryParse(body['position']?.toString() ?? '') ?? 0,
+        authorEmployeeId: actor.id,
+      );
+      await database.insertAdminAuditLog(
+        employeeId: actor.id,
+        employeeLogin: actor.login,
+        area: 'faq',
+        objectType: 'article',
+        objectId: created['id'].toString(),
+        action: 'article.create',
+        newValue: created,
+        ip: _clientIp(request),
+      );
+      return jsonResponse({'article': _jsonSafe(created)}, statusCode: 201);
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 400);
+    }
+  }
+
+  Future<Response> _updateFaqArticle(Request request, String id) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    final actor = auth.employee!;
+    if (!actor.hasPermission('faq.manage')) return _forbidden();
+
+    const validStatuses = {'DRAFT', 'PUBLISHED', 'ARCHIVED'};
+    final articleId = int.parse(id);
+
+    try {
+      final before = await database.faqArticle(articleId);
+      if (before == null) {
+        return jsonResponse({'error': 'Artikel nicht gefunden.'}, statusCode: 404);
+      }
+      final body = jsonDecode(await request.readAsString());
+      if (body is! Map<String, dynamic>) {
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+      }
+      final status = body['status']?.toString();
+      if (status != null && !validStatuses.contains(status)) {
+        return jsonResponse({'error': 'Ungültiger status.'}, statusCode: 400);
+      }
+
+      final updated = await database.updateFaqArticle(
+        id: articleId,
+        title: body['title']?.toString(),
+        body: body['body']?.toString(),
+        category: body['category']?.toString(),
+        position: int.tryParse(body['position']?.toString() ?? ''),
+        status: status,
+      );
+      if (updated == null) {
+        return jsonResponse({'error': 'Artikel nicht gefunden.'}, statusCode: 404);
+      }
+
+      final diff = diffEmployeeFields(before: before, after: updated);
+      if (diff.previousValue.isNotEmpty) {
+        await database.insertAdminAuditLog(
+          employeeId: actor.id,
+          employeeLogin: actor.login,
+          area: 'faq',
+          objectType: 'article',
+          objectId: id,
+          action: 'article.update',
+          previousValue: diff.previousValue,
+          newValue: diff.newValue,
+          ip: _clientIp(request),
+        );
+      }
+      return jsonResponse({'article': _jsonSafe(updated)});
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  // -- Advertising (Phase 5) ------------------------------------------------
+
+  Future<Response> _listAdCampaigns(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    if (!auth.employee!.hasPermission('advertising.view')) return _forbidden();
+
+    final query = request.url.queryParameters;
+    try {
+      final campaigns = await database.listAdCampaigns(
+        slot: query['slot'],
+        active: query['active'] == null ? null : query['active'] == 'true',
+      );
+      return jsonResponse({'campaigns': campaigns.map(_jsonSafe).toList()});
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  Future<Response> _createAdCampaign(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    final actor = auth.employee!;
+    if (!actor.hasPermission('advertising.manage')) return _forbidden();
+
+    const validSlots = {'home_banner', 'match_detail_infeed', 'news_infeed'};
+    const validAudiences = {'ALL', 'FREE', 'PREMIUM'};
+
+    try {
+      final body = jsonDecode(await request.readAsString());
+      if (body is! Map<String, dynamic>) {
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+      }
+      final name = body['name']?.toString().trim() ?? '';
+      final slot = body['slot']?.toString().trim() ?? '';
+      final imageUrl = body['imageUrl']?.toString().trim() ?? '';
+      final linkUrl = body['linkUrl']?.toString().trim() ?? '';
+      if (name.isEmpty || imageUrl.isEmpty || linkUrl.isEmpty) {
+        return jsonResponse({
+          'error': 'name, imageUrl und linkUrl sind erforderlich.',
+        }, statusCode: 400);
+      }
+      if (!validSlots.contains(slot)) {
+        return jsonResponse({'error': 'Ungültiger slot.'}, statusCode: 400);
+      }
+      final targetAudience = body['targetAudience']?.toString() ?? 'ALL';
+      if (!validAudiences.contains(targetAudience)) {
+        return jsonResponse({'error': 'Ungültige targetAudience.'}, statusCode: 400);
+      }
+
+      final created = await database.createAdCampaign(
+        name: name,
+        slot: slot,
+        imageUrl: imageUrl,
+        linkUrl: linkUrl,
+        active: body['active'] == null ? true : body['active'] == true,
+        startDate: body['startDate'] == null ? null : DateTime.tryParse(body['startDate'].toString()),
+        endDate: body['endDate'] == null ? null : DateTime.tryParse(body['endDate'].toString()),
+        targetCountry: body['targetCountry']?.toString(),
+        targetAudience: targetAudience,
+        createdByEmployeeId: actor.id,
+      );
+      await database.insertAdminAuditLog(
+        employeeId: actor.id,
+        employeeLogin: actor.login,
+        area: 'advertising',
+        objectType: 'campaign',
+        objectId: created['id'].toString(),
+        action: 'campaign.create',
+        newValue: created,
+        ip: _clientIp(request),
+      );
+      return jsonResponse({'campaign': _jsonSafe(created)}, statusCode: 201);
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 400);
+    }
+  }
+
+  Future<Response> _adCampaignDetail(Request request, String id) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    if (!auth.employee!.hasPermission('advertising.view')) return _forbidden();
+
+    try {
+      final campaign = await database.adCampaign(int.parse(id));
+      if (campaign == null) {
+        return jsonResponse({'error': 'Kampagne nicht gefunden.'}, statusCode: 404);
+      }
+      return jsonResponse({'campaign': _jsonSafe(campaign)});
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  Future<Response> _updateAdCampaign(Request request, String id) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    final actor = auth.employee!;
+    if (!actor.hasPermission('advertising.manage')) return _forbidden();
+
+    final campaignId = int.parse(id);
+    try {
+      final before = await database.adCampaign(campaignId);
+      if (before == null) {
+        return jsonResponse({'error': 'Kampagne nicht gefunden.'}, statusCode: 404);
+      }
+      final body = jsonDecode(await request.readAsString());
+      if (body is! Map<String, dynamic>) {
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+      }
+      final hasStartKey = body.containsKey('startDate');
+      final hasEndKey = body.containsKey('endDate');
+      final hasCountryKey = body.containsKey('targetCountry');
+
+      final updated = await database.updateAdCampaign(
+        id: campaignId,
+        name: body['name']?.toString(),
+        imageUrl: body['imageUrl']?.toString(),
+        linkUrl: body['linkUrl']?.toString(),
+        active: body['active'] as bool?,
+        startDate: hasStartKey
+            ? (body['startDate'] == null ? null : DateTime.tryParse(body['startDate'].toString()))
+            : PhoenixDatabase.unsetSentinel,
+        endDate: hasEndKey
+            ? (body['endDate'] == null ? null : DateTime.tryParse(body['endDate'].toString()))
+            : PhoenixDatabase.unsetSentinel,
+        targetCountry: hasCountryKey ? body['targetCountry']?.toString() : PhoenixDatabase.unsetSentinel,
+        targetAudience: body['targetAudience']?.toString(),
+      );
+      if (updated == null) {
+        return jsonResponse({'error': 'Kampagne nicht gefunden.'}, statusCode: 404);
+      }
+
+      final diff = diffEmployeeFields(before: before, after: updated);
+      if (diff.previousValue.isNotEmpty) {
+        await database.insertAdminAuditLog(
+          employeeId: actor.id,
+          employeeLogin: actor.login,
+          area: 'advertising',
+          objectType: 'campaign',
+          objectId: id,
+          action: 'campaign.update',
+          previousValue: diff.previousValue,
+          newValue: diff.newValue,
+          ip: _clientIp(request),
+        );
+      }
+      return jsonResponse({'campaign': _jsonSafe(updated)});
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  // -- Push Center (Phase 5, Broadcast) -------------------------------------
+
+  Future<Response> _listPushBroadcasts(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    if (!auth.employee!.hasPermission('push.manage')) return _forbidden();
+
+    try {
+      final broadcasts = await database.listPushBroadcasts();
+      return jsonResponse({'broadcasts': broadcasts.map(_jsonSafe).toList()});
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  // Section 49: ein versendeter Push ist nicht rückgängig zu machen - deshalb
+  // synchron gesendet (kein Entwurf/Vorschau-Zwischenschritt für "jetzt
+  // senden"), damit die Response die tatsächlichen sent/failed-Zahlen trägt.
+  Future<Response> _sendPushBroadcast(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    final actor = auth.employee!;
+    if (!actor.hasPermission('push.manage')) return _forbidden();
+
+    if (!push.isConfigured) {
+      return jsonResponse({
+        'error': 'Push ist serverseitig nicht konfiguriert (FIREBASE_PROJECT_ID/FIREBASE_SERVICE_ACCOUNT_JSON fehlen).',
+      }, statusCode: 503);
+    }
+
+    try {
+      final body = jsonDecode(await request.readAsString());
+      if (body is! Map<String, dynamic>) {
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+      }
+      final title = body['title']?.toString().trim() ?? '';
+      final message = body['body']?.toString().trim() ?? '';
+      final targetType = body['targetType']?.toString() ?? 'all';
+      final targetValue = body['targetValue']?.toString();
+      if (title.isEmpty || message.isEmpty) {
+        return jsonResponse({'error': 'title und body sind erforderlich.'}, statusCode: 400);
+      }
+      if (!const {'all', 'league'}.contains(targetType)) {
+        return jsonResponse({'error': 'targetType muss all oder league sein.'}, statusCode: 400);
+      }
+      if (targetType == 'league' && (targetValue == null || targetValue.isEmpty)) {
+        return jsonResponse({'error': 'targetValue (Liga-ID) ist erforderlich.'}, statusCode: 400);
+      }
+
+      final broadcastId = await database.createPushBroadcast(
+        title: title,
+        body: message,
+        targetType: targetType,
+        targetValue: targetValue,
+        sentByEmployeeId: actor.id,
+      );
+
+      final targets = await database.broadcastPushTargets(
+        targetType: targetType,
+        targetValue: targetValue,
+      );
+      var sent = 0;
+      var failed = 0;
+      for (final target in targets) {
+        try {
+          await push.send(
+            token: target['pushToken']!,
+            title: title,
+            body: message,
+            androidChannelId: 'phoenix_news_v1',
+            data: {'type': 'phoenix_broadcast', 'broadcastId': broadcastId.toString()},
+          );
+          sent++;
+        } catch (error) {
+          failed++;
+          stderr.writeln('[PHOENIX PUSH BROADCAST] ${target['installationId']}: $error');
+        }
+      }
+      await database.updatePushBroadcastCounts(id: broadcastId, sentCount: sent, failedCount: failed);
+
+      await database.insertAdminAuditLog(
+        employeeId: actor.id,
+        employeeLogin: actor.login,
+        area: 'push',
+        objectType: 'broadcast',
+        objectId: broadcastId.toString(),
+        action: 'broadcast.send',
+        newValue: {'title': title, 'targetType': targetType, 'targetValue': targetValue, 'sent': sent, 'failed': failed},
+        ip: _clientIp(request),
+      );
+
+      return jsonResponse({
+        'id': broadcastId,
+        'targetCount': targets.length,
+        'sent': sent,
+        'failed': failed,
+      }, statusCode: 201);
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  // -- Premium Feature Matrix (Phase 5) --------------------------------------
+
+  Future<Response> _listPremiumFeaturesAdmin(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    if (!auth.employee!.hasPermission('premium.view')) return _forbidden();
+
+    try {
+      final features = await database.listPremiumFeatures();
+      return jsonResponse({'features': features.map(_jsonSafe).toList()});
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  Future<Response> _updatePremiumFeature(Request request, String featureKey) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    final actor = auth.employee!;
+    if (!actor.hasPermission('premium.manage')) return _forbidden();
+
+    const validTiers = {'FREE', 'PREMIUM', 'DISABLED'};
+    try {
+      final body = jsonDecode(await request.readAsString());
+      final tier = body is Map ? body['tier']?.toString() ?? '' : '';
+      if (!validTiers.contains(tier)) {
+        return jsonResponse({'error': 'tier muss FREE, PREMIUM oder DISABLED sein.'}, statusCode: 400);
+      }
+      final updated = await database.updatePremiumFeatureTier(
+        featureKey: featureKey,
+        tier: tier,
+        updatedBy: actor.login,
+      );
+      if (updated == null) {
+        return jsonResponse({'error': 'Feature nicht gefunden.'}, statusCode: 404);
+      }
+      await database.insertAdminAuditLog(
+        employeeId: actor.id,
+        employeeLogin: actor.login,
+        area: 'premium',
+        objectType: 'feature',
+        objectId: featureKey,
+        action: 'feature.tier_change',
+        newValue: updated,
+        ip: _clientIp(request),
+      );
+      return jsonResponse({'feature': _jsonSafe(updated)});
     } catch (error) {
       return jsonResponse({'error': error.toString()}, statusCode: 500);
     }
