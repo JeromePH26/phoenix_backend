@@ -942,6 +942,25 @@ class ApiRoutes {
       }
     });
 
+    // Neueste Backfill-Läufe für das Control-Center-Settlement-Panel.
+    router.get('/api/admin/football/matches/settle/recent', (
+      Request request,
+    ) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+      final limit =
+          int.tryParse(request.url.queryParameters['limit'] ?? '') ?? 20;
+      try {
+        final jobs = await database.recentFootballMatchSettlementJobs(
+          limit: limit,
+        );
+        return jsonResponse({'jobs': jobs});
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
     router.get('/api/admin/football/matches/settle/<jobId|[0-9]+>', (
       Request request,
       String jobId,

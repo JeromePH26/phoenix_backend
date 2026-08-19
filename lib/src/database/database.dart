@@ -2986,6 +2986,31 @@ class PhoenixDatabase {
     );
   }
 
+  /// Neueste Settlement-Backfill-Läufe, neueste zuerst. Read-only, für das
+  /// Control-Center-Settlement-Panel (kein "list jobs"-Endpoint existierte
+  /// bisher, nur die Einzelabfrage per ID).
+  Future<List<Map<String, Object?>>> recentFootballMatchSettlementJobs({
+    int limit = 20,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT
+          id, status, min_hours_since_kickoff, batch_size,
+          checked, settled, pending, failed, error, last_error,
+          created_at::text AS created_at,
+          completed_at::text AS completed_at
+        FROM football_match_settlement_jobs
+        ORDER BY id DESC
+        LIMIT @limit
+      '''),
+      parameters: {'limit': limit.clamp(1, 100)},
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
   Future<Map<String, Object?>?> footballMatchSettlementJob(int id) async {
     final db = await connection();
     final result = await db.execute(
