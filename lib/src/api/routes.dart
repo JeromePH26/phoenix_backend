@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:bcrypt/bcrypt.dart';
 import 'package:shelf/shelf.dart';
 import 'package:shelf_router/shelf_router.dart';
 import 'package:postgres/postgres.dart';
@@ -1496,6 +1497,40 @@ class ApiRoutes {
         return jsonResponse({'status': 'migration_complete'});
       } catch (error) {
         return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
+    // Break-glass-Passwort-Reset für Control-Center-Mitarbeiter (Section
+    // 13-Vorbereitung: es gibt bislang keinen Self-Service-Reset über die
+    // Session-Auth selbst - das wäre bei einem ausgesperrten letzten OWNER
+    // ein Henne-Ei-Problem). Nur mit PHOENIX_ADMIN_TOKEN erreichbar, nicht
+    // Teil der Control-Center-Session-Auth-Gruppe.
+    router.post('/api/admin/control-center/employees/<login>/reset-password', (
+      Request request,
+      String login,
+    ) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+      try {
+        final body = jsonDecode(await request.readAsString());
+        final newPassword = body is Map ? body['newPassword']?.toString() ?? '' : '';
+        if (newPassword.length < 8) {
+          return jsonResponse({
+            'error': 'newPassword muss mindestens 8 Zeichen lang sein.',
+          }, statusCode: 400);
+        }
+        final hash = BCrypt.hashpw(newPassword, BCrypt.gensalt());
+        final updated = await database.resetAdminEmployeePasswordByLogin(
+          login: login,
+          passwordHash: hash,
+        );
+        if (!updated) {
+          return jsonResponse({'error': 'Mitarbeiter nicht gefunden.'}, statusCode: 404);
+        }
+        return jsonResponse({'status': 'password_reset', 'login': login});
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 400);
       }
     });
 

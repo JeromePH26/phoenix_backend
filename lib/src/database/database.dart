@@ -5001,6 +5001,40 @@ class PhoenixDatabase {
   /// noch aktiven Sessions dieses Mitarbeiters (Section "disable revokes
   /// sessions"). Der Aufrufer muss den Last-Owner-Schutz vorher separat über
   /// [countActiveOwners] prüfen.
+  /// Break-glass-Passwort-Reset: setzt den Passwort-Hash für [login] und
+  /// beendet alle aktiven Sessions dieses Mitarbeiters. Nur über den
+  /// statischen `PHOENIX_ADMIN_TOKEN` erreichbar (routes.dart) - gedacht für
+  /// den Fall, dass sich niemand mehr einloggen kann (kein Passwort-Reset-
+  /// Flow über die Session-Auth selbst, das wäre ein Henne-Ei-Problem).
+  Future<bool> resetAdminEmployeePasswordByLogin({
+    required String login,
+    required String passwordHash,
+  }) async {
+    final db = await connection();
+    return db.runTx((session) async {
+      final result = await session.execute(
+        Sql.named('''
+          UPDATE admin_employees
+          SET password_hash = @password_hash
+          WHERE login = @login
+          RETURNING id
+        '''),
+        parameters: {'login': login, 'password_hash': passwordHash},
+      );
+      if (result.isEmpty) return false;
+      final employeeId = result.first[0] as int;
+      await session.execute(
+        Sql.named('''
+          UPDATE admin_sessions
+          SET revoked_at = NOW()
+          WHERE employee_id = @id AND revoked_at IS NULL
+        '''),
+        parameters: {'id': employeeId},
+      );
+      return true;
+    });
+  }
+
   Future<Map<String, Object?>?> disableAdminEmployeeAndRevokeSessions(
     int id,
   ) async {
