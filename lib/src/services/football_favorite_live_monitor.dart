@@ -29,6 +29,10 @@ class FootballFavoriteLiveMonitor {
 
   Future<void> runOnce() async {
     if (_running || !database.isConfigured || !push.isConfigured) return;
+    // Section 40: "PHÖNIX Live" abschalten muss das Backend-Polling wirklich
+    // stoppen, nicht nur die UI verstecken - Control Center → App Control →
+    // Module → PHÖNIX Live steuert genau diesen Schalter.
+    if (!await database.moduleEnabled('phoenix_live')) return;
     _running = true;
     try {
       for (final fixtureId in await database.trackedFavoriteFixtureIds()) {

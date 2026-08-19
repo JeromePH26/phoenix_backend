@@ -57,6 +57,8 @@ class ControlCenterRoutes {
     router.get('/jobs', _jobs);
     router.get('/app-control/status', _appControlStatus);
     router.post('/app-control/status', _updateAppControlStatus);
+    router.get('/app-control/modules', _listModules);
+    router.patch('/app-control/modules/<moduleKey>', _updateModule);
     router.get('/devices', _listDevices);
     router.get('/devices/<installationId>', _deviceDetail);
     router.get('/support/assignable-employees', _assignableEmployees);
@@ -94,6 +96,7 @@ class ControlCenterRoutes {
     router.get('/system-health', _systemHealth);
     router.get('/permissions/catalog', _permissionsCatalog);
     router.get('/system-audit', _systemAudit);
+    router.get('/system-audit/history', _systemAuditHistory);
 
     return router;
   }
@@ -650,6 +653,57 @@ class ControlCenterRoutes {
       );
 
       return jsonResponse({'status': _jsonSafe(updated)});
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  // -- Module Control (Section 40) ------------------------------------------
+
+  Future<Response> _listModules(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    if (!auth.employee!.hasPermission('appControl.view')) return _forbidden();
+
+    try {
+      final modules = await database.listModuleControls();
+      return jsonResponse({'modules': modules.map(_jsonSafe).toList()});
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  Future<Response> _updateModule(Request request, String moduleKey) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    final actor = auth.employee!;
+    if (!actor.hasPermission('appControl.manage')) return _forbidden();
+
+    try {
+      final body = jsonDecode(await request.readAsString());
+      final enabled = body is Map ? body['enabled'] as bool? : null;
+      if (enabled == null) {
+        return jsonResponse({'error': 'enabled (bool) ist erforderlich.'}, statusCode: 400);
+      }
+      final updated = await database.updateModuleControl(
+        moduleKey: moduleKey,
+        enabled: enabled,
+        updatedBy: actor.login,
+      );
+      if (updated == null) {
+        return jsonResponse({'error': 'Modul nicht gefunden.'}, statusCode: 404);
+      }
+      await database.insertAdminAuditLog(
+        employeeId: actor.id,
+        employeeLogin: actor.login,
+        area: 'app_control',
+        objectType: 'module',
+        objectId: moduleKey,
+        action: 'module.toggle',
+        newValue: updated,
+        ip: _clientIp(request),
+      );
+      return jsonResponse({'module': _jsonSafe(updated)});
     } catch (error) {
       return jsonResponse({'error': error.toString()}, statusCode: 500);
     }
@@ -1944,6 +1998,13 @@ class ControlCenterRoutes {
         }
       }
 
+      final reportText = buffer.toString();
+      await database.saveSystemAuditRun(
+        criticalCount: critical.length,
+        warningCount: warnings.length,
+        reportText: reportText,
+      );
+
       return jsonResponse({
         'generatedAt': DateTime.now().toUtc().toIso8601String(),
         'criticalCount': critical.length,
@@ -1951,8 +2012,21 @@ class ControlCenterRoutes {
         'critical': critical,
         'warnings': warnings,
         'sections': sections,
-        'reportText': buffer.toString(),
+        'reportText': reportText,
       });
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  Future<Response> _systemAuditHistory(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    if (!auth.employee!.hasPermission('systemHealth.view')) return _forbidden();
+
+    try {
+      final runs = await database.listSystemAuditRuns();
+      return jsonResponse({'runs': runs.map(_jsonSafe).toList()});
     } catch (error) {
       return jsonResponse({'error': error.toString()}, statusCode: 500);
     }

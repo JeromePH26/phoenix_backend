@@ -819,6 +819,8 @@ class PhoenixDatabase {
     await _migrateSupport(db);
     await _migrateContent(db);
     await _migrateOps(db);
+    await _migrateModuleControl(db);
+    await _migrateSystemAuditHistory(db);
     await _migrateFootballMatchControls(db);
 
     await db.execute('''
@@ -1223,6 +1225,135 @@ class PhoenixDatabase {
       CREATE INDEX IF NOT EXISTS idx_admin_failed_logins_login
       ON admin_failed_logins (login, attempted_at DESC)
     ''');
+  }
+
+  /// PHÖNIX CONTROL CENTER "Module Control" (Section 40, additiv). Anders
+  /// als `app_control_state` (App-weiter Status) sind das per-Subsystem-
+  /// Schalter. `enforced_in_backend = TRUE` heißt: der Schalter wird
+  /// tatsächlich von Backend-Code geprüft (siehe moduleEnabled()-Aufrufe in
+  /// football_favorite_live_monitor.dart, routes.dart, model_lab_routes.dart)
+  /// - nicht nur UI. Für `FALSE`-Module existiert der Schalter zwar, aber
+  /// noch keine Verhaltenskopplung; das UI zeigt das ehrlich an statt eine
+  /// Wirkung vorzutäuschen (Section 89).
+  Future<void> _migrateModuleControl(Connection db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS module_control (
+        module_key TEXT PRIMARY KEY,
+        label TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        enforced_in_backend BOOLEAN NOT NULL DEFAULT FALSE,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_by TEXT
+      )
+    ''');
+    await db.execute('''
+      INSERT INTO module_control (module_key, label, description, enforced_in_backend) VALUES
+        ('phoenix_live', 'PHÖNIX Live', 'Live-Event-Polling (alle 5s je verfolgtem Match) + Live-Push. Aus = Polling stoppt sofort, spart API-Budget.', TRUE),
+        ('settlement', 'Settlement', 'Ergebnis-/Tipp-Abrechnung. Aus = manuelle und geplante Settlement-Läufe werden abgelehnt.', TRUE),
+        ('model_lab_learning', 'Model Lab Learning', 'Manuelle und geplante Learning-Runs. Aus = Läufe werden abgelehnt, bestehende Champions bleiben unberührt.', TRUE),
+        ('historical_twins', 'Historical Twins', 'Informationelle Historical-Twins-Anzeige (Gewicht 0, kein Einfluss auf Analyse/Tipp/Learning).', FALSE),
+        ('news', 'News', 'Importierter News-Feed + automatisch generierte Phoenix-Berichte.', FALSE),
+        ('advertising', 'Werbung', 'Ausspielung von Werbekampagnen.', FALSE)
+      ON CONFLICT (module_key) DO NOTHING
+    ''');
+  }
+
+  Future<bool> moduleEnabled(String moduleKey) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('SELECT enabled FROM module_control WHERE module_key = @key'),
+      parameters: {'key': moduleKey},
+    );
+    if (result.isEmpty) return true;
+    return result.first[0] as bool;
+  }
+
+  Future<List<Map<String, Object?>>> listModuleControls() async {
+    final db = await connection();
+    final result = await db.execute('''
+      SELECT module_key, label, description, enabled, enforced_in_backend,
+        updated_at::text AS updated_at, updated_by
+      FROM module_control
+      ORDER BY label
+    ''');
+    return result.map((row) => Map<String, Object?>.from(row.toColumnMap())).toList();
+  }
+
+  Future<Map<String, Object?>?> updateModuleControl({
+    required String moduleKey,
+    required bool enabled,
+    required String updatedBy,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        UPDATE module_control SET enabled = @enabled, updated_at = NOW(), updated_by = @updated_by
+        WHERE module_key = @module_key
+        RETURNING module_key, label, description, enabled, enforced_in_backend,
+          updated_at::text AS updated_at, updated_by
+      '''),
+      parameters: {'module_key': moduleKey, 'enabled': enabled, 'updated_by': updatedBy},
+    );
+    if (result.isEmpty) return null;
+    return Map<String, Object?>.from(result.first.toColumnMap());
+  }
+
+  /// System-Audit-Historie (Section 76 "Historie"). Jeder `/system-audit`-
+  /// Aufruf wird hier abgelegt, damit die bisher leere "Historie"-Ansicht
+  /// echte, vergangene Berichte zeigen kann statt nur den aktuellen On-
+  /// Demand-Lauf.
+  Future<void> _migrateSystemAuditHistory(Connection db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS system_audit_runs (
+        id BIGSERIAL PRIMARY KEY,
+        critical_count INTEGER NOT NULL,
+        warning_count INTEGER NOT NULL,
+        report_text TEXT NOT NULL,
+        generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_system_audit_runs_generated
+      ON system_audit_runs (generated_at DESC)
+    ''');
+  }
+
+  Future<Map<String, Object?>> saveSystemAuditRun({
+    required int criticalCount,
+    required int warningCount,
+    required String reportText,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        INSERT INTO system_audit_runs (critical_count, warning_count, report_text)
+        VALUES (@critical_count, @warning_count, @report_text)
+        RETURNING id, critical_count, warning_count, report_text,
+          generated_at::text AS generated_at
+      '''),
+      parameters: {
+        'critical_count': criticalCount,
+        'warning_count': warningCount,
+        'report_text': reportText,
+      },
+    );
+    return Map<String, Object?>.from(result.first.toColumnMap());
+  }
+
+  Future<List<Map<String, Object?>>> listSystemAuditRuns({int limit = 50}) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT id, critical_count, warning_count, report_text,
+          generated_at::text AS generated_at
+        FROM system_audit_runs
+        ORDER BY generated_at DESC
+        LIMIT @limit
+      '''),
+      parameters: {'limit': limit.clamp(1, 200)},
+    );
+    return result.map((row) => Map<String, Object?>.from(row.toColumnMap())).toList();
   }
 
   /// PHÖNIX MODEL LAB (Self-Learning Engine V0). Rein additive Tabellen für

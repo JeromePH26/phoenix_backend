@@ -220,6 +220,11 @@ class ModelLabRoutes {
 
     router.post('/learning-runs/start', (Request request) async {
       if (!_isAdmin(request)) return _unauthorized();
+      if (!await database.moduleEnabled('model_lab_learning')) {
+        return jsonResponse({
+          'error': 'Modul "Model Lab Learning" ist deaktiviert (App Control → Module).',
+        }, statusCode: 503);
+      }
       try {
         // Section 79: exakt dieselbe Business-Logik wie der geplante
         // Dienstags-Job, nur mit trigger_type='manual'.

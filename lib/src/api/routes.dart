@@ -1011,6 +1011,11 @@ class ApiRoutes {
       if (!_isAdmin(request)) {
         return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
       }
+      if (!await database.moduleEnabled('settlement')) {
+        return jsonResponse({
+          'error': 'Modul "Settlement" ist deaktiviert (App Control → Module).',
+        }, statusCode: 503);
+      }
       final value = request.url.queryParameters['date'];
       final date = value == null ? DateTime.now() : DateTime.tryParse(value);
       final reconcile =
@@ -1042,6 +1047,11 @@ class ApiRoutes {
     ) async {
       if (!_isAdmin(request)) {
         return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+      if (!await database.moduleEnabled('settlement')) {
+        return jsonResponse({
+          'error': 'Modul "Settlement" ist deaktiviert (App Control → Module).',
+        }, statusCode: 503);
       }
       final query = request.url.queryParameters;
       // Default 3h für den täglichen Check, Backfill-Aufrufe übergeben
