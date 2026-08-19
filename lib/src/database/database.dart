@@ -938,6 +938,27 @@ class PhoenixDatabase {
       CREATE INDEX IF NOT EXISTS idx_admin_audit_log_employee
       ON admin_audit_log (employee_id, created_at DESC)
     ''');
+
+    // Single-row App-Status (Section 39/81: ACTIVE/MAINTENANCE/DISABLED),
+    // von der Flutter-App noch nicht gelesen - Control Center kann den
+    // Status bereits setzen/anzeigen, die Anbindung der App selbst ist ein
+    // separater, noch nicht umgesetzter Schritt.
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS app_control_state (
+        id INTEGER PRIMARY KEY DEFAULT 1,
+        status TEXT NOT NULL DEFAULT 'ACTIVE',
+        message TEXT,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_by TEXT,
+        CHECK (id = 1),
+        CHECK (status IN ('ACTIVE', 'MAINTENANCE', 'DISABLED'))
+      )
+    ''');
+    await db.execute('''
+      INSERT INTO app_control_state (id, status)
+      VALUES (1, 'ACTIVE')
+      ON CONFLICT (id) DO NOTHING
+    ''');
   }
 
   /// PHÖNIX MODEL LAB (Self-Learning Engine V0). Rein additive Tabellen für
@@ -5412,6 +5433,27 @@ class PhoenixDatabase {
         .toList();
   }
 
+  /// Letzte [days] Tage (inkl. heute) je `api_name`, neueste zuerst. Für das
+  /// Control-Center-API-Usage-Panel - `apiSportsDailyUsageToday` bleibt für
+  /// den bestehenden `/overview`-Aufruf unverändert.
+  Future<List<Map<String, Object?>>> apiSportsDailyUsageHistory({
+    int days = 14,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT api_name, usage_date::text AS usage_date, requests, updated_at
+        FROM api_sports_daily_usage
+        WHERE usage_date >= CURRENT_DATE - (@days - 1)
+        ORDER BY usage_date DESC, api_name ASC
+      '''),
+      parameters: {'days': days.clamp(1, 90)},
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
   Future<Map<String, int>> footballLeagueManualStatusCounts() async {
     final db = await connection();
     final result = await db.execute('''
@@ -5430,6 +5472,73 @@ class PhoenixDatabase {
       WHERE status NOT IN ('completed', 'failed')
     ''');
     return (result.first[0] as int?) ?? 0;
+  }
+
+  /// Neueste Daily-Pipeline-Läufe, neueste zuerst - fürs Control-Center-
+  /// Jobs-Panel. Mirrors `recentFootballMatchSettlementJobs` (das per-Typ
+  /// bereits existierte); für diesen Job-Typ gab es bisher nur die
+  /// Einzelabfrage per ID (`/api/admin/football/daily-scan/<jobId>`).
+  Future<List<Map<String, Object?>>> recentFootballDailyPipelineJobs({
+    int limit = 20,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT
+          id, scan_date::text AS scan_date, status, current_step,
+          phase_one_scan_run_id, phase_two_scan_run_id, requested_limit,
+          minimum_data_quality, simulations, processed, published, error,
+          created_at::text AS created_at,
+          completed_at::text AS completed_at
+        FROM football_daily_pipeline_jobs
+        ORDER BY id DESC
+        LIMIT @limit
+      '''),
+      parameters: {'limit': limit.clamp(1, 100)},
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  // -- Control Center /app-control -----------------------------------------
+
+  Future<Map<String, Object?>> appControlStatus() async {
+    final db = await connection();
+    final result = await db.execute('''
+      SELECT status, message, updated_at::text AS updated_at, updated_by
+      FROM app_control_state
+      WHERE id = 1
+    ''');
+    if (result.isEmpty) {
+      return {'status': 'ACTIVE', 'message': null, 'updatedAt': null, 'updatedBy': null};
+    }
+    return Map<String, Object?>.from(result.first.toColumnMap());
+  }
+
+  Future<Map<String, Object?>> setAppControlStatus({
+    required String status,
+    String? message,
+    required String updatedBy,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        UPDATE app_control_state SET
+          status = @status,
+          message = @message,
+          updated_at = NOW(),
+          updated_by = @updated_by
+        WHERE id = 1
+        RETURNING status, message, updated_at::text AS updated_at, updated_by
+      '''),
+      parameters: {
+        'status': status,
+        'message': message,
+        'updated_by': updatedBy,
+      },
+    );
+    return Map<String, Object?>.from(result.first.toColumnMap());
   }
 
   Future<int> countPendingFootballMatchSettlementJobs() async {

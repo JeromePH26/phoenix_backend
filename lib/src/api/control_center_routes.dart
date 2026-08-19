@@ -49,6 +49,10 @@ class ControlCenterRoutes {
     router.get('/audit-log', _auditLog);
     router.get('/overview', _overview);
     router.get('/search', _search);
+    router.get('/api-usage', _apiUsage);
+    router.get('/jobs', _jobs);
+    router.get('/app-control/status', _appControlStatus);
+    router.post('/app-control/status', _updateAppControlStatus);
 
     return router;
   }
@@ -488,6 +492,117 @@ class ControlCenterRoutes {
           'footballMatchSettlement': pendingSettlementJobs,
         },
       });
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  // -- API Usage --------------------------------------------------------
+
+  Future<Response> _apiUsage(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    if (!auth.employee!.hasPermission('apiUsage.view')) return _forbidden();
+
+    try {
+      final today = await database.apiSportsDailyUsageToday();
+      final history = await database.apiSportsDailyUsageHistory(days: 14);
+      return jsonResponse({
+        'today': today.map(_jsonSafe).toList(),
+        'history': history.map(_jsonSafe).toList(),
+      });
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  // -- Jobs ---------------------------------------------------------------
+
+  Future<Response> _jobs(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    if (!auth.employee!.hasPermission('jobs.view')) return _forbidden();
+
+    try {
+      final dailyPipeline = await database.recentFootballDailyPipelineJobs(limit: 10);
+      final settlement = await database.recentFootballMatchSettlementJobs(limit: 10);
+      final learningRuns = await database.listLearningRuns(limit: 10);
+      return jsonResponse({
+        'dailyPipeline': dailyPipeline.map(_jsonSafe).toList(),
+        'settlement': settlement.map(_jsonSafe).toList(),
+        'learningRuns': learningRuns.map(_jsonSafe).toList(),
+      });
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  // -- App Control ----------------------------------------------------------
+
+  Future<Response> _appControlStatus(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    if (!auth.employee!.hasPermission('appControl.view')) return _forbidden();
+
+    try {
+      final status = await database.appControlStatus();
+      return jsonResponse(_jsonSafe(status));
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  // Section 39/81/82: App-Status ist eine Danger-Zone-Aktion (kann die App
+  // für alle Nutzer abschalten), deshalb eigenes Recht (`appControl.manage`,
+  // nicht in den Default-Rechten von SUPPORT/CONTENT/MARKETING) und ein
+  // Pflicht-Grund wie bei den Football-Match-Flags.
+  Future<Response> _updateAppControlStatus(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    final actor = auth.employee!;
+    if (!actor.hasPermission('appControl.manage')) return _forbidden();
+
+    try {
+      final body = jsonDecode(await request.readAsString());
+      if (body is! Map<String, dynamic>) {
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+      }
+
+      final status = body['status']?.toString().trim().toUpperCase() ?? '';
+      final reason = body['reason']?.toString().trim() ?? '';
+      final message = body['message']?.toString().trim();
+
+      const validStatuses = {'ACTIVE', 'MAINTENANCE', 'DISABLED'};
+      if (!validStatuses.contains(status)) {
+        return jsonResponse({
+          'error': 'status muss ACTIVE, MAINTENANCE oder DISABLED sein.',
+        }, statusCode: 400);
+      }
+      if (reason.isEmpty) {
+        return jsonResponse({'error': 'reason ist erforderlich.'}, statusCode: 400);
+      }
+
+      final previous = await database.appControlStatus();
+      final updated = await database.setAppControlStatus(
+        status: status,
+        message: (message?.isEmpty ?? true) ? null : message,
+        updatedBy: actor.login,
+      );
+
+      await database.insertAdminAuditLog(
+        employeeId: actor.id,
+        employeeLogin: actor.login,
+        area: 'app_control',
+        objectType: 'app_status',
+        objectId: '1',
+        action: 'app_control.status_change',
+        previousValue: previous,
+        newValue: updated,
+        reason: reason,
+        ip: _clientIp(request),
+      );
+
+      return jsonResponse({'status': _jsonSafe(updated)});
     } catch (error) {
       return jsonResponse({'error': error.toString()}, statusCode: 500);
     }

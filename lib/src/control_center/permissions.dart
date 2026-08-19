@@ -24,6 +24,10 @@ const Set<String> kAllPermissions = {
   'audit.view',
   'search.view',
   'overview.view',
+  'apiUsage.view',
+  'jobs.view',
+  'appControl.view',
+  'appControl.manage',
 };
 
 /// Standard-Berechtigungen je Rolle. `OWNER` taucht hier absichtlich nicht
@@ -37,8 +41,18 @@ const Map<String, Set<String>> kRoleDefaultPermissions = {
     'audit.view',
     'search.view',
     'overview.view',
+    'apiUsage.view',
+    'jobs.view',
+    'appControl.view',
+    'appControl.manage',
   },
-  'TECHNICAL': {'overview.view', 'search.view'},
+  'TECHNICAL': {
+    'overview.view',
+    'search.view',
+    'apiUsage.view',
+    'jobs.view',
+    'appControl.view',
+  },
   'SUPPORT': {'overview.view', 'search.view'},
   'CONTENT': {'overview.view', 'search.view'},
   'MARKETING': {'overview.view', 'search.view'},
