@@ -1252,10 +1252,18 @@ class PhoenixDatabase {
         ('phoenix_live', 'PHÖNIX Live', 'Live-Event-Polling (alle 5s je verfolgtem Match) + Live-Push. Aus = Polling stoppt sofort, spart API-Budget.', TRUE),
         ('settlement', 'Settlement', 'Ergebnis-/Tipp-Abrechnung. Aus = manuelle und geplante Settlement-Läufe werden abgelehnt.', TRUE),
         ('model_lab_learning', 'Model Lab Learning', 'Manuelle und geplante Learning-Runs. Aus = Läufe werden abgelehnt, bestehende Champions bleiben unberührt.', TRUE),
-        ('historical_twins', 'Historical Twins', 'Informationelle Historical-Twins-Anzeige (Gewicht 0, kein Einfluss auf Analyse/Tipp/Learning).', FALSE),
-        ('news', 'News', 'Importierter News-Feed + automatisch generierte Phoenix-Berichte.', FALSE),
-        ('advertising', 'Werbung', 'Ausspielung von Werbekampagnen.', FALSE)
+        ('historical_twins', 'Historical Twins', 'Informationelle Historical-Twins-Anzeige (Gewicht 0, kein Einfluss auf Analyse/Tipp/Learning). Aus = GET /api/football/historical-twins/<id> liefert 503.', TRUE),
+        ('news', 'News', 'Manuell verfasste PHÖNIX-News (Control-Center-CMS, /api/news/phoenix). Aus = liefert eine leere Liste. Betrifft NICHT den importierten Publisher-Feed unter /api/news.', TRUE),
+        ('advertising', 'Werbung', 'Ausspielung von Werbekampagnen (/api/ads/<slot>). Aus = liefert keine Kampagnen für keinen Slot.', TRUE)
       ON CONFLICT (module_key) DO NOTHING
+    ''');
+    // Bestehende Railway-Datenbanken haben diese Zeilen ggf. schon mit dem
+    // alten enforced_in_backend=FALSE angelegt (ON CONFLICT DO NOTHING oben
+    // greift dort nicht mehr) - hier retroaktiv korrigieren, jetzt wo die
+    // drei Endpunkte den Schalter tatsächlich prüfen.
+    await db.execute('''
+      UPDATE module_control SET enforced_in_backend = TRUE
+      WHERE module_key IN ('historical_twins', 'news', 'advertising')
     ''');
   }
 

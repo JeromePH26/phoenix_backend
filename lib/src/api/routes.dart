@@ -365,6 +365,9 @@ class ApiRoutes {
       Request request,
       String fixtureId,
     ) async {
+      if (!await database.moduleEnabled('historical_twins')) {
+        return jsonResponse({'error': 'Historical Twins ist deaktiviert.'}, statusCode: 503);
+      }
       try {
         final result = await HistoricalTwinService(
           database: database,
@@ -509,6 +512,9 @@ class ApiRoutes {
     // Bewusst getrennt von /api/news (importierter + automatisch generierter
     // Feed, siehe FootballNewsService/PhoenixEditorialComposer).
     router.get('/api/news/phoenix', (Request request) async {
+      if (!await database.moduleEnabled('news')) {
+        return jsonResponse({'count': 0, 'articles': <Object?>[]});
+      }
       final articles = await database.publicEditorialArticles();
       return jsonResponse({'count': articles.length, 'articles': articles});
     });
@@ -521,6 +527,9 @@ class ApiRoutes {
     // Section 32: Werbeflächen sind serverseitig fest vordefinierte Slots -
     // die App fragt gezielt einen Slot ab, keine freie Slot-Erstellung.
     router.get('/api/ads/<slot>', (Request request, String slot) async {
+      if (!await database.moduleEnabled('advertising')) {
+        return jsonResponse({'slot': slot, 'campaigns': <Object?>[]});
+      }
       final campaigns = await database.activeAdCampaignsForSlot(slot);
       return jsonResponse({'slot': slot, 'campaigns': campaigns});
     });
