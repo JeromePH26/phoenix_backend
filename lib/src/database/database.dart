@@ -6829,6 +6829,104 @@ class PhoenixDatabase {
   /// Fehlt eine Zeile im Cache, kommt sie trotzdem mit `mime_type = NULL`
   /// zurück (MISSING) - der Aufrufer berechnet den Status über
   /// `computeAssetStatus()` in `football_admin_logic.dart`.
+  /// Team-Katalog fürs Control Center (Section "Ligen/Teams
+  /// zusammenlegen"): jedes Team, das jemals als Heim- oder Auswärtsteam in
+  /// einem gespeicherten Match vorkam - das deckt praktisch jedes Team ab,
+  /// sobald seine Liga mindestens einmal gescannt wurde. Kein Live-Aufruf
+  /// beim Provider nötig, keine zusätzliche API-Quota.
+  Future<Map<String, Object?>> listFootballTeamsAdmin({
+    String? search,
+    int limit = 50,
+    int offset = 0,
+  }) async {
+    final db = await connection();
+    final searchClause = (search != null && search.trim().isNotEmpty)
+        ? "WHERE t.name ILIKE @search"
+        : '';
+    final rows = await db.execute(
+      Sql.named('''
+        WITH teams AS (
+          SELECT home_team_id AS id, home_team_name AS name,
+                 home_logo AS logo, league_id, league_name, country,
+                 kickoff_utc
+          FROM football_matches WHERE home_team_id <> ''
+          UNION ALL
+          SELECT away_team_id, away_team_name, away_logo, league_id,
+                 league_name, country, kickoff_utc
+          FROM football_matches WHERE away_team_id <> ''
+        ),
+        latest AS (
+          SELECT DISTINCT ON (id) id, name, logo, league_id, league_name,
+                 country
+          FROM teams
+          ORDER BY id, kickoff_utc DESC
+        )
+        SELECT t.* FROM latest t
+        $searchClause
+        ORDER BY t.name
+        LIMIT @limit OFFSET @offset
+      '''),
+      parameters: {
+        if (search != null && search.trim().isNotEmpty)
+          'search': '%${search.trim()}%',
+        'limit': limit.clamp(1, 200),
+        'offset': offset.clamp(0, 1 << 30),
+      },
+    );
+
+    final countRows = await db.execute(
+      Sql.named('''
+        WITH teams AS (
+          SELECT home_team_id AS id, home_team_name AS name
+          FROM football_matches WHERE home_team_id <> ''
+          UNION
+          SELECT away_team_id, away_team_name
+          FROM football_matches WHERE away_team_id <> ''
+        )
+        SELECT COUNT(*) AS total FROM teams t $searchClause
+      '''),
+      parameters: {
+        if (search != null && search.trim().isNotEmpty)
+          'search': '%${search.trim()}%',
+      },
+    );
+    final total = int.tryParse(
+          countRows.first.toColumnMap()['total']?.toString() ?? '',
+        ) ??
+        0;
+
+    return {
+      'teams': rows.map((r) => Map<String, Object?>.from(r.toColumnMap())).toList(),
+      'total': total,
+      'limit': limit,
+      'offset': offset,
+    };
+  }
+
+  Future<Map<String, Object?>?> footballTeamDetail(String teamId) async {
+    final db = await connection();
+    final rows = await db.execute(
+      Sql.named('''
+        WITH teams AS (
+          SELECT home_team_id AS id, home_team_name AS name,
+                 home_logo AS logo, league_id, league_name, country,
+                 kickoff_utc
+          FROM football_matches WHERE home_team_id = @id
+          UNION ALL
+          SELECT away_team_id, away_team_name, away_logo, league_id,
+                 league_name, country, kickoff_utc
+          FROM football_matches WHERE away_team_id = @id
+        )
+        SELECT DISTINCT ON (id) id, name, logo, league_id, league_name, country
+        FROM teams
+        ORDER BY id, kickoff_utc DESC
+      '''),
+      parameters: {'id': teamId},
+    );
+    if (rows.isEmpty) return null;
+    return Map<String, Object?>.from(rows.first.toColumnMap());
+  }
+
   Future<List<Map<String, Object?>>> footballAssetInventory({
     int sinceDays = 180,
   }) async {

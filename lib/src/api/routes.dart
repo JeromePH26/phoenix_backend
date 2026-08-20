@@ -965,6 +965,43 @@ class ApiRoutes {
       }
     });
 
+    router.get('/api/admin/football/teams', (Request request) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+      final query = request.url.queryParameters;
+      final limit = clampListLimit(int.tryParse(query['limit'] ?? ''));
+      final offset = clampOffset(int.tryParse(query['offset'] ?? ''));
+      try {
+        final result = await database.listFootballTeamsAdmin(
+          search: query['search'],
+          limit: limit,
+          offset: offset,
+        );
+        return jsonResponse(_jsonSafe(result));
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
+    router.get('/api/admin/football/teams/<id>', (
+      Request request,
+      String id,
+    ) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+      try {
+        final team = await database.footballTeamDetail(id);
+        if (team == null) {
+          return jsonResponse({'error': 'Team nicht gefunden.'}, statusCode: 404);
+        }
+        return jsonResponse(_jsonSafe(team));
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
     router.post('/api/admin/football/leagues/<leagueId>/status', (
       Request request,
       String leagueId,
