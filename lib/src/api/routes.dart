@@ -1537,6 +1537,28 @@ class ApiRoutes {
       }
     });
 
+    // "DATEN"-Tab im Ligen-/Team-Analytics-Profil: was hat PHÖNIX
+    // tatsächlich gespeichert, pro Datenkategorie, ohne irgendetwas
+    // hartzukodieren (Spec Punkt 17). Nicht zu verwechseln mit
+    // /api/admin/football/data-coverage (Whitelist-Tagesreport).
+    router.get('/api/admin/football/data-coverage-detail', (
+      Request request,
+    ) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+      final query = request.url.queryParameters;
+      try {
+        final result = await database.footballDataCoverage(
+          leagueId: query['leagueId'],
+          teamId: query['teamId'],
+        );
+        return jsonResponse(_jsonSafe(result));
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
     router.get('/api/admin/football/assets', (Request request) async {
       if (!_isAdmin(request)) {
         return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);

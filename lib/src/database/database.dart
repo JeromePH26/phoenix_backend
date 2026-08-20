@@ -4975,6 +4975,104 @@ class PhoenixDatabase {
     };
   }
 
+  /// Section "DATEN – extrem wichtig": beantwortet "was hat PHÖNIX
+  /// tatsächlich über diese Liga/dieses Team gespeichert" - NICHTS wird hier
+  /// hardcodiert, jede Prozentzahl kommt aus echten `availability`-Flags,
+  /// die `FootballService.coverageForFixture()` beim Scan pro Spiel setzt
+  /// (siehe dort für die genaue Bedeutung jedes Flags). `xg`/`lineups` sind
+  /// bei API-Football strukturell nie verfügbar (dort im Code fest auf
+  /// `false` gesetzt) - das wird hier ehrlich als 0 % ausgegeben, nicht
+  /// versteckt oder umgangen.
+  Future<Map<String, Object?>> footballDataCoverage({
+    String? leagueId,
+    String? teamId,
+  }) async {
+    final db = await connection();
+    final conditions = <String>[];
+    final parameters = <String, Object?>{};
+    if (leagueId != null && leagueId.trim().isNotEmpty) {
+      conditions.add('p.league_id = @league_id');
+      parameters['league_id'] = leagueId.trim();
+    }
+    if (teamId != null && teamId.trim().isNotEmpty) {
+      conditions.add('(m.home_team_id = @team_id OR m.away_team_id = @team_id)');
+      parameters['team_id'] = teamId.trim();
+    }
+    final where = conditions.isEmpty ? '' : 'WHERE ${conditions.join(' AND ')}';
+
+    final result = await db.execute(
+      Sql.named('''
+        WITH latest AS (
+          SELECT DISTINCT ON (p.fixture_id)
+            p.fixture_id, p.league_id, p.data_quality, p.availability,
+            p.created_at
+          FROM football_phase_two_results p
+          INNER JOIN football_matches m ON m.id = p.fixture_id
+          $where
+          ORDER BY p.fixture_id, p.created_at DESC
+        )
+        SELECT
+          COUNT(*) AS total,
+          COUNT(*) FILTER (WHERE (availability->>'standings')::boolean) AS standings,
+          COUNT(*) FILTER (
+            WHERE (availability->>'homeRecent')::boolean
+              AND (availability->>'awayRecent')::boolean
+          ) AS form,
+          COUNT(*) FILTER (WHERE (availability->>'h2h')::boolean) AS h2h,
+          COUNT(*) FILTER (WHERE (availability->>'odds')::boolean) AS odds,
+          COUNT(*) FILTER (WHERE (availability->>'injuries')::boolean) AS injuries,
+          COUNT(*) FILTER (
+            WHERE (availability->>'homeTeamStatistics')::boolean
+              AND (availability->>'awayTeamStatistics')::boolean
+          ) AS statistics,
+          AVG(data_quality) AS avg_data_quality,
+          MAX(created_at) AS last_updated
+        FROM latest
+      '''),
+      parameters: parameters,
+    );
+    final row = Map<String, Object?>.from(result.first.toColumnMap());
+    final total = int.tryParse(row['total']?.toString() ?? '') ?? 0;
+
+    double coverage(String key) {
+      if (total == 0) return 0;
+      final count = int.tryParse(row[key]?.toString() ?? '') ?? 0;
+      return count / total * 100;
+    }
+
+    String status(double pct) {
+      if (total == 0) return 'unknown';
+      if (pct >= 90) return 'available';
+      if (pct > 0) return 'partial';
+      return 'missing';
+    }
+
+    final categories = {
+      'results': {'coveragePercent': total == 0 ? 0.0 : 100.0, 'status': total == 0 ? 'unknown' : 'available'},
+      'standings': {'coveragePercent': coverage('standings'), 'status': status(coverage('standings'))},
+      'form': {'coveragePercent': coverage('form'), 'status': status(coverage('form'))},
+      'h2h': {'coveragePercent': coverage('h2h'), 'status': status(coverage('h2h'))},
+      'odds': {'coveragePercent': coverage('odds'), 'status': status(coverage('odds'))},
+      'injuries': {'coveragePercent': coverage('injuries'), 'status': status(coverage('injuries'))},
+      'statistics': {'coveragePercent': coverage('statistics'), 'status': status(coverage('statistics'))},
+      // Strukturell nie verfügbar (siehe Doc-Kommentar) - ehrlich als 0
+      // ausgegeben statt weggelassen.
+      'lineups': {'coveragePercent': 0.0, 'status': 'missing'},
+      'xg': {'coveragePercent': 0.0, 'status': 'missing'},
+    };
+
+    final avgDq = row['avg_data_quality'];
+    final lastUpdated = row['last_updated'];
+    return {
+      'sampleSize': total,
+      'overallCoveragePercent': avgDq == null
+          ? null
+          : double.tryParse(avgDq.toString()),
+      'lastUpdated': lastUpdated is DateTime ? lastUpdated.toUtc().toIso8601String() : null,
+      'categories': categories,
+    };
+  }
+
   Future<List<Map<String, Object?>>> footballTipsForSettlement({
     DateTime? date,
     bool reconcile = false,
