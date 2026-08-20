@@ -127,7 +127,14 @@ class AppAccountRoutes {
     router.get('/me', (Request request) async {
       final outcome = await guard.authenticate(request);
       if (!outcome.isAuthenticated) return outcome.unauthorizedResponse!;
-      return jsonResponse({'user': _publicProfile(outcome.userRow!)});
+      final userRow = outcome.userRow!;
+      final employeeAccess = await database.linkEmployeeAppAccess(
+        userId: userRow['id'] as int,
+        email: userRow['email']?.toString() ?? '',
+      );
+      return jsonResponse({
+        'user': _publicProfile(userRow, employeeAccess: employeeAccess),
+      });
     });
 
     // Abschnitt 91 "update allowed profile fields".
@@ -245,10 +252,21 @@ class AppAccountRoutes {
     );
     await database.touchUserLastLogin(userId);
     final fresh = await database.userById(userId) ?? userRow;
+
+    // Abschnitt "MITARBEITER": dieselben Zugangsdaten gelten für Center und
+    // App. Ein Mitarbeiter, der sich mit seiner Mitarbeiter-E-Mail in der App
+    // anmeldet, wird hier automatisch erkannt und bekommt seine Bypass-Flags
+    // in der Antwort - ohne dass die App das Control-Center-Rechtesystem
+    // selbst kennen muss.
+    final employeeAccess = await database.linkEmployeeAppAccess(
+      userId: userId,
+      email: (fresh['email'] ?? userRow['email'])?.toString() ?? '',
+    );
+
     return jsonResponse({
       'sessionToken': token,
       'expiresAt': DateTime.now().toUtc().add(kAppSessionTtl).toIso8601String(),
-      'user': _publicProfile(fresh),
+      'user': _publicProfile(fresh, employeeAccess: employeeAccess),
     }, statusCode: statusCode);
   }
 
@@ -280,7 +298,15 @@ class AppAccountRoutes {
 
   /// Abschnitt 80: KEIN Raw-Dump der DB-Zeile an den Client - nur die
   /// tatsächlich für die App relevanten Felder, mit sprechenden JSON-Keys.
-  Map<String, Object?> _publicProfile(Map<String, Object?> row) => {
+  /// [employeeAccess] (aus [PhoenixDatabase.linkEmployeeAppAccess]) ist nur
+  /// gesetzt, wenn diese E-Mail zu einem Mitarbeiterkonto gehört - liefert
+  /// dann die Bypass-Flags, die die App für den automatischen
+  /// Developer/Staff-Zugriff auswertet (Premium/Maintenance/Beta), OHNE dass
+  /// die App selbst Control-Center-Rechte kennen oder prüfen muss.
+  Map<String, Object?> _publicProfile(
+    Map<String, Object?> row, {
+    Map<String, Object?>? employeeAccess,
+  }) => {
     'phoenixUserId': row['phoenix_user_id'],
     'accountType': row['account_type'],
     'email': row['email'],
@@ -298,6 +324,7 @@ class AppAccountRoutes {
     'notificationSettings': row['notification_settings'],
     'createdAt': _jsonSafe(row['created_at']),
     'lastLoginAt': _jsonSafe(row['last_login_at']),
+    if (employeeAccess != null) 'employeeAccess': _jsonSafe(employeeAccess),
   };
 
   Object? _dateOnly(Object? value) {

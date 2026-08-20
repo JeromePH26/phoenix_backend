@@ -15,6 +15,7 @@ import '../control_center/employee_rules.dart';
 import '../control_center/permissions.dart';
 import '../control_center/session_policy.dart';
 import '../database/database.dart';
+import '../football_admin/football_admin_logic.dart';
 import '../http/json_response.dart';
 import '../model_lab/learning_dataset_builder.dart';
 import '../services/firebase_push_service.dart';
@@ -97,6 +98,19 @@ class ControlCenterRoutes {
     router.get('/permissions/catalog', _permissionsCatalog);
     router.get('/system-audit', _systemAudit);
     router.get('/system-audit/history', _systemAuditHistory);
+    router.get('/users', _listUsers);
+    router.get('/users/<id|[0-9]+>', _userDetail);
+    router.post('/users/<id|[0-9]+>/premium/grant', _grantUserPremium);
+    router.post(
+      '/users/<id|[0-9]+>/premium/<entitlementId|[0-9]+>/revoke',
+      _revokeUserPremium,
+    );
+    router.post('/users/<id|[0-9]+>/bans', _banUser);
+    router.post('/users/<id|[0-9]+>/bans/<banId|[0-9]+>/lift', _liftUserBan);
+    router.post(
+      '/users/<id|[0-9]+>/sessions/<token>/revoke',
+      _revokeUserSession,
+    );
 
     return router;
   }
@@ -462,6 +476,354 @@ class ControlCenterRoutes {
       );
 
       return jsonResponse({'employee': updated.toPublicJson()});
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  // -- Users (PHÖNIX Account System) --------------------------------------
+
+  Future<Response> _listUsers(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    if (!auth.employee!.hasPermission('users.view')) return _forbidden();
+
+    final query = request.url.queryParameters;
+    final limit = clampListLimit(int.tryParse(query['limit'] ?? ''));
+    final offset = clampOffset(int.tryParse(query['offset'] ?? ''));
+    try {
+      final result = await database.listUsersAdmin(
+        search: query['search'],
+        accountStatus: query['accountStatus'],
+        hasPremium: parseBoolParam(query['hasPremium']),
+        limit: limit,
+        offset: offset,
+      );
+      return jsonResponse(_jsonSafe(result));
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  Future<Response> _userDetail(Request request, String id) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    if (!auth.employee!.hasPermission('users.view')) return _forbidden();
+
+    final userId = int.tryParse(id);
+    if (userId == null) {
+      return jsonResponse({'error': 'Ungültige User-ID.'}, statusCode: 400);
+    }
+    try {
+      final detail = await database.userAdminDetail(userId);
+      if (detail == null) {
+        return jsonResponse({'error': 'Nutzer nicht gefunden.'}, statusCode: 404);
+      }
+      return jsonResponse(_jsonSafe(detail));
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  Future<Response> _grantUserPremium(Request request, String id) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    final actor = auth.employee!;
+    if (!actor.hasPermission('premium.manualGrant')) return _forbidden();
+
+    final userId = int.tryParse(id);
+    if (userId == null) {
+      return jsonResponse({'error': 'Ungültige User-ID.'}, statusCode: 400);
+    }
+
+    Map<String, dynamic> body;
+    try {
+      final decoded = jsonDecode(await request.readAsString());
+      if (decoded is! Map<String, dynamic>) {
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+      }
+      body = decoded;
+    } catch (_) {
+      return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+    }
+
+    const allowedSources = {
+      'MANUAL', 'PROMOTION', 'STAFF', 'PARTNER', 'GOOGLE_PLAY', 'WEBSITE',
+    };
+    final source = body['source']?.toString().trim().toUpperCase() ?? '';
+    if (!allowedSources.contains(source)) {
+      return jsonResponse({
+        'error': 'source muss eine von ${allowedSources.join(", ")} sein.',
+      }, statusCode: 400);
+    }
+    final reason = body['reason']?.toString().trim();
+    if (reason == null || reason.isEmpty) {
+      return jsonResponse({'error': 'reason ist erforderlich.'}, statusCode: 400);
+    }
+    final tier = body['tier']?.toString();
+    final expiresAtRaw = body['expiresAt']?.toString();
+    final expiresAt = expiresAtRaw == null || expiresAtRaw.isEmpty
+        ? null
+        : DateTime.tryParse(expiresAtRaw);
+    if (expiresAtRaw != null && expiresAtRaw.isNotEmpty && expiresAt == null) {
+      return jsonResponse({'error': 'expiresAt ist kein gültiges Datum.'}, statusCode: 400);
+    }
+
+    try {
+      final entitlement = await database.grantUserPremium(
+        userId: userId,
+        source: source,
+        tier: tier,
+        expiresAt: expiresAt,
+        reason: reason,
+        grantedByEmployeeId: actor.id,
+      );
+
+      await database.insertAdminAuditLog(
+        employeeId: actor.id,
+        employeeLogin: actor.login,
+        area: 'premium',
+        objectType: 'user',
+        objectId: id,
+        action: 'premium.manual_grant',
+        newValue: {'source': source, 'tier': tier, 'expiresAt': expiresAtRaw},
+        reason: reason,
+        ip: _clientIp(request),
+      );
+
+      return jsonResponse(_jsonSafe({'entitlement': entitlement}), statusCode: 201);
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  Future<Response> _revokeUserPremium(
+    Request request,
+    String id,
+    String entitlementId,
+  ) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    final actor = auth.employee!;
+    if (!actor.hasPermission('premium.manualRevoke')) return _forbidden();
+
+    final parsedEntitlementId = int.tryParse(entitlementId);
+    if (parsedEntitlementId == null) {
+      return jsonResponse({'error': 'Ungültige Entitlement-ID.'}, statusCode: 400);
+    }
+
+    String? reason;
+    try {
+      final decoded = jsonDecode(await request.readAsString());
+      if (decoded is Map<String, dynamic>) {
+        reason = decoded['reason']?.toString();
+      }
+    } catch (_) {
+      // Body ist optional für Revoke.
+    }
+
+    try {
+      final updated = await database.revokeUserPremium(
+        entitlementId: parsedEntitlementId,
+      );
+      if (updated == null) {
+        return jsonResponse({'error': 'Entitlement nicht gefunden.'}, statusCode: 404);
+      }
+
+      await database.insertAdminAuditLog(
+        employeeId: actor.id,
+        employeeLogin: actor.login,
+        area: 'premium',
+        objectType: 'user',
+        objectId: id,
+        action: 'premium.manual_revoke',
+        previousValue: {'entitlementId': parsedEntitlementId},
+        reason: reason,
+        ip: _clientIp(request),
+      );
+
+      return jsonResponse(_jsonSafe({'entitlement': updated}));
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  Future<Response> _banUser(Request request, String id) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    final actor = auth.employee!;
+    if (!actor.hasPermission('users.suspend')) return _forbidden();
+
+    final userId = int.tryParse(id);
+    if (userId == null) {
+      return jsonResponse({'error': 'Ungültige User-ID.'}, statusCode: 400);
+    }
+
+    Map<String, dynamic> body;
+    try {
+      final decoded = jsonDecode(await request.readAsString());
+      if (decoded is! Map<String, dynamic>) {
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+      }
+      body = decoded;
+    } catch (_) {
+      return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+    }
+
+    final reason = body['reason']?.toString().trim();
+    final internalReport = body['internalReport']?.toString().trim();
+    if (reason == null || reason.isEmpty) {
+      return jsonResponse({'error': 'reason ist erforderlich.'}, statusCode: 400);
+    }
+    if (internalReport == null || internalReport.isEmpty) {
+      return jsonResponse({'error': 'internalReport ist erforderlich.'}, statusCode: 400);
+    }
+    const allowedDurations = {
+      '1_HOUR', '24_HOURS', '7_DAYS', '30_DAYS', 'CUSTOM', 'PERMANENT',
+    };
+    final durationType = body['durationType']?.toString().trim().toUpperCase() ?? '';
+    if (!allowedDurations.contains(durationType)) {
+      return jsonResponse({
+        'error': 'durationType muss eine von ${allowedDurations.join(", ")} sein.',
+      }, statusCode: 400);
+    }
+    final expiresAtRaw = body['expiresAt']?.toString();
+    final expiresAt = expiresAtRaw == null || expiresAtRaw.isEmpty
+        ? null
+        : DateTime.tryParse(expiresAtRaw);
+    if (durationType == 'CUSTOM' && expiresAt == null) {
+      return jsonResponse({
+        'error': 'expiresAt ist bei durationType=CUSTOM erforderlich.',
+      }, statusCode: 400);
+    }
+    final supportTicketId = int.tryParse(body['supportTicketId']?.toString() ?? '');
+
+    try {
+      final ban = await database.banUser(
+        userId: userId,
+        reason: reason,
+        internalReport: internalReport,
+        durationType: durationType,
+        expiresAt: expiresAt ?? _expiryForDuration(durationType),
+        supportTicketId: supportTicketId,
+        createdByEmployeeId: actor.id,
+      );
+
+      await database.insertAdminAuditLog(
+        employeeId: actor.id,
+        employeeLogin: actor.login,
+        area: 'users',
+        objectType: 'user',
+        objectId: id,
+        action: 'user.ban',
+        newValue: {'durationType': durationType, 'caseNumber': ban['case_number']},
+        reason: reason,
+        comment: internalReport,
+        ip: _clientIp(request),
+      );
+
+      return jsonResponse(_jsonSafe({'ban': ban}), statusCode: 201);
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  DateTime? _expiryForDuration(String durationType) {
+    final now = DateTime.now().toUtc();
+    switch (durationType) {
+      case '1_HOUR':
+        return now.add(const Duration(hours: 1));
+      case '24_HOURS':
+        return now.add(const Duration(hours: 24));
+      case '7_DAYS':
+        return now.add(const Duration(days: 7));
+      case '30_DAYS':
+        return now.add(const Duration(days: 30));
+      default:
+        return null; // CUSTOM (bereits explizit gesetzt) / PERMANENT
+    }
+  }
+
+  Future<Response> _liftUserBan(Request request, String id, String banId) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    final actor = auth.employee!;
+    if (!actor.hasPermission('users.unsuspend')) return _forbidden();
+
+    final parsedBanId = int.tryParse(banId);
+    if (parsedBanId == null) {
+      return jsonResponse({'error': 'Ungültige Ban-ID.'}, statusCode: 400);
+    }
+
+    String? liftReason;
+    try {
+      final decoded = jsonDecode(await request.readAsString());
+      if (decoded is Map<String, dynamic>) {
+        liftReason = decoded['reason']?.toString();
+      }
+    } catch (_) {
+      // Body optional.
+    }
+
+    try {
+      final lifted = await database.liftUserBan(
+        banId: parsedBanId,
+        liftedByEmployeeId: actor.id,
+        liftReason: liftReason,
+      );
+      if (lifted == null) {
+        return jsonResponse({
+          'error': 'Sperre nicht gefunden oder bereits aufgehoben.',
+        }, statusCode: 404);
+      }
+
+      await database.insertAdminAuditLog(
+        employeeId: actor.id,
+        employeeLogin: actor.login,
+        area: 'users',
+        objectType: 'user',
+        objectId: id,
+        action: 'user.unban',
+        previousValue: {'banId': parsedBanId},
+        reason: liftReason,
+        ip: _clientIp(request),
+      );
+
+      return jsonResponse(_jsonSafe({'ban': lifted}));
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  Future<Response> _revokeUserSession(
+    Request request,
+    String id,
+    String token,
+  ) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    final actor = auth.employee!;
+    if (!actor.hasPermission('users.manage')) return _forbidden();
+
+    try {
+      final revoked = await database.revokeUserSessionByToken(token);
+      if (!revoked) {
+        return jsonResponse({
+          'error': 'Session nicht gefunden oder bereits widerrufen.',
+        }, statusCode: 404);
+      }
+
+      await database.insertAdminAuditLog(
+        employeeId: actor.id,
+        employeeLogin: actor.login,
+        area: 'users',
+        objectType: 'user',
+        objectId: id,
+        action: 'user.session_revoke',
+        ip: _clientIp(request),
+      );
+
+      return jsonResponse({'status': 'revoked'});
     } catch (error) {
       return jsonResponse({'error': error.toString()}, statusCode: 500);
     }

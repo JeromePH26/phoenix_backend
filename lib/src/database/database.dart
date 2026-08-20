@@ -6133,6 +6133,61 @@ class PhoenixDatabase {
     return Map<String, Object?>.from(result.first.toColumnMap());
   }
 
+  /// Abschnitt "MITARBEITER" (gemeinsamer App/Center-Login): wird bei jeder
+  /// App-Session-Ausstellung aufgerufen. Verknüpft die `users`-Zeile
+  /// dauerhaft mit dem passenden `admin_employees`-Datensatz (per E-Mail,
+  /// case-insensitive), falls einer existiert, und liefert die App-seitigen
+  /// Bypass-Flags zurück. Ein deaktivierter Mitarbeiter (`status <> 'active'`)
+  /// bekommt bewusst KEINEN Bypass mehr, bleibt aber verknüpft (Historie).
+  Future<Map<String, Object?>?> linkEmployeeAppAccess({
+    required int userId,
+    required String email,
+  }) async {
+    final db = await connection();
+    final employeeRows = await db.execute(
+      Sql.named('''
+        SELECT id, role, status, staff_app_access, maintenance_bypass,
+               premium_bypass, beta_access, feature_flag_bypass, user_id
+        FROM admin_employees
+        WHERE LOWER(email) = LOWER(@email)
+        LIMIT 1
+      '''),
+      parameters: {'email': email},
+    );
+    if (employeeRows.isEmpty) return null;
+    final employee = Map<String, Object?>.from(employeeRows.first.toColumnMap());
+    final employeeId = employee['id'] as int;
+
+    if (employee['user_id'] == null) {
+      await db.execute(
+        Sql.named('''
+          UPDATE admin_employees SET user_id = @user_id WHERE id = @id
+        '''),
+        parameters: {'user_id': userId, 'id': employeeId},
+      );
+    }
+
+    final accountType = employee['role'] == 'OWNER' ? 'OWNER' : 'EMPLOYEE';
+    await db.execute(
+      Sql.named('''
+        UPDATE users SET account_type = @account_type, updated_at = NOW()
+        WHERE id = @id AND account_type <> @account_type
+      '''),
+      parameters: {'id': userId, 'account_type': accountType},
+    );
+
+    final isActive = employee['status'] == 'active';
+    return {
+      'role': employee['role'],
+      'active': isActive,
+      'staffAppAccess': isActive && employee['staff_app_access'] == true,
+      'maintenanceBypass': isActive && employee['maintenance_bypass'] == true,
+      'premiumBypass': isActive && employee['premium_bypass'] == true,
+      'betaAccess': isActive && employee['beta_access'] == true,
+      'featureFlagBypass': isActive && employee['feature_flag_bypass'] == true,
+    };
+  }
+
   Future<Map<String, Object?>?> adminEmployeeById(int id) async {
     final db = await connection();
     final result = await db.execute(
@@ -6288,7 +6343,23 @@ class PhoenixDatabase {
         '''),
         parameters: {'id': id},
       );
-      return Map<String, Object?>.from(result.first.toColumnMap());
+      // Mitarbeiter-Sicherheit: ein deaktivierter Mitarbeiter verliert auch
+      // seinen App-Zugriff sofort - nicht nur die Bypass-Flags (die werden
+      // bereits reaktiv über linkEmployeeAppAccess()'s status-Prüfung
+      // false), sondern auch jede bereits laufende App-Session.
+      final employeeRow = Map<String, Object?>.from(result.first.toColumnMap());
+      final linkedUserId = employeeRow['user_id'];
+      if (linkedUserId != null) {
+        await session.execute(
+          Sql.named('''
+            UPDATE user_sessions
+            SET revoked_at = NOW()
+            WHERE user_id = @user_id AND revoked_at IS NULL
+          '''),
+          parameters: {'user_id': linkedUserId},
+        );
+      }
+      return employeeRow;
     });
   }
 
@@ -8176,6 +8247,349 @@ class PhoenixDatabase {
           .map((row) => {'table': row[0].toString(), 'rows': row[1]})
           .toList(),
     };
+  }
+
+  // -- Control Center /users (PHÖNIX Account System) -----------------------
+
+  static const Set<String> _userManagedFields = {
+    'id',
+    'phoenix_user_id',
+    'account_type',
+    'email',
+    'email_verified',
+    'username',
+    'display_name',
+    'date_of_birth',
+    'age_gate_passed',
+    'account_status',
+    'language',
+    'country',
+    'trial_available',
+    'trial_started_at',
+    'trial_ends_at',
+    'trial_used',
+    'created_at',
+    'updated_at',
+    'last_login_at',
+    'last_active_at',
+    'deletion_status',
+    'deletion_requested_at',
+    'deletion_scheduled_at',
+  };
+
+  Future<Map<String, Object?>> listUsersAdmin({
+    String? search,
+    String? accountStatus,
+    bool? hasPremium,
+    int limit = 50,
+    int offset = 0,
+  }) async {
+    final db = await connection();
+    final conditions = <String>[];
+    final parameters = <String, Object?>{};
+
+    if (search != null && search.trim().isNotEmpty) {
+      conditions.add(
+        "(u.email_lower LIKE @search OR u.username_lower LIKE @search OR "
+        "u.phoenix_user_id ILIKE @search)",
+      );
+      parameters['search'] = '%${search.trim().toLowerCase()}%';
+    }
+    if (accountStatus != null && accountStatus.trim().isNotEmpty) {
+      conditions.add('u.account_status = @account_status');
+      parameters['account_status'] = accountStatus.trim();
+    }
+    if (hasPremium != null) {
+      conditions.add(
+        hasPremium
+            ? '''EXISTS (
+                SELECT 1 FROM user_premium_entitlements e
+                WHERE e.user_id = u.id AND e.active = TRUE
+                  AND e.source <> 'STAFF'
+                  AND (e.expires_at IS NULL OR e.expires_at > NOW())
+              )'''
+            : '''NOT EXISTS (
+                SELECT 1 FROM user_premium_entitlements e
+                WHERE e.user_id = u.id AND e.active = TRUE
+                  AND e.source <> 'STAFF'
+                  AND (e.expires_at IS NULL OR e.expires_at > NOW())
+              )''',
+      );
+    }
+
+    final whereClause =
+        conditions.isEmpty ? '' : 'WHERE ${conditions.join(' AND ')}';
+
+    final rows = await db.execute(
+      Sql.named('''
+        SELECT
+          u.id, u.phoenix_user_id, u.account_type, u.email, u.email_verified,
+          u.username, u.display_name, u.account_status, u.created_at,
+          u.last_active_at,
+          EXISTS (
+            SELECT 1 FROM user_premium_entitlements e
+            WHERE e.user_id = u.id AND e.active = TRUE
+              AND e.source <> 'STAFF'
+              AND (e.expires_at IS NULL OR e.expires_at > NOW())
+          ) AS has_premium,
+          EXISTS (
+            SELECT 1 FROM user_bans b
+            WHERE b.user_id = u.id AND b.status = 'ACTIVE'
+          ) AS has_active_ban
+        FROM users u
+        $whereClause
+        ORDER BY u.created_at DESC
+        LIMIT @limit OFFSET @offset
+      '''),
+      parameters: {...parameters, 'limit': limit.clamp(1, 200), 'offset': offset.clamp(0, 1 << 30)},
+    );
+
+    final countRows = await db.execute(
+      Sql.named('SELECT COUNT(*) AS total FROM users u $whereClause'),
+      parameters: parameters,
+    );
+    final total = int.tryParse(
+          countRows.first.toColumnMap()['total']?.toString() ?? '',
+        ) ??
+        0;
+
+    return {
+      'users': rows.map((r) => Map<String, Object?>.from(r.toColumnMap())).toList(),
+      'total': total,
+      'limit': limit,
+      'offset': offset,
+    };
+  }
+
+  Future<Map<String, Object?>?> userAdminDetail(int userId) async {
+    final db = await connection();
+    final userRows = await db.execute(
+      Sql.named('SELECT * FROM users WHERE id = @id'),
+      parameters: {'id': userId},
+    );
+    if (userRows.isEmpty) return null;
+    final user = Map<String, Object?>.from(userRows.first.toColumnMap())
+      ..removeWhere((key, _) => !_userManagedFields.contains(key));
+
+    final sessions = await db.execute(
+      Sql.named('''
+        SELECT token, created_at, expires_at, revoked_at, ip, user_agent,
+               device_model, platform, app_version
+        FROM user_sessions
+        WHERE user_id = @id
+        ORDER BY created_at DESC
+        LIMIT 50
+      '''),
+      parameters: {'id': userId},
+    );
+
+    final entitlements = await db.execute(
+      Sql.named('''
+        SELECT e.id, e.source, e.active, e.tier, e.starts_at, e.expires_at,
+               e.auto_renew, e.cancelled_at, e.provider_product_id, e.reason,
+               e.created_at, e.granted_by_employee_id,
+               emp.name AS granted_by_name
+        FROM user_premium_entitlements e
+        LEFT JOIN admin_employees emp ON emp.id = e.granted_by_employee_id
+        WHERE e.user_id = @id
+        ORDER BY e.created_at DESC
+      '''),
+      parameters: {'id': userId},
+    );
+
+    final bans = await db.execute(
+      Sql.named('''
+        SELECT b.id, b.case_number, b.status, b.reason, b.internal_report,
+               b.duration_type, b.expires_at, b.refund_decision,
+               b.refund_reason, b.support_ticket_id, b.created_at,
+               b.lifted_at, b.lift_reason,
+               creator.name AS created_by_name,
+               lifter.name AS lifted_by_name
+        FROM user_bans b
+        LEFT JOIN admin_employees creator ON creator.id = b.created_by_employee_id
+        LEFT JOIN admin_employees lifter ON lifter.id = b.lifted_by_employee_id
+        WHERE b.user_id = @id
+        ORDER BY b.created_at DESC
+      '''),
+      parameters: {'id': userId},
+    );
+
+    final tickets = await db.execute(
+      Sql.named('''
+        SELECT id, category, priority, status, subject, created_at, updated_at
+        FROM support_tickets
+        WHERE user_id = @id
+        ORDER BY created_at DESC
+        LIMIT 50
+      '''),
+      parameters: {'id': userId},
+    );
+
+    Map<String, Object?> row(dynamic r) => Map<String, Object?>.from(r.toColumnMap());
+
+    return {
+      'user': user,
+      'sessions': sessions.map(row).toList(),
+      'premiumEntitlements': entitlements.map(row).toList(),
+      'bans': bans.map(row).toList(),
+      'supportTickets': tickets.map(row).toList(),
+    };
+  }
+
+  Future<Map<String, Object?>> grantUserPremium({
+    required int userId,
+    required String source,
+    String? tier,
+    DateTime? expiresAt,
+    String? reason,
+    required int grantedByEmployeeId,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        INSERT INTO user_premium_entitlements (
+          user_id, source, active, tier, expires_at, reason,
+          granted_by_employee_id
+        ) VALUES (
+          @user_id, @source, TRUE, @tier, @expires_at, @reason,
+          @granted_by_employee_id
+        )
+        RETURNING id, source, active, tier, starts_at, expires_at, reason,
+          created_at
+      '''),
+      parameters: {
+        'user_id': userId,
+        'source': source,
+        'tier': tier,
+        'expires_at': expiresAt?.toUtc(),
+        'reason': reason,
+        'granted_by_employee_id': grantedByEmployeeId,
+      },
+    );
+    return Map<String, Object?>.from(result.first.toColumnMap());
+  }
+
+  Future<Map<String, Object?>?> revokeUserPremium({
+    required int entitlementId,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        UPDATE user_premium_entitlements
+        SET active = FALSE, cancelled_at = NOW(), updated_at = NOW()
+        WHERE id = @id
+        RETURNING id, user_id, source, active
+      '''),
+      parameters: {'id': entitlementId},
+    );
+    if (result.isEmpty) return null;
+    return Map<String, Object?>.from(result.first.toColumnMap());
+  }
+
+  Future<Map<String, Object?>> banUser({
+    required int userId,
+    required String reason,
+    required String internalReport,
+    required String durationType,
+    DateTime? expiresAt,
+    int? supportTicketId,
+    required int createdByEmployeeId,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        INSERT INTO user_bans (
+          user_id, reason, internal_report, duration_type, expires_at,
+          support_ticket_id, created_by_employee_id
+        ) VALUES (
+          @user_id, @reason, @internal_report, @duration_type, @expires_at,
+          @support_ticket_id, @created_by_employee_id
+        )
+        RETURNING id, case_number, status, reason, duration_type, expires_at,
+          created_at
+      '''),
+      parameters: {
+        'user_id': userId,
+        'reason': reason,
+        'internal_report': internalReport,
+        'duration_type': durationType,
+        'expires_at': expiresAt?.toUtc(),
+        'support_ticket_id': supportTicketId,
+        'created_by_employee_id': createdByEmployeeId,
+      },
+    );
+    await db.execute(
+      Sql.named('''
+        UPDATE users SET account_status = CASE
+            WHEN @duration_type = 'PERMANENT' THEN 'PERMANENTLY_SUSPENDED'
+            ELSE 'SUSPENDED'
+          END,
+          updated_at = NOW()
+        WHERE id = @user_id
+      '''),
+      parameters: {'user_id': userId, 'duration_type': durationType},
+    );
+    return Map<String, Object?>.from(result.first.toColumnMap());
+  }
+
+  Future<Map<String, Object?>?> liftUserBan({
+    required int banId,
+    required int liftedByEmployeeId,
+    String? liftReason,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        UPDATE user_bans
+        SET status = 'LIFTED', lifted_by_employee_id = @lifted_by,
+            lifted_at = NOW(), lift_reason = @lift_reason
+        WHERE id = @id AND status = 'ACTIVE'
+        RETURNING id, user_id, status
+      '''),
+      parameters: {
+        'id': banId,
+        'lifted_by': liftedByEmployeeId,
+        'lift_reason': liftReason,
+      },
+    );
+    if (result.isEmpty) return null;
+    final banRow = Map<String, Object?>.from(result.first.toColumnMap());
+
+    // Nur wieder aktivieren, wenn keine ANDERE aktive Sperre für denselben
+    // Nutzer übrig bleibt.
+    final userId = banRow['user_id'];
+    final stillBanned = await db.execute(
+      Sql.named('''
+        SELECT COUNT(*) FROM user_bans
+        WHERE user_id = @user_id AND status = 'ACTIVE'
+      '''),
+      parameters: {'user_id': userId},
+    );
+    final remaining = int.tryParse(stillBanned.first[0]?.toString() ?? '') ?? 0;
+    if (remaining == 0) {
+      await db.execute(
+        Sql.named('''
+          UPDATE users SET account_status = 'ACTIVE', updated_at = NOW()
+          WHERE id = @user_id AND account_status IN
+            ('SUSPENDED', 'PERMANENTLY_SUSPENDED')
+        '''),
+        parameters: {'user_id': userId},
+      );
+    }
+    return banRow;
+  }
+
+  Future<bool> revokeUserSessionByToken(String token) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        UPDATE user_sessions SET revoked_at = NOW()
+        WHERE token = @token AND revoked_at IS NULL
+        RETURNING token
+      '''),
+      parameters: {'token': token},
+    );
+    return result.isNotEmpty;
   }
 
   Future<void> close() async {
