@@ -4399,6 +4399,208 @@ class PhoenixDatabase {
     );
   }
 
+  /// Alle PHÖNIX-Tipps für das Control Center (Section 14) - dieselbe
+  /// "letzte Analyse pro Fixture"-Auswahl wie die App
+  /// (analyses/preparedFootballAnalyses), aber gespeist aus
+  /// `football_analysis_history`, weil dort zusätzlich Settlement-Ergebnis
+  /// (`result_status`/`profit_units`), Value-Flag und Modellversion pro Lauf
+  /// erhalten bleiben. So zeigt das Control Center garantiert dieselben
+  /// Tipps wie die App, nur mit mehr Kontext für Mitarbeiter.
+  Future<Map<String, Object?>> listFootballTipsAdmin({
+    String? dateFrom,
+    String? dateTo,
+    String? leagueId,
+    String? teamId,
+    String? marketKey,
+    String? resultStatus,
+    int? minDataQuality,
+    int? minConfidence,
+    String? modelVersion,
+    bool? isValueTip,
+    bool? hasTip,
+    String? whitelistStatus,
+    int limit = 50,
+    int offset = 0,
+  }) async {
+    final db = await connection();
+    final conditions = <String>[];
+    final parameters = <String, Object?>{};
+
+    if (dateFrom != null && dateFrom.trim().isNotEmpty) {
+      conditions.add('l.prediction_date >= CAST(@date_from AS DATE)');
+      parameters['date_from'] = dateFrom.trim();
+    }
+    if (dateTo != null && dateTo.trim().isNotEmpty) {
+      conditions.add('l.prediction_date <= CAST(@date_to AS DATE)');
+      parameters['date_to'] = dateTo.trim();
+    }
+    if (leagueId != null && leagueId.trim().isNotEmpty) {
+      conditions.add('m.league_id = @league_id');
+      parameters['league_id'] = leagueId.trim();
+    }
+    if (teamId != null && teamId.trim().isNotEmpty) {
+      conditions.add('(m.home_team_id = @team_id OR m.away_team_id = @team_id)');
+      parameters['team_id'] = teamId.trim();
+    }
+    if (marketKey != null && marketKey.trim().isNotEmpty) {
+      conditions.add('l.market_key = @market_key');
+      parameters['market_key'] = marketKey.trim();
+    }
+    if (resultStatus != null && resultStatus.trim().isNotEmpty) {
+      conditions.add('l.result_status = @result_status');
+      parameters['result_status'] = resultStatus.trim();
+    }
+    if (minDataQuality != null) {
+      conditions.add('l.data_quality >= @min_data_quality');
+      parameters['min_data_quality'] = minDataQuality.clamp(0, 100);
+    }
+    if (minConfidence != null) {
+      conditions.add('l.confidence >= @min_confidence');
+      parameters['min_confidence'] = minConfidence.clamp(0, 100);
+    }
+    if (modelVersion != null && modelVersion.trim().isNotEmpty) {
+      conditions.add('l.model_version = @model_version');
+      parameters['model_version'] = modelVersion.trim();
+    }
+    if (isValueTip != null) {
+      conditions.add(
+        "COALESCE((l.payload #>> '{selection,value,isValueTip}')::boolean, false) = @is_value_tip",
+      );
+      parameters['is_value_tip'] = isValueTip;
+    }
+    if (hasTip != null) {
+      conditions.add(hasTip ? "l.market_key <> ''" : "l.market_key = ''");
+    }
+    if (whitelistStatus != null && whitelistStatus.trim().isNotEmpty) {
+      conditions.add('fl.manual_status = @whitelist_status');
+      parameters['whitelist_status'] = whitelistStatus.trim();
+    }
+
+    final whereClause =
+        conditions.isEmpty ? '' : 'WHERE ${conditions.join(' AND ')}';
+
+    final rows = await db.execute(
+      Sql.named('''
+        WITH latest AS (
+          SELECT DISTINCT ON (fixture_id) *
+          FROM football_analysis_history
+          ORDER BY fixture_id, created_at DESC
+        )
+        SELECT
+          l.phase_two_scan_run_id, l.fixture_id, l.prediction_date, l.kickoff,
+          l.model_version, l.market_key, l.market_label, l.model_probability,
+          l.fair_odds, l.market_odds, l.assigned_units, l.data_quality,
+          l.confidence, l.result_status, l.home_score, l.away_score,
+          l.profit_units, l.settled_at, l.created_at,
+          COALESCE((l.payload #>> '{selection,value,isValueTip}')::boolean, false)
+            AS is_value_tip,
+          COALESCE(
+            NULLIF(l.payload #>> '{selection,value,valuePercent}', '')::double precision,
+            0
+          ) AS value_percent,
+          COALESCE((l.payload->>'simulationCount')::int, 0) AS simulation_count,
+          m.league_id, m.league_name, m.country,
+          m.home_team_id, m.home_team_name, m.home_logo,
+          m.away_team_id, m.away_team_name, m.away_logo,
+          m.status AS match_status,
+          fl.manual_status AS whitelist_status
+        FROM latest l
+        INNER JOIN football_matches m ON m.id = l.fixture_id
+        LEFT JOIN football_leagues fl ON fl.league_id = m.league_id
+        $whereClause
+        ORDER BY l.kickoff DESC NULLS LAST
+        LIMIT @limit OFFSET @offset
+      '''),
+      parameters: {...parameters, 'limit': limit.clamp(1, 200), 'offset': offset.clamp(0, 1 << 30)},
+    );
+
+    final countRows = await db.execute(
+      Sql.named('''
+        WITH latest AS (
+          SELECT DISTINCT ON (fixture_id) *
+          FROM football_analysis_history
+          ORDER BY fixture_id, created_at DESC
+        )
+        SELECT COUNT(*) AS total
+        FROM latest l
+        INNER JOIN football_matches m ON m.id = l.fixture_id
+        LEFT JOIN football_leagues fl ON fl.league_id = m.league_id
+        $whereClause
+      '''),
+      parameters: parameters,
+    );
+    final total = int.tryParse(
+          countRows.first.toColumnMap()['total']?.toString() ?? '',
+        ) ??
+        0;
+
+    final tips = rows.map((row) {
+      final value = Map<String, Object?>.from(row.toColumnMap());
+      for (final key in const [
+        'prediction_date',
+        'kickoff',
+        'settled_at',
+        'created_at',
+      ]) {
+        final timestamp = value[key];
+        if (timestamp is DateTime) {
+          value[key] = timestamp.toUtc().toIso8601String();
+        }
+      }
+      return value;
+    }).toList(growable: false);
+
+    return {
+      'tips': tips,
+      'total': total,
+      'limit': limit,
+      'offset': offset,
+    };
+  }
+
+  /// Vollständige Analyse-Historie (alle Läufe, nicht nur der letzte) für ein
+  /// einzelnes Fixture - Section 17 "Analyse-Historie" im Control Center.
+  Future<List<Map<String, Object?>>> footballAnalysisHistoryForFixture(
+    String fixtureId,
+  ) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT
+          phase_two_scan_run_id, fixture_id, prediction_date, kickoff,
+          model_version, market_key, market_label, model_probability,
+          fair_odds, market_odds, assigned_units, data_quality, confidence,
+          result_status, home_score, away_score, profit_units, settled_at,
+          created_at,
+          COALESCE((payload #>> '{selection,value,isValueTip}')::boolean, false)
+            AS is_value_tip,
+          COALESCE(
+            NULLIF(payload #>> '{selection,value,valuePercent}', '')::double precision,
+            0
+          ) AS value_percent
+        FROM football_analysis_history
+        WHERE fixture_id = @fixture_id
+        ORDER BY created_at ASC
+      '''),
+      parameters: {'fixture_id': fixtureId},
+    );
+    return result.map((row) {
+      final value = Map<String, Object?>.from(row.toColumnMap());
+      for (final key in const [
+        'prediction_date',
+        'kickoff',
+        'settled_at',
+        'created_at',
+      ]) {
+        final timestamp = value[key];
+        if (timestamp is DateTime) {
+          value[key] = timestamp.toUtc().toIso8601String();
+        }
+      }
+      return value;
+    }).toList(growable: false);
+  }
+
   Future<List<Map<String, Object?>>> footballTipsForSettlement({
     DateTime? date,
     bool reconcile = false,

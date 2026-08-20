@@ -1314,6 +1314,59 @@ class ApiRoutes {
       }
     });
 
+    // Section 14: eine Tippübersicht, die garantiert dieselbe Quelle wie die
+    // App verwendet (letzte Analyse pro Fixture), mit Filtern für Mitarbeiter.
+    router.get('/api/admin/football/tips', (Request request) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+      final query = request.url.queryParameters;
+      final limit = clampListLimit(int.tryParse(query['limit'] ?? ''));
+      final offset = clampOffset(int.tryParse(query['offset'] ?? ''));
+      try {
+        final result = await database.listFootballTipsAdmin(
+          dateFrom: query['dateFrom'],
+          dateTo: query['dateTo'],
+          leagueId: query['leagueId'],
+          teamId: query['teamId'],
+          marketKey: query['marketKey'],
+          resultStatus: query['resultStatus'],
+          minDataQuality: int.tryParse(query['minDataQuality'] ?? ''),
+          minConfidence: int.tryParse(query['minConfidence'] ?? ''),
+          modelVersion: query['modelVersion'],
+          isValueTip: parseBoolParam(query['isValueTip']),
+          hasTip: parseBoolParam(query['hasTip']),
+          whitelistStatus: query['whitelistStatus'],
+          limit: limit,
+          offset: offset,
+        );
+        return jsonResponse(_jsonSafe(result));
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
+    router.get('/api/admin/football/tips/<fixtureId>/history', (
+      Request request,
+      String fixtureId,
+    ) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+      try {
+        final history = await database.footballAnalysisHistoryForFixture(
+          fixtureId,
+        );
+        return jsonResponse(_jsonSafe({
+          'fixtureId': fixtureId,
+          'count': history.length,
+          'history': history,
+        }));
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
     router.get('/api/admin/football/assets', (Request request) async {
       if (!_isAdmin(request)) {
         return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
