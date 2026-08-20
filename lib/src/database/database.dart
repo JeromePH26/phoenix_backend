@@ -1519,7 +1519,11 @@ class PhoenixDatabase {
           ADD COLUMN IF NOT EXISTS analysis_enabled BOOLEAN NOT NULL DEFAULT TRUE,
           ADD COLUMN IF NOT EXISTS tip_enabled BOOLEAN NOT NULL DEFAULT TRUE,
           ADD COLUMN IF NOT EXISTS learning_enabled BOOLEAN NOT NULL DEFAULT TRUE,
-          ADD COLUMN IF NOT EXISTS live_enabled BOOLEAN NOT NULL DEFAULT TRUE
+          ADD COLUMN IF NOT EXISTS live_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+          ADD COLUMN IF NOT EXISTS status_locked BOOLEAN NOT NULL DEFAULT FALSE,
+          ADD COLUMN IF NOT EXISTS status_lock_reason TEXT,
+          ADD COLUMN IF NOT EXISTS status_locked_by_employee_id BIGINT,
+          ADD COLUMN IF NOT EXISTS status_locked_at TIMESTAMPTZ
       ''');
     });
   }
@@ -3909,7 +3913,17 @@ class PhoenixDatabase {
         )
         ON CONFLICT (id) DO UPDATE SET
           kickoff_utc = EXCLUDED.kickoff_utc,
-          status = EXCLUDED.status,
+          -- Section "manuelle Statusübersteuerung": ein von einem Mitarbeiter
+          -- gesperrtes Spiel (z.B. manuell als "Abgesagt" markiert) darf
+          -- nicht durch den nächsten Provider-Sync stillschweigend
+          -- überschrieben werden. status_locked bleibt aktiv, bis ein
+          -- Mitarbeiter es bewusst wieder aufhebt (clearFootballMatchStatusOverride).
+          status = CASE WHEN football_matches.status_locked
+            THEN football_matches.status ELSE EXCLUDED.status END,
+          home_goals = CASE WHEN football_matches.status_locked
+            THEN football_matches.home_goals ELSE EXCLUDED.home_goals END,
+          away_goals = CASE WHEN football_matches.status_locked
+            THEN football_matches.away_goals ELSE EXCLUDED.away_goals END,
           league_id = EXCLUDED.league_id,
           league_name = EXCLUDED.league_name,
           country = EXCLUDED.country,
@@ -3919,8 +3933,6 @@ class PhoenixDatabase {
           away_team_id = EXCLUDED.away_team_id,
           away_team_name = EXCLUDED.away_team_name,
           away_logo = EXCLUDED.away_logo,
-          home_goals = EXCLUDED.home_goals,
-          away_goals = EXCLUDED.away_goals,
           raw_json = EXCLUDED.raw_json,
           updated_at = NOW()
       '''),
@@ -6594,7 +6606,7 @@ class PhoenixDatabase {
           m.away_team_id, m.away_team_name, m.away_logo,
           m.home_goals, m.away_goals,
           m.visible, m.analysis_enabled, m.tip_enabled, m.learning_enabled,
-          m.live_enabled,
+          m.live_enabled, m.status_locked, m.status_lock_reason,
           EXISTS (
             SELECT 1 FROM analyses a
             WHERE a.sport = 'football' AND a.match_id = m.id
@@ -6645,7 +6657,8 @@ class PhoenixDatabase {
           m.away_team_id, m.away_team_name, m.away_logo,
           m.home_goals, m.away_goals, m.raw_json,
           m.visible, m.analysis_enabled, m.tip_enabled, m.learning_enabled,
-          m.live_enabled, m.updated_at
+          m.live_enabled, m.status_locked, m.status_lock_reason,
+          m.status_locked_at, m.updated_at
         FROM football_matches m
         WHERE m.id = @id
       '''),
@@ -6743,6 +6756,71 @@ class PhoenixDatabase {
     );
 
     return previous;
+  }
+
+  static const Set<String> footballMatchStatusCodes = {
+    'TBD', 'NS', '1H', 'HT', '2H', 'ET', 'BT', 'P', 'SUSP', 'INT', 'LIVE',
+    'FT', 'AET', 'PEN', 'PST', 'CANC', 'ABD', 'AWD', 'WO',
+  };
+
+  /// Manuelle Statusübersteuerung (z.B. ein abgesagtes Spiel, bevor der
+  /// Provider das selbst meldet). Setzt `status_locked = TRUE`, wodurch der
+  /// nächste automatische Sync (`upsertFootballMatchFromPayload`) diesen
+  /// Status NICHT mehr überschreibt, bis ein Mitarbeiter die Sperre bewusst
+  /// wieder aufhebt. Wirkt sofort auf alle Leseabfragen, die `m.status`
+  /// verwenden (u.a. `/api/football/analyses/*`, an die die App sich hält) -
+  /// keine separate "Override"-Spalte, die extra durchgereicht werden müsste.
+  Future<Map<String, Object?>?> setFootballMatchStatusOverride({
+    required String id,
+    required String status,
+    required String reason,
+    int? employeeId,
+  }) async {
+    if (!footballMatchStatusCodes.contains(status)) {
+      throw ArgumentError('Ungültiger Status-Code: $status');
+    }
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        UPDATE football_matches SET
+          status = @status,
+          status_locked = TRUE,
+          status_lock_reason = @reason,
+          status_locked_by_employee_id = @employee_id,
+          status_locked_at = NOW(),
+          updated_at = NOW()
+        WHERE id = @id
+        RETURNING id, status, status_locked, status_lock_reason
+      '''),
+      parameters: {
+        'id': id,
+        'status': status,
+        'reason': reason,
+        'employee_id': employeeId,
+      },
+    );
+    if (result.isEmpty) return null;
+    return Map<String, Object?>.from(result.first.toColumnMap());
+  }
+
+  /// Hebt die manuelle Sperre wieder auf - der zuletzt gesetzte Status bleibt
+  /// stehen, bis der nächste reguläre Provider-Sync ihn aktualisiert.
+  Future<Map<String, Object?>?> clearFootballMatchStatusOverride(
+    String id,
+  ) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        UPDATE football_matches SET
+          status_locked = FALSE,
+          updated_at = NOW()
+        WHERE id = @id
+        RETURNING id, status, status_locked
+      '''),
+      parameters: {'id': id},
+    );
+    if (result.isEmpty) return null;
+    return Map<String, Object?>.from(result.first.toColumnMap());
   }
 
   /// Team-/Liga-Wappen-Inventar für `GET /api/admin/football/assets`:

@@ -1314,6 +1314,104 @@ class ApiRoutes {
       }
     });
 
+    // Manuelle Statusübersteuerung (z.B. ein abgesagtes Spiel): sperrt den
+    // Status gegen den nächsten automatischen Provider-Sync und wirkt sofort
+    // auf alles, was die App liest (siehe setFootballMatchStatusOverride).
+    router.post('/api/admin/football/matches/<id>/status', (
+      Request request,
+      String id,
+    ) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+
+      Map<String, dynamic> body;
+      try {
+        final decoded = jsonDecode(await request.readAsString());
+        if (decoded is! Map<String, dynamic>) {
+          return jsonResponse({'error': 'Ungültiger JSON-Body.'},
+              statusCode: 400);
+        }
+        body = decoded;
+      } catch (_) {
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'},
+            statusCode: 400);
+      }
+
+      final status = body['status']?.toString().trim() ?? '';
+      final reason = body['reason']?.toString().trim() ?? '';
+      if (status.isEmpty) {
+        return jsonResponse({'error': 'status ist erforderlich.'},
+            statusCode: 400);
+      }
+      if (reason.isEmpty) {
+        return jsonResponse({'error': 'reason ist erforderlich.'},
+            statusCode: 400);
+      }
+
+      try {
+        final updated = await database.setFootballMatchStatusOverride(
+          id: id,
+          status: status,
+          reason: reason,
+        );
+        if (updated == null) {
+          return jsonResponse({'error': 'Spiel nicht gefunden.'},
+              statusCode: 404);
+        }
+
+        await database.insertAdminAuditLog(
+          employeeId: null,
+          employeeLogin: 'legacy_admin_token',
+          area: 'football',
+          objectType: 'match',
+          objectId: id,
+          action: 'match.status_override',
+          newValue: {'status': status},
+          reason: reason,
+          ip: _clientIp(request),
+        );
+
+        return jsonResponse(_jsonSafe({'match': updated}));
+      } on ArgumentError catch (error) {
+        return jsonResponse({'error': error.message.toString()},
+            statusCode: 400);
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
+    router.post('/api/admin/football/matches/<id>/status/clear', (
+      Request request,
+      String id,
+    ) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+
+      try {
+        final updated = await database.clearFootballMatchStatusOverride(id);
+        if (updated == null) {
+          return jsonResponse({'error': 'Spiel nicht gefunden.'},
+              statusCode: 404);
+        }
+
+        await database.insertAdminAuditLog(
+          employeeId: null,
+          employeeLogin: 'legacy_admin_token',
+          area: 'football',
+          objectType: 'match',
+          objectId: id,
+          action: 'match.status_override_clear',
+          ip: _clientIp(request),
+        );
+
+        return jsonResponse(_jsonSafe({'match': updated}));
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
     // Section 14: eine Tippübersicht, die garantiert dieselbe Quelle wie die
     // App verwendet (letzte Analyse pro Fixture), mit Filtern für Mitarbeiter.
     router.get('/api/admin/football/tips', (Request request) async {
