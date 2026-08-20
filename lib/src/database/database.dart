@@ -4671,6 +4671,310 @@ class PhoenixDatabase {
     }).toList(growable: false);
   }
 
+  /// Section "PHÖNIX Analytics-Profile", Punkt 23 (verbindlich): Trefferquote/
+  /// ROI/Yield werden HIER, serverseitig, über den vollständigen gefilterten
+  /// Datensatz berechnet - niemals im Frontend aus einer paginierten Zeilen-
+  /// menge. Nutzt exakt dieselbe Formel wie [footballPerformanceSummary]
+  /// (Punkt 24: eine zentrale Definition, nicht zweimal unterschiedlich
+  /// erfunden): Trefferquote = gewonnen / (gewonnen + verloren), Void/Push
+  /// zählen nicht als verloren; ROI = Gewinn / Einsatz. "Yield" ist bei
+  /// PHÖNIX' einheitlicher 1-Unit-Einsatzgröße rechnerisch identisch zur ROI
+  /// (Einsatz pro gezähltem Tipp ist konstant) - wird deshalb bewusst NICHT
+  /// separat neu erfunden, sondern als derselbe Wert mit eigenem Label
+  /// zurückgegeben (das Frontend erklärt das per Tooltip, keine stille
+  /// Verdopplung ohne Erklärung).
+  ///
+  /// Basis ist wie bei [footballPerformanceSummary] die "first_predictions"-
+  /// Auswahl (erste Analyse je Tag x Fixture) - ein späterer Rescan
+  /// desselben Tages darf dieselbe Wette nicht doppelt zählen.
+  Future<Map<String, Object?>> footballEntityPerformance({
+    String? leagueId,
+    String? teamId,
+    String? marketKey,
+    DateTime? dateFrom,
+    DateTime? dateTo,
+    String? homeAway,
+    int? minDataQuality,
+    int? minConfidence,
+    double? minValue,
+    String? groupByTime,
+    bool includeMarketBreakdown = false,
+    bool includePreviousPeriod = false,
+  }) async {
+    final db = await connection();
+    final conditions = <String>[];
+    final parameters = <String, Object?>{};
+
+    if (leagueId != null && leagueId.trim().isNotEmpty) {
+      conditions.add('m.league_id = @league_id');
+      parameters['league_id'] = leagueId.trim();
+    }
+    if (teamId != null && teamId.trim().isNotEmpty) {
+      if (homeAway == 'home') {
+        conditions.add('m.home_team_id = @team_id');
+      } else if (homeAway == 'away') {
+        conditions.add('m.away_team_id = @team_id');
+      } else {
+        conditions.add('(m.home_team_id = @team_id OR m.away_team_id = @team_id)');
+      }
+      parameters['team_id'] = teamId.trim();
+    }
+    if (marketKey != null && marketKey.trim().isNotEmpty) {
+      conditions.add('h.market_key = @market_key');
+      parameters['market_key'] = marketKey.trim();
+    }
+    if (minDataQuality != null) {
+      conditions.add('h.data_quality >= @min_dq');
+      parameters['min_dq'] = minDataQuality.clamp(0, 100);
+    }
+    if (minConfidence != null) {
+      conditions.add('h.confidence >= @min_conf');
+      parameters['min_conf'] = minConfidence.clamp(0, 100);
+    }
+    if (minValue != null) {
+      conditions.add('''
+        COALESCE(NULLIF(h.payload #>> '{selection,value,valuePercent}', ''), '0')::double precision
+          >= @min_value
+      ''');
+      parameters['min_value'] = minValue;
+    }
+
+    Future<Map<String, Object?>> summaryFor(
+      DateTime? from,
+      DateTime? to,
+    ) async {
+      final periodConditions = List<String>.from(conditions);
+      final periodParameters = Map<String, Object?>.from(parameters);
+      if (from != null) {
+        periodConditions.add('h.kickoff >= @date_from');
+        periodParameters['date_from'] = from.toUtc();
+      }
+      if (to != null) {
+        periodConditions.add('h.kickoff < @date_to');
+        periodParameters['date_to'] = to.toUtc();
+      }
+      final where =
+          periodConditions.isEmpty ? '' : 'WHERE ${periodConditions.join(' AND ')}';
+
+      final result = await db.execute(
+        Sql.named('''
+          WITH first_predictions AS (
+            SELECT DISTINCT ON (h.prediction_date, h.fixture_id)
+              h.market_key, h.market_odds, h.assigned_units, h.result_status,
+              h.profit_units, h.kickoff,
+              COALESCE(
+                NULLIF(h.payload #>> '{selection,value,valuePercent}', ''), '0'
+              )::double precision AS value_percent
+            FROM football_analysis_history h
+            INNER JOIN football_matches m ON m.id = h.fixture_id
+            $where
+            ORDER BY h.prediction_date, h.fixture_id, h.created_at ASC
+          )
+          SELECT
+            COUNT(*) AS total,
+            COUNT(*) FILTER (WHERE market_key <> '') AS with_tip,
+            COUNT(*) FILTER (WHERE result_status = 'pending') AS pending,
+            COUNT(*) FILTER (WHERE result_status = 'won' AND assigned_units > 0) AS won,
+            COUNT(*) FILTER (WHERE result_status = 'lost' AND assigned_units > 0) AS lost,
+            COUNT(*) FILTER (WHERE result_status = 'push' AND assigned_units > 0) AS push,
+            COALESCE(SUM(assigned_units) FILTER (
+              WHERE result_status IN ('won','lost','push') AND assigned_units > 0
+            ), 0) AS staked_units,
+            COALESCE(SUM(profit_units) FILTER (
+              WHERE result_status IN ('won','lost','push') AND assigned_units > 0
+            ), 0) AS profit_units,
+            AVG(market_odds) FILTER (WHERE market_odds > 1) AS avg_odds,
+            AVG(value_percent) FILTER (WHERE market_key <> '') AS avg_value
+          FROM first_predictions
+        '''),
+        parameters: periodParameters,
+      );
+      final row = Map<String, Object?>.from(result.first.toColumnMap());
+
+      int integer(String key) => int.tryParse(row[key]?.toString() ?? '') ?? 0;
+      double number(String key) =>
+          double.tryParse(row[key]?.toString() ?? '') ?? 0;
+
+      final won = integer('won');
+      final lost = integer('lost');
+      final decided = won + lost;
+      final staked = number('staked_units');
+      final profit = number('profit_units');
+      final roiPercent = staked == 0 ? null : profit / staked * 100;
+
+      return {
+        'sampleSize': integer('total'),
+        'withTip': integer('with_tip'),
+        'pending': integer('pending'),
+        'won': won,
+        'lost': lost,
+        'push': integer('push'),
+        'hitRatePercent': decided == 0 ? null : won / decided * 100,
+        'stakedUnits': staked,
+        'profitUnits': profit,
+        'roiPercent': roiPercent,
+        'yieldPercent': roiPercent,
+        'avgOdds': row['avg_odds'] == null ? null : number('avg_odds'),
+        'avgValuePercent': row['avg_value'] == null ? null : number('avg_value'),
+      };
+    }
+
+    final summary = await summaryFor(dateFrom, dateTo);
+
+    Map<String, Object?>? previousPeriod;
+    if (includePreviousPeriod && dateFrom != null && dateTo != null) {
+      final spanMs = dateTo.difference(dateFrom).inMilliseconds;
+      if (spanMs > 0) {
+        final prevTo = dateFrom;
+        final prevFrom = dateFrom.subtract(Duration(milliseconds: spanMs));
+        previousPeriod = await summaryFor(prevFrom, prevTo);
+      }
+    }
+
+    List<Map<String, Object?>>? byMarket;
+    if (includeMarketBreakdown) {
+      final marketConditions = List<String>.from(conditions);
+      final marketParameters = Map<String, Object?>.from(parameters);
+      if (dateFrom != null) {
+        marketConditions.add('h.kickoff >= @date_from');
+        marketParameters['date_from'] = dateFrom.toUtc();
+      }
+      if (dateTo != null) {
+        marketConditions.add('h.kickoff < @date_to');
+        marketParameters['date_to'] = dateTo.toUtc();
+      }
+      final where =
+          marketConditions.isEmpty ? '' : 'WHERE ${marketConditions.join(' AND ')}';
+
+      final rows = await db.execute(
+        Sql.named('''
+          WITH first_predictions AS (
+            SELECT DISTINCT ON (h.prediction_date, h.fixture_id)
+              h.market_key, h.market_label, h.market_odds, h.assigned_units,
+              h.result_status, h.profit_units, h.kickoff
+            FROM football_analysis_history h
+            INNER JOIN football_matches m ON m.id = h.fixture_id
+            $where
+            ORDER BY h.prediction_date, h.fixture_id, h.created_at ASC
+          )
+          SELECT
+            market_key, MAX(market_label) AS market_label,
+            COUNT(*) FILTER (WHERE result_status = 'won' AND assigned_units > 0) AS won,
+            COUNT(*) FILTER (WHERE result_status = 'lost' AND assigned_units > 0) AS lost,
+            COUNT(*) FILTER (WHERE result_status = 'push' AND assigned_units > 0) AS push,
+            COALESCE(SUM(assigned_units) FILTER (
+              WHERE result_status IN ('won','lost','push') AND assigned_units > 0
+            ), 0) AS staked_units,
+            COALESCE(SUM(profit_units) FILTER (
+              WHERE result_status IN ('won','lost','push') AND assigned_units > 0
+            ), 0) AS profit_units,
+            AVG(market_odds) FILTER (WHERE market_odds > 1) AS avg_odds
+          FROM first_predictions
+          WHERE market_key <> ''
+          GROUP BY market_key
+          ORDER BY market_key
+        '''),
+        parameters: marketParameters,
+      );
+      byMarket = rows.map((r) {
+        final row = Map<String, Object?>.from(r.toColumnMap());
+        int integer(String key) => int.tryParse(row[key]?.toString() ?? '') ?? 0;
+        double number(String key) =>
+            double.tryParse(row[key]?.toString() ?? '') ?? 0;
+        final won = integer('won');
+        final lost = integer('lost');
+        final decided = won + lost;
+        final staked = number('staked_units');
+        final profit = number('profit_units');
+        final roiPercent = staked == 0 ? null : profit / staked * 100;
+        return {
+          'marketKey': row['market_key'],
+          'marketLabel': row['market_label'],
+          'won': won,
+          'lost': lost,
+          'push': integer('push'),
+          'sampleSize': won + lost + integer('push'),
+          'hitRatePercent': decided == 0 ? null : won / decided * 100,
+          'profitUnits': profit,
+          'roiPercent': roiPercent,
+          'yieldPercent': roiPercent,
+          'avgOdds': row['avg_odds'] == null ? null : number('avg_odds'),
+        };
+      }).toList(growable: false);
+    }
+
+    List<Map<String, Object?>>? timeSeries;
+    if (groupByTime != null &&
+        {'day', 'week', 'month'}.contains(groupByTime)) {
+      final seriesConditions = List<String>.from(conditions);
+      final seriesParameters = Map<String, Object?>.from(parameters);
+      if (dateFrom != null) {
+        seriesConditions.add('h.kickoff >= @date_from');
+        seriesParameters['date_from'] = dateFrom.toUtc();
+      }
+      if (dateTo != null) {
+        seriesConditions.add('h.kickoff < @date_to');
+        seriesParameters['date_to'] = dateTo.toUtc();
+      }
+      final where =
+          seriesConditions.isEmpty ? '' : 'WHERE ${seriesConditions.join(' AND ')}';
+
+      final rows = await db.execute(
+        Sql.named('''
+          WITH first_predictions AS (
+            SELECT DISTINCT ON (h.prediction_date, h.fixture_id)
+              h.assigned_units, h.result_status, h.profit_units, h.kickoff
+            FROM football_analysis_history h
+            INNER JOIN football_matches m ON m.id = h.fixture_id
+            $where
+            ORDER BY h.prediction_date, h.fixture_id, h.created_at ASC
+          )
+          SELECT
+            date_trunc(@bucket, kickoff) AS period,
+            COUNT(*) FILTER (WHERE result_status = 'won' AND assigned_units > 0) AS won,
+            COUNT(*) FILTER (WHERE result_status = 'lost' AND assigned_units > 0) AS lost,
+            COALESCE(SUM(assigned_units) FILTER (
+              WHERE result_status IN ('won','lost','push') AND assigned_units > 0
+            ), 0) AS staked_units,
+            COALESCE(SUM(profit_units) FILTER (
+              WHERE result_status IN ('won','lost','push') AND assigned_units > 0
+            ), 0) AS profit_units
+          FROM first_predictions
+          WHERE kickoff IS NOT NULL
+          GROUP BY period
+          ORDER BY period
+        '''),
+        parameters: {...seriesParameters, 'bucket': groupByTime},
+      );
+      timeSeries = rows.map((r) {
+        final row = Map<String, Object?>.from(r.toColumnMap());
+        int integer(String key) => int.tryParse(row[key]?.toString() ?? '') ?? 0;
+        double number(String key) =>
+            double.tryParse(row[key]?.toString() ?? '') ?? 0;
+        final won = integer('won');
+        final lost = integer('lost');
+        final decided = won + lost;
+        final staked = number('staked_units');
+        final profit = number('profit_units');
+        final period = row['period'];
+        return {
+          'period': period is DateTime ? period.toUtc().toIso8601String() : period,
+          'won': won,
+          'lost': lost,
+          'hitRatePercent': decided == 0 ? null : won / decided * 100,
+          'roiPercent': staked == 0 ? null : profit / staked * 100,
+        };
+      }).toList(growable: false);
+    }
+
+    return {
+      'summary': summary,
+      if (previousPeriod != null) 'previousPeriod': previousPeriod,
+      if (byMarket != null) 'byMarket': byMarket,
+      if (timeSeries != null) 'timeSeries': timeSeries,
+    };
+  }
+
   Future<List<Map<String, Object?>>> footballTipsForSettlement({
     DateTime? date,
     bool reconcile = false,

@@ -1504,6 +1504,39 @@ class ApiRoutes {
       }
     });
 
+    // Serverseitige Performance-Aggregation (Ligen-/Team-Analytics-Profile,
+    // Punkt 23): rechnet immer über den vollständigen gefilterten
+    // Datensatz, nie nur über eine Seite Tabellenzeilen.
+    router.get('/api/admin/football/performance/aggregate', (
+      Request request,
+    ) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+      final query = request.url.queryParameters;
+      DateTime? parseDate(String? raw) =>
+          raw == null || raw.isEmpty ? null : DateTime.tryParse(raw);
+      try {
+        final result = await database.footballEntityPerformance(
+          leagueId: query['leagueId'],
+          teamId: query['teamId'],
+          marketKey: query['marketKey'],
+          dateFrom: parseDate(query['dateFrom']),
+          dateTo: parseDate(query['dateTo']),
+          homeAway: query['homeAway'],
+          minDataQuality: int.tryParse(query['minDataQuality'] ?? ''),
+          minConfidence: int.tryParse(query['minConfidence'] ?? ''),
+          minValue: double.tryParse(query['minValue'] ?? ''),
+          groupByTime: query['groupByTime'],
+          includeMarketBreakdown: query['includeMarketBreakdown'] == 'true',
+          includePreviousPeriod: query['includePreviousPeriod'] == 'true',
+        );
+        return jsonResponse(_jsonSafe(result));
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
     router.get('/api/admin/football/assets', (Request request) async {
       if (!_isAdmin(request)) {
         return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
