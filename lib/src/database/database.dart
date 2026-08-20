@@ -7387,6 +7387,109 @@ class PhoenixDatabase {
     return Map<String, Object?>.from(rows.first.toColumnMap());
   }
 
+  /// "Teams"-Tab im Liga-Analytics-Profil: alle Teams dieser Liga mit
+  /// gespeicherten/analysierten Spielen, PHÖNIX-Tipps und Performance -
+  /// reine Wiederverwendung derselben Trefferquote-/ROI-Formel wie
+  /// [footballEntityPerformance] (Section 24), nicht neu erfunden.
+  Future<List<Map<String, Object?>>> footballLeagueTeams(
+    String leagueId,
+  ) async {
+    final db = await connection();
+    final rows = await db.execute(
+      Sql.named('''
+        WITH team_fixtures AS (
+          SELECT home_team_id AS team_id, id AS fixture_id
+          FROM football_matches
+          WHERE league_id = @league_id AND home_team_id <> ''
+          UNION ALL
+          SELECT away_team_id, id
+          FROM football_matches
+          WHERE league_id = @league_id AND away_team_id <> ''
+        ),
+        teams AS (
+          SELECT DISTINCT ON (id) id, name, logo
+          FROM (
+            SELECT home_team_id AS id, home_team_name AS name,
+                   home_logo AS logo, kickoff_utc
+            FROM football_matches
+            WHERE league_id = @league_id AND home_team_id <> ''
+            UNION ALL
+            SELECT away_team_id, away_team_name, away_logo, kickoff_utc
+            FROM football_matches
+            WHERE league_id = @league_id AND away_team_id <> ''
+          ) t
+          ORDER BY id, kickoff_utc DESC
+        ),
+        stored AS (
+          SELECT team_id, COUNT(DISTINCT fixture_id) AS stored_matches
+          FROM team_fixtures
+          GROUP BY team_id
+        ),
+        first_predictions AS (
+          SELECT DISTINCT ON (prediction_date, fixture_id)
+            fixture_id, market_key, result_status, assigned_units,
+            profit_units, data_quality
+          FROM football_analysis_history
+          ORDER BY prediction_date, fixture_id, created_at ASC
+        ),
+        team_predictions AS (
+          SELECT tf.team_id, fp.fixture_id, fp.market_key, fp.result_status,
+                 fp.assigned_units, fp.profit_units, fp.data_quality
+          FROM team_fixtures tf
+          INNER JOIN first_predictions fp ON fp.fixture_id = tf.fixture_id
+        ),
+        predicted AS (
+          SELECT
+            team_id,
+            COUNT(DISTINCT fixture_id) AS analyzed_matches,
+            COUNT(DISTINCT fixture_id)
+              FILTER (WHERE market_key IS NOT NULL) AS tips_count,
+            COUNT(*) FILTER (
+              WHERE assigned_units > 0 AND result_status = 'won'
+            ) AS won,
+            COUNT(*) FILTER (
+              WHERE assigned_units > 0 AND result_status = 'lost'
+            ) AS lost,
+            SUM(assigned_units) FILTER (WHERE assigned_units > 0) AS staked_units,
+            SUM(profit_units) FILTER (WHERE assigned_units > 0) AS profit_units,
+            ROUND(AVG(data_quality))::INTEGER AS avg_data_quality
+          FROM team_predictions
+          GROUP BY team_id
+        )
+        SELECT
+          t.id, t.name, t.logo,
+          COALESCE(s.stored_matches, 0) AS stored_matches,
+          COALESCE(p.analyzed_matches, 0) AS analyzed_matches,
+          COALESCE(p.tips_count, 0) AS tips_count,
+          COALESCE(p.won, 0) AS won,
+          COALESCE(p.lost, 0) AS lost,
+          COALESCE(p.staked_units, 0) AS staked_units,
+          COALESCE(p.profit_units, 0) AS profit_units,
+          p.avg_data_quality
+        FROM teams t
+        LEFT JOIN stored s ON s.team_id = t.id
+        LEFT JOIN predicted p ON p.team_id = t.id
+        ORDER BY t.name
+      '''),
+      parameters: {'league_id': leagueId},
+    );
+
+    double? asDouble(Object? value) =>
+        value == null ? null : double.tryParse(value.toString());
+
+    return rows.map((row) {
+      final map = Map<String, Object?>.from(row.toColumnMap());
+      final won = int.tryParse(map['won']?.toString() ?? '') ?? 0;
+      final lost = int.tryParse(map['lost']?.toString() ?? '') ?? 0;
+      final staked = asDouble(map['staked_units']) ?? 0;
+      final profit = asDouble(map['profit_units']) ?? 0;
+      map['hitRatePercent'] =
+          (won + lost) == 0 ? null : won / (won + lost) * 100;
+      map['roiPercent'] = staked == 0 ? null : profit / staked * 100;
+      return map;
+    }).toList(growable: false);
+  }
+
   Future<List<Map<String, Object?>>> footballAssetInventory({
     int sinceDays = 180,
   }) async {

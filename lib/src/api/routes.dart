@@ -1004,6 +1004,21 @@ class ApiRoutes {
       }
     });
 
+    router.get('/api/admin/football/leagues/<leagueId>/teams', (
+      Request request,
+      String leagueId,
+    ) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+      try {
+        final teams = await database.footballLeagueTeams(leagueId);
+        return jsonResponse(_jsonSafe({'teams': teams}));
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
     router.post('/api/admin/football/leagues/<leagueId>/status', (
       Request request,
       String leagueId,
