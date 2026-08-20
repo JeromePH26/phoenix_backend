@@ -823,6 +823,7 @@ class PhoenixDatabase {
     await _migrateSystemAuditHistory(db);
     await _migrateFootballMatchControls(db);
     await _migrateUserAccounts(db);
+    await _migrateFootballAssetsSchema(db);
 
     await db.execute('''
       INSERT INTO app_meta (key, value)
@@ -1510,6 +1511,62 @@ class PhoenixDatabase {
   /// taking the whole deploy down. Safe to just retry `migrate()` (next
   /// server start, or `POST /api/admin/migrate`) once the table is quieter -
   /// the `ADD COLUMN IF NOT EXISTS` itself stays fully idempotent.
+  /// Fund während des "alles muss laufen"-Audits: die Live-Produktions-
+  /// Tabelle `football_assets` wurde ursprünglich mit den Spalten
+  /// `entity_type`/`entity_id`/`image_bytes`/`size_bytes` angelegt. Der
+  /// aktuelle Code (CREATE TABLE weiter oben, alle Queries) erwartet aber
+  /// `asset_type`/`asset_id`/`content` - ein Schema-Drift, vermutlich aus
+  /// einer früheren, nie nachgezogenen Umbenennung. `CREATE TABLE IF NOT
+  /// EXISTS` verändert eine bereits existierende Tabelle nicht, deshalb blieb
+  /// das unbemerkt: `GET /api/admin/football/assets` warf 500
+  /// ("column a.asset_type does not exist"), und `saveFootballAsset()`
+  /// (Cache-Schreibpfad) schlug vermutlich seit dieser Divergenz immer fehl -
+  /// abgefangen durch den bewusst resilienten Fallback in
+  /// `FootballAssetService.serve()`, der bei einem Cache-Fehler einfach vom
+  /// Original-Quell-URL ausliefert. Bilder waren dadurch nie für Endnutzer
+  /// sichtbar kaputt, nur der eigene Cache wurde nie erfolgreich befüllt.
+  ///
+  /// RENAME COLUMN ist eine reine Katalog-Änderung (kein Table-Rewrite,
+  /// keine Downtime) und erhält alle 191 bereits gecachten Bilder. Die
+  /// PRIMARY-KEY-Definition folgt der Spaltenumbenennung automatisch.
+  /// `size_bytes` wird nullable, weil kein aktueller Code diese Spalte noch
+  /// befüllt (nicht gelöscht, um nichts Bestehendes zu zerstören).
+  Future<void> _migrateFootballAssetsSchema(Connection db) async {
+    await db.runTx((session) async {
+      await session.execute("SET LOCAL lock_timeout = '5s'");
+      await session.execute('''
+        DO \$\$
+        BEGIN
+          IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'football_assets' AND column_name = 'entity_type'
+          ) THEN
+            ALTER TABLE football_assets RENAME COLUMN entity_type TO asset_type;
+          END IF;
+          IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'football_assets' AND column_name = 'entity_id'
+          ) THEN
+            ALTER TABLE football_assets RENAME COLUMN entity_id TO asset_id;
+          END IF;
+          IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'football_assets' AND column_name = 'image_bytes'
+          ) THEN
+            ALTER TABLE football_assets RENAME COLUMN image_bytes TO content;
+          END IF;
+          IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'football_assets' AND column_name = 'size_bytes'
+              AND is_nullable = 'NO'
+          ) THEN
+            ALTER TABLE football_assets ALTER COLUMN size_bytes DROP NOT NULL;
+          END IF;
+        END \$\$;
+      ''');
+    });
+  }
+
   Future<void> _migrateFootballMatchControls(Connection db) async {
     await db.runTx((session) async {
       await session.execute("SET LOCAL lock_timeout = '5s'");
@@ -3272,6 +3329,7 @@ class PhoenixDatabase {
           ON s.league_id = l.league_id
         GROUP BY l.league_id
         ORDER BY l.last_seen_at DESC, l.league_name ASC
+        LIMIT @limit
       '''),
       parameters: {'limit': safeLimit},
     );
