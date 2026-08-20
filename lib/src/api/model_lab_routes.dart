@@ -523,6 +523,7 @@ class ModelLabRoutes {
         );
         markets.add({
           'market': market.key,
+          'marketLabel': market.label,
           'sampleSize': counts.eligible,
           'status': status.label,
           'champion': champion == null
