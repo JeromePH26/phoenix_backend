@@ -8249,6 +8249,42 @@ class PhoenixDatabase {
     };
   }
 
+  /// Section OVERVIEW: die drei Kennzahlen, die nicht bereits durch
+  /// footballDailyOverviewStats()/ModelLabRoutes.overview abgedeckt sind.
+  Future<Map<String, Object?>> controlCenterTodayStats() async {
+    final db = await connection();
+
+    final supportRows = await db.execute('''
+      SELECT COUNT(*) FROM support_tickets
+      WHERE status NOT IN ('GELOEST', 'GESCHLOSSEN')
+    ''');
+    final activeSupportCases =
+        int.tryParse(supportRows.first[0]?.toString() ?? '') ?? 0;
+
+    // "Aktiv" = innerhalb der letzten 24 Stunden etwas in der App getan
+    // (Session-Aktivität), nicht nur "jemals registriert".
+    final usersRows = await db.execute('''
+      SELECT COUNT(*) FROM users
+      WHERE last_active_at IS NOT NULL
+        AND last_active_at > NOW() - INTERVAL '24 hours'
+    ''');
+    final activeUsers =
+        int.tryParse(usersRows.first[0]?.toString() ?? '') ?? 0;
+
+    final liveRows = await db.execute('''
+      SELECT COUNT(*) FROM football_matches
+      WHERE status = ANY(ARRAY['1H','HT','2H','ET','BT','P','INT','LIVE'])
+    ''');
+    final activeLiveMatches =
+        int.tryParse(liveRows.first[0]?.toString() ?? '') ?? 0;
+
+    return {
+      'activeSupportCases': activeSupportCases,
+      'activeUsers': activeUsers,
+      'activeLiveMatches': activeLiveMatches,
+    };
+  }
+
   // -- Control Center /users (PHÖNIX Account System) -----------------------
 
   static const Set<String> _userManagedFields = {

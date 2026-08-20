@@ -886,10 +886,12 @@ class ControlCenterRoutes {
       final footballToday = await database.footballDailyOverviewStats(
         day: _berlinNow(),
       );
+      final todayStats = await database.controlCenterTodayStats();
 
       return jsonResponse({
         'apiUsage': apiUsage.map(_jsonSafe).toList(),
         'footballToday': footballToday,
+        'today': todayStats,
         'whitelist': {
           'auto': whitelistCounts['auto'] ?? 0,
           'whitelist': whitelistCounts['whitelist'] ?? 0,
