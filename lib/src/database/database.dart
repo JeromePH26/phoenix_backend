@@ -102,6 +102,26 @@ class PhoenixDatabase {
       )
     ''');
 
+    // Archiv früherer Wappen-Versionen: wird ausschließlich beim manuellen
+    // Ersetzen im Control Center befüllt (Section "Assets als echte
+    // Galerie"), NICHT beim automatischen Erst-Caching in
+    // FootballAssetService - dort gibt es nichts zu archivieren.
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS football_assets_history (
+        id BIGSERIAL PRIMARY KEY,
+        asset_type TEXT NOT NULL,
+        asset_id TEXT NOT NULL,
+        source_url TEXT NOT NULL DEFAULT '',
+        mime_type TEXT NOT NULL,
+        content BYTEA NOT NULL,
+        archived_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_football_assets_history_lookup
+      ON football_assets_history (asset_type, asset_id, archived_at DESC)
+    ''');
+
     await db.execute('''
       CREATE TABLE IF NOT EXISTS tennis_matches (
         id TEXT PRIMARY KEY,
@@ -2350,6 +2370,57 @@ class PhoenixDatabase {
       FROM football_assets
       WHERE asset_type = @type AND asset_id = @id
     '''), parameters: {'type': type, 'id': id});
+    return rows.isEmpty
+        ? null
+        : Map<String, Object?>.from(rows.first.toColumnMap());
+  }
+
+  /// Kopiert die aktuell gespeicherte Version in `football_assets_history`,
+  /// bevor sie überschrieben wird - No-Op, wenn noch keine Version existiert
+  /// (z.B. beim allerersten Upload für dieses Team/diese Liga).
+  Future<void> archiveCurrentFootballAsset({
+    required String type,
+    required String id,
+  }) async {
+    final db = await connection();
+    await db.execute(Sql.named('''
+      INSERT INTO football_assets_history (
+        asset_type, asset_id, source_url, mime_type, content
+      )
+      SELECT asset_type, asset_id, source_url, mime_type, content
+      FROM football_assets
+      WHERE asset_type = @type AND asset_id = @id
+    '''), parameters: {'type': type, 'id': id});
+  }
+
+  Future<List<Map<String, Object?>>> footballAssetHistory({
+    required String type,
+    required String id,
+  }) async {
+    final db = await connection();
+    final rows = await db.execute(Sql.named('''
+      SELECT id, mime_type, archived_at
+      FROM football_assets_history
+      WHERE asset_type = @type AND asset_id = @id
+      ORDER BY archived_at DESC
+      LIMIT 50
+    '''), parameters: {'type': type, 'id': id});
+    return rows
+        .map((r) => Map<String, Object?>.from(r.toColumnMap()))
+        .toList(growable: false);
+  }
+
+  Future<Map<String, Object?>?> footballAssetHistoryImage({
+    required String type,
+    required String id,
+    required int historyId,
+  }) async {
+    final db = await connection();
+    final rows = await db.execute(Sql.named('''
+      SELECT mime_type, encode(content, 'base64') AS content_base64
+      FROM football_assets_history
+      WHERE id = @history_id AND asset_type = @type AND asset_id = @id
+    '''), parameters: {'history_id': historyId, 'type': type, 'id': id});
     return rows.isEmpty
         ? null
         : Map<String, Object?>.from(rows.first.toColumnMap());

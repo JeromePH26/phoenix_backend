@@ -1663,6 +1663,10 @@ class ApiRoutes {
       final normalizedContentType = contentType!.trim().toLowerCase();
 
       try {
+        await database.archiveCurrentFootballAsset(
+          type: normalizedType,
+          id: normalizedId,
+        );
         await database.saveFootballAsset(
           type: normalizedType,
           id: normalizedId,
@@ -1698,6 +1702,60 @@ class ApiRoutes {
         return jsonResponse({'error': error.toString()}, statusCode: 500);
       }
     });
+
+    router.get('/api/admin/football/assets/<type>/<id>/history', (
+      Request request,
+      String type,
+      String id,
+    ) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+      final normalizedType = type.trim().toLowerCase();
+      final normalizedId = id.trim();
+      try {
+        final history = await database.footballAssetHistory(
+          type: normalizedType,
+          id: normalizedId,
+        );
+        return jsonResponse(_jsonSafe({'history': history}));
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
+    router.get(
+      '/api/admin/football/assets/<type>/<id>/history/<historyId>/image',
+      (Request request, String type, String id, String historyId) async {
+        if (!_isAdmin(request)) {
+          return Response.forbidden('Nicht autorisiert.');
+        }
+        final parsedHistoryId = int.tryParse(historyId);
+        if (parsedHistoryId == null) {
+          return Response.badRequest(body: 'Ungültige Archiv-ID.');
+        }
+        try {
+          final image = await database.footballAssetHistoryImage(
+            type: type.trim().toLowerCase(),
+            id: id.trim(),
+            historyId: parsedHistoryId,
+          );
+          if (image == null) {
+            return Response.notFound('Archivierte Version nicht gefunden.');
+          }
+          final mimeType = image['mime_type']?.toString() ?? 'image/png';
+          final bytes = base64Decode(
+            image['content_base64']?.toString() ?? '',
+          );
+          return Response.ok(
+            bytes,
+            headers: {'content-type': mimeType, 'cache-control': 'no-store'},
+          );
+        } catch (error) {
+          return Response.internalServerError(body: error.toString());
+        }
+      },
+    );
 
     // `data-coverage` (oben) bleibt die aggregierte Whitelist-Sicht je Liga
     // und Tag. Diese Route ergänzt das um eine Sicht je einzelnem Match,
