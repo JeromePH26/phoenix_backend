@@ -5150,6 +5150,19 @@ class PhoenixDatabase {
   /// ungültig / Outcome fehlt / League nicht Whitelist).
   Future<List<Map<String, Object?>>> modelLabEligibilityAuditRows() async {
     final db = await connection();
+    // Bugfix: ein Fixture kann mehrere Engine-Input-Snapshots haben, z.B.
+    // wenn es nach dem Anpfiff (Debugging, manueller Re-Scan) erneut
+    // durchlaufen wurde. Vorher wählte DISTINCT ON hier IMMER den zeitlich
+    // letzten Snapshot - auch wenn der nach dem Kickoff lag - und markierte
+    // das Fixture dadurch fälschlich als "timestamp_invalid", obwohl ein
+    // gültiger Pre-Match-Snapshot längst vorhanden war. Live in Produktion
+    // bestätigt: 23 Fixtures waren betroffen. [modelLabRawDataset] (das
+    // tatsächliche Training) hatte dieses Problem nicht, weil es
+    // `created_at < kickoff_utc` schon in der WHERE-Klausel filtert - hier
+    // wird stattdessen der Snapshot mit Sortierpriorität ausgewählt: ein
+    // gültiger Pre-Match-Snapshot geht immer vor, erst wenn keiner existiert
+    // wird (korrekt) der überhaupt letzte Snapshot als Grundlage für die
+    // "timestamp_invalid"-Einordnung genutzt.
     final result = await db.execute('''
       SELECT DISTINCT ON (ei.fixture_id)
         ei.fixture_id,
@@ -5164,7 +5177,13 @@ class PhoenixDatabase {
       FROM football_engine_inputs ei
       LEFT JOIN football_matches m ON m.id = ei.fixture_id
       LEFT JOIN football_leagues fl ON fl.league_id = ei.league_id
-      ORDER BY ei.fixture_id, ei.created_at DESC
+      ORDER BY ei.fixture_id,
+        CASE
+          WHEN m.kickoff_utc IS NOT NULL AND ei.created_at < m.kickoff_utc
+            THEN 0
+          ELSE 1
+        END,
+        ei.created_at DESC
     ''');
     return result
         .map((row) => Map<String, Object?>.from(row.toColumnMap()))
