@@ -5144,6 +5144,65 @@ class PhoenixDatabase {
     };
   }
 
+  /// "Liga-/Tor-Kontext"-Feature für [GlobalGoalsV1Engine]: durchschnittliche
+  /// Heim-/Auswärtstore je Spiel dieser Liga über die letzten 400 Tage.
+  /// `football_matches` hat keine `season`-Spalte (bekannte Lücke) - ein
+  /// gleitendes Zeitfenster ist die ehrlichste verfügbare Näherung.
+  Future<Map<String, Object?>> footballLeagueGoalContext({
+    required String leagueId,
+  }) async {
+    final db = await connection();
+    final rows = await db.execute(
+      Sql.named('''
+        SELECT
+          COUNT(*) AS sample_size,
+          AVG(home_goals) AS avg_home_goals,
+          AVG(away_goals) AS avg_away_goals
+        FROM football_matches
+        WHERE league_id = @league_id
+          AND home_goals IS NOT NULL
+          AND away_goals IS NOT NULL
+          AND kickoff_utc >= NOW() - INTERVAL '400 days'
+      '''),
+      parameters: {'league_id': leagueId},
+    );
+    final row = rows.first.toColumnMap();
+    final sampleSize = int.tryParse(row['sample_size']?.toString() ?? '') ?? 0;
+    return {
+      'sampleSize': sampleSize,
+      'avgHomeGoalsPerGame': sampleSize == 0
+          ? null
+          : double.tryParse(row['avg_home_goals'].toString()),
+      'avgAwayGoalsPerGame': sampleSize == 0
+          ? null
+          : double.tryParse(row['avg_away_goals'].toString()),
+    };
+  }
+
+  /// Für den GLOBAL_GOALS_V1-Vergleich (Model Lab, rein lesend): liefert den
+  /// zuletzt gespeicherten Availability-Snapshot eines Spiels plus die
+  /// Team-IDs aus `football_matches` (Availability selbst enthält keine
+  /// Team-IDs, nur die abgeleiteten Kennzahlen).
+  Future<Map<String, Object?>?> footballLatestPhaseTwoResultForFixture(
+    String fixtureId,
+  ) async {
+    final db = await connection();
+    final rows = await db.execute(
+      Sql.named('''
+        SELECT p.availability, p.league_id, m.home_team_id, m.away_team_id,
+               m.home_team_name, m.away_team_name
+        FROM football_phase_two_results p
+        INNER JOIN football_matches m ON m.id = p.fixture_id
+        WHERE p.fixture_id = @fixture_id
+        ORDER BY p.created_at DESC
+        LIMIT 1
+      '''),
+      parameters: {'fixture_id': fixtureId},
+    );
+    if (rows.isEmpty) return null;
+    return Map<String, Object?>.from(rows.first.toColumnMap());
+  }
+
   Future<List<Map<String, Object?>>> footballTipsForSettlement({
     DateTime? date,
     bool reconcile = false,

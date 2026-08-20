@@ -5,6 +5,7 @@ import '../config/app_config.dart';
 import '../config/model_lab_config.dart';
 import '../database/database.dart';
 import '../http/json_response.dart';
+import '../model_lab/global_goals_v1_engine.dart';
 import '../model_lab/learning_dataset_builder.dart';
 import '../model_lab/learning_market.dart';
 import '../model_lab/learning_run_service.dart';
@@ -142,6 +143,88 @@ class ModelLabRoutes {
           'champion': champion == null ? null : _jsonSafe(champion),
           'championEvaluations': championEvaluations.map(_jsonSafe).toList(),
           'challengers': challengerDetails,
+        });
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
+    // Rein lesender Vergleich Produktions-Baseline (goal_rate_normalization
+    // v4, unveraendert) vs. GLOBAL_GOALS_V1 (neu, Shadow-only) fuer ein
+    // einzelnes Spiel. Schreibt nichts, beeinflusst keine Prediction -
+    // Section "LETZTE SICHERHEITSREGEL".
+    router.get('/engines/goals-v1/preview', (Request request) async {
+      if (!_isAdmin(request)) return _unauthorized();
+      final fixtureId = request.url.queryParameters['fixtureId']?.trim();
+      if (fixtureId == null || fixtureId.isEmpty) {
+        return jsonResponse(
+          {'error': 'fixtureId ist erforderlich.'},
+          statusCode: 400,
+        );
+      }
+      try {
+        final row = await database.footballLatestPhaseTwoResultForFixture(
+          fixtureId,
+        );
+        if (row == null) {
+          return jsonResponse(
+            {'error': 'Kein Availability-Snapshot für dieses Spiel gefunden.'},
+            statusCode: 404,
+          );
+        }
+        final availabilityRaw = row['availability'];
+        final availability = availabilityRaw is Map
+            ? Map<String, Object?>.from(availabilityRaw)
+            : <String, Object?>{};
+        final leagueId = row['league_id']?.toString() ?? '';
+        final homeTeamId = row['home_team_id']?.toString() ?? '';
+        final awayTeamId = row['away_team_id']?.toString() ?? '';
+
+        final context = await database.footballLeagueGoalContext(
+          leagueId: leagueId,
+        );
+
+        double? number(Object? value) {
+          if (value is num) return value.toDouble();
+          return double.tryParse(value?.toString() ?? '');
+        }
+
+        final homeFor = number(availability['homeGoalsForAverageHome']);
+        final homeAgainst = number(availability['homeGoalsAgainstAverageHome']);
+        final awayFor = number(availability['awayGoalsForAverageAway']);
+        final awayAgainst = number(availability['awayGoalsAgainstAverageAway']);
+        double? averageAvailable(double? a, double? b) {
+          if (a == null && b == null) return null;
+          if (a == null) return b;
+          if (b == null) return a;
+          return (a + b) / 2;
+        }
+
+        final baselineHome = averageAvailable(homeFor, awayAgainst) ?? 1.35;
+        final baselineAway = averageAvailable(awayFor, homeAgainst) ?? 1.10;
+
+        final v1 = GlobalGoalsV1Engine.compute(
+          availability: availability,
+          homeTeamId: homeTeamId,
+          awayTeamId: awayTeamId,
+          leagueAvgHomeGoalsPerGame:
+              number(context['avgHomeGoalsPerGame']),
+          leagueAvgAwayGoalsPerGame:
+              number(context['avgAwayGoalsPerGame']),
+        );
+
+        return jsonResponse({
+          'fixtureId': fixtureId,
+          'homeTeam': row['home_team_name'],
+          'awayTeam': row['away_team_name'],
+          'leagueGoalContext': context,
+          'baseline': {
+            'version': 'goal_rate_normalization_v4_stat_only',
+            'expectedHome': baselineHome,
+            'expectedAway': baselineAway,
+            'expectedTotal': baselineHome + baselineAway,
+          },
+          'v1': v1.toJson(),
         });
       } catch (error) {
         return jsonResponse({'error': error.toString()}, statusCode: 500);
