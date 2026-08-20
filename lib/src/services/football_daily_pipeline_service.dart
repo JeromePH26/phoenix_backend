@@ -367,6 +367,25 @@ class FootballDailyPipelineService {
         'contextSourceScanRunId': aiContext['contextSourceScanRunId'],
         'fallbackUsed': aiContext['fallbackUsed'] == true,
         'publishedAt': DateTime.now().toUtc().toIso8601String(),
+        // Section "GLOBAL CHAMPION VERSIONIERUNG": rein dokumentarisch, ändert
+        // keine Prediction-Werte. Benennt ehrlich, dass 1X2/BTTS/Totals/Team
+        // Goals aktuell noch dieselbe Baseline-Formel teilen (siehe
+        // FootballEngineInputService._averageAvailable): ein reiner
+        // Torquote/Gegentorquote-Durchschnitt, gespeist in dieselbe
+        // Poisson-Monte-Carlo-Simulation. DC/DNB sind bereits mathematisch aus
+        // der 1X2-Verteilung abgeleitet, keine eigene Engine. Erst wenn eine
+        // Engine-Familie durch ein echtes gewichtetes Feature-Modell ersetzt
+        // wird, bekommt sie hier eine eigene V1-Kennung.
+        'engineVersions': {
+          'oneXTwo': 'GLOBAL_1X2_V0_BASELINE',
+          'goals': 'GLOBAL_GOALS_V0_BASELINE',
+          'btts': 'GLOBAL_BTTS_V0_BASELINE',
+          'totals': 'GLOBAL_TOTALS_V0_BASELINE',
+          'teamGoals': 'GLOBAL_TEAM_GOALS_V0_BASELINE',
+          'doubleChance': 'DERIVED_FROM_1X2_V0_BASELINE',
+          'drawNoBet': 'DERIVED_FROM_1X2_V0_BASELINE',
+          'simulation': 'poisson_monte_carlo_v6_extended_markets',
+        },
       };
 
       await database.upsertFootballMatchFromPayload(
