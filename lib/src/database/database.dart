@@ -6667,6 +6667,90 @@ class PhoenixDatabase {
     return (result.first[0] as int?) ?? 0;
   }
 
+  /// Echte Tageszahlen für das Control-Center-Overview (Section 13). Nutzt
+  /// dieselbe "letzte Analyse pro Fixture"-Logik wie [preparedFootballAnalyses]
+  /// (DISTINCT ON ... ORDER BY analyzed_at DESC), damit die Zahlen hier nie
+  /// von dem abweichen, was App und /api/football/analyses/today anzeigen.
+  Future<Map<String, Object?>> footballDailyOverviewStats({
+    required DateTime day,
+  }) async {
+    final db = await connection();
+    final dayOnly = _dateOnly(day);
+
+    final result = await db.execute(
+      Sql.named('''
+        WITH todays_matches AS (
+          SELECT id FROM football_matches
+          WHERE (kickoff_utc AT TIME ZONE 'Europe/Berlin')::date =
+                CAST(@day AS DATE)
+        ),
+        latest_analysis AS (
+          SELECT DISTINCT ON (a.match_id)
+            a.match_id, a.analyzed_at, a.data_quality, a.payload
+          FROM analyses a
+          INNER JOIN todays_matches m ON m.id = a.match_id
+          WHERE a.sport = 'football'
+          ORDER BY a.match_id, a.analyzed_at DESC
+        )
+        SELECT
+          (SELECT COUNT(*) FROM todays_matches) AS scheduled_matches,
+          (
+            SELECT COUNT(*) FROM analyses a
+            INNER JOIN todays_matches m ON m.id = a.match_id
+            WHERE a.sport = 'football'
+              AND (a.analyzed_at AT TIME ZONE 'Europe/Berlin')::date =
+                  CAST(@day AS DATE)
+          ) AS new_analyses_today,
+          (
+            SELECT COUNT(*) FROM latest_analysis
+            WHERE COALESCE(payload->>'recommendation', '') NOT IN ('', 'Keine Wette')
+              AND COALESCE((payload->>'simulationCount')::int, 0) > 0
+              AND COALESCE(data_quality, 0) > 0
+          ) AS tips_today,
+          (
+            SELECT COUNT(*) FROM latest_analysis
+            WHERE COALESCE(data_quality, 0) > 0 AND COALESCE(data_quality, 0) < 50
+          ) AS low_data_quality,
+          (
+            SELECT COUNT(*) FROM latest_analysis
+            WHERE COALESCE(
+              (payload #>> '{selection,value,isValueTip}')::boolean, false
+            ) = true
+          ) AS value_signals_today,
+          (
+            SELECT COUNT(*) FROM football_daily_pipeline_jobs
+            WHERE status NOT IN ('completed', 'failed')
+              AND scan_date = CAST(@day AS DATE)
+          ) AS running_jobs,
+          (
+            SELECT COUNT(*) FROM football_daily_pipeline_jobs
+            WHERE status = 'failed'
+              AND scan_date = CAST(@day AS DATE)
+          ) AS failed_jobs
+      '''),
+      parameters: {'day': dayOnly},
+    );
+
+    final row = result.isEmpty
+        ? const <String, Object?>{}
+        : Map<String, Object?>.from(result.first.toColumnMap());
+
+    final scheduled = (row['scheduled_matches'] as int?) ?? 0;
+    final tipsToday = (row['tips_today'] as int?) ?? 0;
+
+    return {
+      'scheduledMatches': scheduled,
+      'newAnalysesToday': (row['new_analyses_today'] as int?) ?? 0,
+      'tipsToday': tipsToday,
+      'matchesWithoutRecommendation': (scheduled - tipsToday).clamp(0, 1 << 30),
+      'analysisRunning': (row['running_jobs'] as int?) ?? 0,
+      'analysisFailed': (row['failed_jobs'] as int?) ?? 0,
+      'lowDataQuality': (row['low_data_quality'] as int?) ?? 0,
+      'newValueSignals': (row['value_signals_today'] as int?) ?? 0,
+      'openSettlementJobs': await countPendingFootballMatchSettlementJobs(),
+    };
+  }
+
   // -- Control Center /search ---------------------------------------------
 
   Future<List<Map<String, Object?>>> searchFootballLeaguesByText(

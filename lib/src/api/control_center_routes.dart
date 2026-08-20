@@ -521,9 +521,13 @@ class ControlCenterRoutes {
 
       final pendingPipelineJobs = await database.countPendingFootballDailyPipelineJobs();
       final pendingSettlementJobs = await database.countPendingFootballMatchSettlementJobs();
+      final footballToday = await database.footballDailyOverviewStats(
+        day: _berlinNow(),
+      );
 
       return jsonResponse({
         'apiUsage': apiUsage.map(_jsonSafe).toList(),
+        'footballToday': footballToday,
         'whitelist': {
           'auto': whitelistCounts['auto'] ?? 0,
           'whitelist': whitelistCounts['whitelist'] ?? 0,
@@ -2163,5 +2167,24 @@ class ControlCenterRoutes {
     }
     if (value is Iterable) return value.map(_jsonSafe).toList();
     return value.toString();
+  }
+
+  // Identische Logik zu RoutesRegistrar._berlinNow() in routes.dart (dort
+  // privat, deshalb hier dupliziert statt geteilt) - wichtig, damit
+  // "heute" im Overview exakt denselben Berliner Kalendertag meint wie
+  // /api/football/analyses/today, das die App verwendet.
+  DateTime _berlinNow() {
+    final utc = DateTime.now().toUtc();
+    final marchSwitch = _lastSundayUtc(utc.year, DateTime.march);
+    final octoberSwitch = _lastSundayUtc(utc.year, DateTime.october);
+    final summerTime =
+        !utc.isBefore(marchSwitch) && utc.isBefore(octoberSwitch);
+    return utc.add(Duration(hours: summerTime ? 2 : 1));
+  }
+
+  DateTime _lastSundayUtc(int year, int month) {
+    final lastDay = DateTime.utc(year, month + 1, 0);
+    final sunday = lastDay.subtract(Duration(days: lastDay.weekday % 7));
+    return DateTime.utc(year, month, sunday.day, 1);
   }
 }
