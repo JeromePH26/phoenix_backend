@@ -959,7 +959,9 @@ class ApiRoutes {
 
       try {
         final leagues = await database.listFootballLeagueProfiles(limit: limit);
-        return jsonResponse({'count': leagues.length, 'leagues': leagues});
+        return jsonResponse(
+          _jsonSafe({'count': leagues.length, 'leagues': leagues}),
+        );
       } catch (error) {
         return jsonResponse({'error': error.toString()}, statusCode: 500);
       }
