@@ -7171,39 +7171,98 @@ class PhoenixDatabase {
     );
   }
 
-  Future<List<Map<String, Object?>>> listAdminAuditLog({
+  /// Section 4 (Audit Log): joins `admin_employees` for a real name+role
+  /// (not just the raw login) and returns camelCase keys - the previous
+  /// `SELECT * ... toColumnMap()` handed the frontend raw snake_case column
+  /// names (`employee_login`, `object_id`, ...) while the UI read camelCase
+  /// properties, so every field silently came back `undefined`. Also adds
+  /// action/date-range filters, offset-based pagination, and a total count -
+  /// none of which existed before (the old signature only supported a fixed
+  /// `limit`, no `offset`).
+  Future<Map<String, Object?>> listAdminAuditLog({
     String? area,
     int? employeeId,
+    String? action,
+    DateTime? dateFrom,
+    DateTime? dateTo,
     int limit = 100,
+    int offset = 0,
   }) async {
     final db = await connection();
     final safeLimit = limit.clamp(1, 500);
+    final safeOffset = offset.clamp(0, 1 << 30);
     final conditions = <String>[];
-    final parameters = <String, Object?>{'limit': safeLimit};
+    final parameters = <String, Object?>{};
 
     if (area != null && area.trim().isNotEmpty) {
-      conditions.add('area = @area');
+      conditions.add('a.area = @area');
       parameters['area'] = area;
     }
     if (employeeId != null) {
-      conditions.add('employee_id = @employee_id');
+      conditions.add('a.employee_id = @employee_id');
       parameters['employee_id'] = employeeId;
+    }
+    if (action != null && action.trim().isNotEmpty) {
+      conditions.add('a.action = @action');
+      parameters['action'] = action;
+    }
+    if (dateFrom != null) {
+      conditions.add('a.created_at >= @date_from');
+      parameters['date_from'] = dateFrom;
+    }
+    if (dateTo != null) {
+      conditions.add('a.created_at <= @date_to');
+      parameters['date_to'] = dateTo;
     }
 
     final whereClause = conditions.isEmpty ? '' : 'WHERE ${conditions.join(' AND ')}';
 
     final result = await db.execute(
       Sql.named('''
-        SELECT * FROM admin_audit_log
+        SELECT
+          a.id, a.employee_id, a.employee_login, e.name AS employee_name,
+          e.role AS employee_role, a.area, a.object_type, a.object_id,
+          a.action, a.previous_value, a.new_value, a.reason, a.comment,
+          a.ip, a.created_at, a.reverted, a.reverted_at
+        FROM admin_audit_log a
+        LEFT JOIN admin_employees e ON e.id = a.employee_id
         $whereClause
-        ORDER BY created_at DESC
-        LIMIT @limit
+        ORDER BY a.created_at DESC
+        LIMIT @limit OFFSET @offset
       '''),
+      parameters: {...parameters, 'limit': safeLimit, 'offset': safeOffset},
+    );
+
+    final countResult = await db.execute(
+      Sql.named('SELECT COUNT(*) AS total FROM admin_audit_log a $whereClause'),
       parameters: parameters,
     );
-    return result
-        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
-        .toList();
+    final total = int.tryParse(countResult.first.toColumnMap()['total']?.toString() ?? '') ?? 0;
+
+    final entries = result.map((row) {
+      final m = row.toColumnMap();
+      return <String, Object?>{
+        'id': m['id'],
+        'employeeId': m['employee_id'],
+        'employeeLogin': m['employee_login'],
+        'employeeName': m['employee_name'] ?? m['employee_login'],
+        'employeeRole': m['employee_role'],
+        'area': m['area'],
+        'objectType': m['object_type'],
+        'objectId': m['object_id'],
+        'action': m['action'],
+        'previousValue': m['previous_value'],
+        'newValue': m['new_value'],
+        'reason': m['reason'],
+        'comment': m['comment'],
+        'ip': m['ip'],
+        'createdAt': m['created_at'],
+        'reverted': m['reverted'],
+        'revertedAt': m['reverted_at'],
+      };
+    }).toList();
+
+    return {'entries': entries, 'total': total};
   }
 
   // -- PHÖNIX CONTROL CENTER PHASE 2: Football-Domain-Admin-APIs ---------
@@ -7966,6 +8025,22 @@ class PhoenixDatabase {
     };
   }
 
+  /// Section 5 (Overview-Warnbereich "fehlende Assets") - nur Whitelist-
+  /// Ligen zählen, weil nur die tatsächlich in der App sichtbar sind (siehe
+  /// dieselbe Einschränkung bei den Wappen & Assets-Standardfiltern).
+  Future<int> countWhitelistedLeaguesMissingLogo() async {
+    final db = await connection();
+    final result = await db.execute('''
+      SELECT COUNT(*) FROM football_leagues l
+      WHERE l.manual_status = 'whitelist'
+        AND NOT EXISTS (
+          SELECT 1 FROM football_assets fa
+          WHERE fa.asset_type = 'league' AND fa.asset_id = l.league_id
+        )
+    ''');
+    return (result.first[0] as int?) ?? 0;
+  }
+
   Future<int> countPendingFootballDailyPipelineJobs() async {
     final db = await connection();
     final result = await db.execute('''
@@ -8049,6 +8124,34 @@ class PhoenixDatabase {
       WHERE status NOT IN ('completed', 'failed')
     ''');
     return (result.first[0] as int?) ?? 0;
+  }
+
+  /// Section 5 (Overview "Pending Jobs" muss zwischen aktiv, abgeschlossen
+  /// und fehlgeschlagen unterscheiden - beide Job-Tabellen haben laut ihrem
+  /// `CHECK (status IN ('running','completed','failed'))` keinen eigenen
+  /// "wartend/queued"-Status, daher wird hier ehrlich nur unterschieden, was
+  /// die Daten tatsächlich hergeben: läuft gerade / kürzlich fehlgeschlagen
+  /// (24h) / kürzlich abgeschlossen (24h) - keine erfundene Warteschlange.
+  Future<Map<String, Object?>> jobStatusBreakdown() async {
+    final db = await connection();
+
+    Future<Map<String, Object?>> countsFor(String table) async {
+      final result = await db.execute('''
+        SELECT
+          COUNT(*) FILTER (WHERE status = 'running') AS running,
+          COUNT(*) FILTER (WHERE status = 'failed' AND created_at >= NOW() - INTERVAL '24 hours') AS failed24h,
+          COUNT(*) FILTER (WHERE status = 'completed' AND created_at >= NOW() - INTERVAL '24 hours') AS completed24h
+        FROM $table
+      ''');
+      final row = result.first.toColumnMap();
+      int n(String key) => int.tryParse(row[key]?.toString() ?? '') ?? 0;
+      return {'running': n('running'), 'failed24h': n('failed24h'), 'completed24h': n('completed24h')};
+    }
+
+    return {
+      'dailyPipeline': await countsFor('football_daily_pipeline_jobs'),
+      'settlement': await countsFor('football_match_settlement_jobs'),
+    };
   }
 
   /// Echte Tageszahlen für das Control-Center-Overview (Section 13). Nutzt

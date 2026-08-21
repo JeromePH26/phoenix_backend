@@ -840,17 +840,28 @@ class ControlCenterRoutes {
     final area = params['area'];
     final employeeIdParam = params['employeeId'];
     final employeeId = employeeIdParam == null ? null : int.tryParse(employeeIdParam);
+    final action = params['action'];
+    final dateFrom = params['dateFrom'] == null ? null : DateTime.tryParse(params['dateFrom']!);
+    final dateTo = params['dateTo'] == null ? null : DateTime.tryParse(params['dateTo']!);
     final limit = int.tryParse(params['limit'] ?? '') ?? 100;
+    final offset = int.tryParse(params['offset'] ?? '') ?? 0;
 
     try {
-      final entries = await database.listAdminAuditLog(
+      final result = await database.listAdminAuditLog(
         area: area,
         employeeId: employeeId,
+        action: action,
+        dateFrom: dateFrom,
+        dateTo: dateTo,
         limit: limit,
+        offset: offset,
       );
+      final entries = result['entries'] as List<Map<String, Object?>>;
       return jsonResponse({
-        'count': entries.length,
         'entries': entries.map(_jsonSafe).toList(),
+        'total': result['total'],
+        'limit': limit,
+        'offset': offset,
       });
     } catch (error) {
       return jsonResponse({'error': error.toString()}, statusCode: 500);
@@ -881,8 +892,8 @@ class ControlCenterRoutes {
       final shadowCount = await database.countShadowPredictions();
       final lastRuns = await database.listLearningRuns(limit: 1);
 
-      final pendingPipelineJobs = await database.countPendingFootballDailyPipelineJobs();
-      final pendingSettlementJobs = await database.countPendingFootballMatchSettlementJobs();
+      final jobStatus = await database.jobStatusBreakdown();
+      final missingLeagueLogos = await database.countWhitelistedLeaguesMissingLogo();
       final footballToday = await database.footballDailyOverviewStats(
         day: _berlinNow(),
       );
@@ -905,9 +916,9 @@ class ControlCenterRoutes {
           'learningEligibleMatches': audit.eligible,
           'lastLearningRun': lastRuns.isEmpty ? null : _jsonSafe(lastRuns.first),
         },
-        'pendingJobs': {
-          'footballDailyPipeline': pendingPipelineJobs,
-          'footballMatchSettlement': pendingSettlementJobs,
+        'pendingJobs': _jsonSafe(jobStatus),
+        'warnings': {
+          'missingLeagueLogos': missingLeagueLogos,
         },
       });
     } catch (error) {
