@@ -7284,6 +7284,7 @@ class PhoenixDatabase {
     String? status,
     bool? visible,
     bool? hasAnalysis,
+    bool? hasTip,
     bool? settled,
     int limit = 50,
     int offset = 0,
@@ -7319,6 +7320,16 @@ class PhoenixDatabase {
             : "NOT EXISTS (SELECT 1 FROM analyses a WHERE a.sport = 'football' AND a.match_id = m.id)",
       );
     }
+    // Section 6: "Tipp vorhanden"-Filter - separat von hasAnalysis, weil eine
+    // Analyse existieren kann, ohne dass PHÖNIX daraus einen Tipp
+    // veröffentlicht hat (z.B. zu geringer Value).
+    if (hasTip != null) {
+      conditions.add(
+        hasTip
+            ? "EXISTS (SELECT 1 FROM football_analysis_history h WHERE h.fixture_id = m.id AND h.market_key <> '')"
+            : "NOT EXISTS (SELECT 1 FROM football_analysis_history h WHERE h.fixture_id = m.id AND h.market_key <> '')",
+      );
+    }
     if (settled != null) {
       conditions.add(
         settled
@@ -7336,14 +7347,23 @@ class PhoenixDatabase {
           m.id, m.kickoff_utc, m.status, m.league_id, m.league_name, m.country,
           m.home_team_id, m.home_team_name, m.home_logo,
           m.away_team_id, m.away_team_name, m.away_logo,
-          m.home_goals, m.away_goals,
+          m.home_goals, m.away_goals, m.updated_at,
           m.visible, m.analysis_enabled, m.tip_enabled, m.learning_enabled,
           m.live_enabled, m.status_locked, m.status_lock_reason,
           EXISTS (
             SELECT 1 FROM analyses a
             WHERE a.sport = 'football' AND a.match_id = m.id
-          ) AS has_analysis
+          ) AS has_analysis,
+          top_tip.market_key AS top_tip_market_key,
+          top_tip.market_label AS top_tip_market_label
         FROM football_matches m
+        LEFT JOIN LATERAL (
+          SELECT h.market_key, h.market_label
+          FROM football_analysis_history h
+          WHERE h.fixture_id = m.id AND h.market_key <> ''
+          ORDER BY h.created_at DESC
+          LIMIT 1
+        ) top_tip ON TRUE
         $whereClause
         ORDER BY m.kickoff_utc DESC
         LIMIT @limit OFFSET @offset

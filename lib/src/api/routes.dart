@@ -1275,6 +1275,7 @@ class ApiRoutes {
           status: query['status'],
           visible: parseBoolParam(query['visible']),
           hasAnalysis: parseBoolParam(query['hasAnalysis']),
+          hasTip: parseBoolParam(query['hasTip']),
           settled: parseBoolParam(query['settled']),
           limit: limit,
           offset: offset,

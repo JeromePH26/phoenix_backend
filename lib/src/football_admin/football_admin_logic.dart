@@ -132,6 +132,9 @@ Map<String, Object?> mapMatchRowToJson(Map<String, Object?> row) {
     'learning_enabled',
     'live_enabled',
     'has_analysis',
+    'updated_at',
+    'top_tip_market_key',
+    'top_tip_market_label',
   };
 
   final json = <String, Object?>{
@@ -161,6 +164,13 @@ Map<String, Object?> mapMatchRowToJson(Map<String, Object?> row) {
     'learningEnabled': row['learning_enabled'],
     'liveEnabled': row['live_enabled'],
     'hasAnalysis': row['has_analysis'],
+    'updatedAt': row['updated_at'],
+    'topTip': (row['top_tip_market_key'] == null)
+        ? null
+        : {
+            'marketKey': row['top_tip_market_key'],
+            'marketLabel': row['top_tip_market_label'],
+          },
   };
 
   for (final entry in row.entries) {
