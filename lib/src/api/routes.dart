@@ -1042,17 +1042,39 @@ class ApiRoutes {
           'error': 'value muss auto, whitelist oder blacklist sein.',
         }, statusCode: 400);
       }
+      // Section 8: "Statuswechsel nur mit Begründung, Bestätigung und
+      // Audit-Eintrag" - vorher gab es weder eine Pflicht-Begründung noch
+      // überhaupt einen Audit-Log-Eintrag für diese Aktion, obwohl sie
+      // direkt steuert, was für App-Nutzer sichtbar ist.
+      final reason = request.url.queryParameters['reason']?.trim() ?? '';
+      if (reason.isEmpty) {
+        return jsonResponse({
+          'error': 'reason ist erforderlich.',
+        }, statusCode: 400);
+      }
 
       try {
-        final updated = await database.setFootballLeagueManualStatus(
+        final previousStatus = await database.setFootballLeagueManualStatus(
           leagueId: leagueId,
           manualStatus: value,
         );
-        if (!updated) {
+        if (previousStatus == null) {
           return jsonResponse({
             'error': 'Liga nicht gefunden.',
           }, statusCode: 404);
         }
+        await database.insertAdminAuditLog(
+          employeeId: null,
+          employeeLogin: 'legacy_admin_token',
+          area: 'football',
+          objectType: 'league',
+          objectId: leagueId,
+          action: 'league.status_change',
+          previousValue: {'manualStatus': previousStatus},
+          newValue: {'manualStatus': value},
+          reason: reason,
+          ip: _clientIp(request),
+        );
         return jsonResponse({
           'status': 'updated',
           'leagueId': leagueId,

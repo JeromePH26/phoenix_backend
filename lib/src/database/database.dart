@@ -3487,7 +3487,12 @@ class PhoenixDatabase {
     };
   }
 
-  Future<bool> setFootballLeagueManualStatus({
+  /// Section 8: gibt jetzt den vorherigen Status mit zurück, damit der
+  /// aufrufende Handler einen echten Vorher/Nachher-Audit-Log-Eintrag
+  /// schreiben kann statt die Änderung stillschweigend durchzuführen.
+  /// `null` bedeutet "Liga nicht gefunden" (unverändert vom bisherigen
+  /// `bool`-Rückgabewert, nur jetzt als fehlender Eintrag ausgedrückt).
+  Future<String?> setFootballLeagueManualStatus({
     required String leagueId,
     required String manualStatus,
   }) async {
@@ -3496,17 +3501,23 @@ class PhoenixDatabase {
     }
 
     final db = await connection();
-    final result = await db.execute(
+    final previousRows = await db.execute(
+      Sql.named('SELECT manual_status FROM football_leagues WHERE league_id = @league_id'),
+      parameters: {'league_id': leagueId},
+    );
+    if (previousRows.isEmpty) return null;
+    final previousStatus = previousRows.first.toColumnMap()['manual_status']?.toString() ?? 'auto';
+
+    await db.execute(
       Sql.named('''
         UPDATE football_leagues
         SET manual_status = @manual_status, updated_at = NOW()
         WHERE league_id = @league_id
-        RETURNING league_id
       '''),
       parameters: {'league_id': leagueId, 'manual_status': manualStatus},
     );
 
-    return result.isNotEmpty;
+    return previousStatus;
   }
 
   Future<List<Map<String, Object?>>> preparedFootballAnalyses({
