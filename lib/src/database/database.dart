@@ -4155,6 +4155,29 @@ class PhoenixDatabase {
   /// den einmaligen Backfill als auch den wiederkehrenden Tages-Check, damit
   /// beide denselben "offen"-Begriff verwenden (Status, nicht Tore-NULL -
   /// ein 0:0-Endstand hat sonst fälschlich weiter als offen gegolten).
+  /// Section 11: "Vor Start Kandidatenzahl ... zeigen" - dieselbe
+  /// WHERE-Klausel wie [footballMatchResultCandidates], nur als reine
+  /// COUNT-Abfrage ohne LIMIT, damit die UI vor dem Start weiß, wie viele
+  /// Spiele (und damit ungefähr wie viele Provider-Anfragen) ein Lauf
+  /// betreffen würde.
+  Future<int> footballMatchResultCandidateCount({
+    required int minHoursSinceKickoff,
+  }) async {
+    final db = await connection();
+    final rows = await db.execute(
+      Sql.named('''
+        SELECT COUNT(*) AS total
+        FROM football_matches
+        WHERE raw_json ? 'phaseTwo'
+          AND id <> ''
+          AND kickoff_utc <= NOW() - make_interval(hours => @hours)
+          AND status NOT IN ('FT','AET','PEN','AWD','WO','CANC','ABD')
+      '''),
+      parameters: {'hours': minHoursSinceKickoff.clamp(0, 24 * 30)},
+    );
+    return int.tryParse(rows.first.toColumnMap()['total']?.toString() ?? '') ?? 0;
+  }
+
   Future<List<Map<String, Object?>>> footballMatchResultCandidates({
     required int minHoursSinceKickoff,
     required int limit,

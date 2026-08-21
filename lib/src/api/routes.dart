@@ -1185,6 +1185,15 @@ class ApiRoutes {
           'error': 'Modul "Settlement" ist deaktiviert (App Control → Module).',
         }, statusCode: 503);
       }
+      // Section 11: "Backfill gegen parallele Starts sperren" - zwei
+      // gleichzeitige Läufe würden sich um dieselben Kandidaten und dasselbe
+      // Provider-Tageslimit streiten, ohne dass eine der beiden Seiten davon
+      // wüsste.
+      if (await database.countPendingFootballMatchSettlementJobs() > 0) {
+        return jsonResponse({
+          'error': 'Es läuft bereits ein Settlement-Lauf. Bitte warten, bis dieser abgeschlossen ist.',
+        }, statusCode: 409);
+      }
       final query = request.url.queryParameters;
       // Default 3h für den täglichen Check, Backfill-Aufrufe übergeben
       // bewusst minHours=4 gemäß Vorgabe.
@@ -1230,6 +1239,32 @@ class ApiRoutes {
       }
       try {
         return jsonResponse(await database.footballMatchResultCoverage());
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
+    // Section 11: Kandidatenzahl vor Start eines Backfills, damit die UI
+    // "X Spiele würden geprüft" zeigen kann statt den Lauf blind zu starten.
+    router.get('/api/admin/football/matches/settle/candidates', (
+      Request request,
+    ) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+      final minHours = (int.tryParse(
+                request.url.queryParameters['minHoursSinceKickoff'] ?? '',
+              ) ??
+              3)
+          .clamp(0, 24 * 30);
+      try {
+        final count = await database.footballMatchResultCandidateCount(
+          minHoursSinceKickoff: minHours,
+        );
+        return jsonResponse({
+          'candidateCount': count,
+          'minHoursSinceKickoff': minHours,
+        });
       } catch (error) {
         return jsonResponse({'error': error.toString()}, statusCode: 500);
       }
