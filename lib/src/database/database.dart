@@ -87,6 +87,23 @@ class PhoenixDatabase {
       ON football_matches (kickoff_utc)
     ''');
 
+    // Section 31 (Ligen/Teams Performance): footballEntityPerformance und
+    // footballDataCoverage filtern jede Aggregation über league_id bzw.
+    // home_team_id/away_team_id - ohne diese Indizes scannt jede Liga-/
+    // Team-Detailseite die komplette football_matches-Tabelle.
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_football_matches_league
+      ON football_matches (league_id)
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_football_matches_home_team
+      ON football_matches (home_team_id)
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_football_matches_away_team
+      ON football_matches (away_team_id)
+    ''');
+
     // Originalwappen werden einmalig beim ersten Abruf gespeichert. Dadurch
     // laden Tabellen und Teamvergleiche keine Bilddateien erneut von der
     // Sportdaten-API und bleiben auch bei späteren API-Aussetzern sichtbar.
@@ -196,6 +213,27 @@ class PhoenixDatabase {
       ON football_analysis_history (prediction_date, result_status)
     ''');
 
+    // Section 31: footballEntityPerformance filtert/joint über fixture_id,
+    // market_key und kickoff (nicht prediction_date) - fixture_id ist nur
+    // der zweite Teil des Primärschlüssels und daher ohne eigenen Index
+    // für den INNER JOIN mit football_matches nicht nutzbar.
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_football_analysis_history_fixture
+      ON football_analysis_history (fixture_id)
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_football_analysis_history_market
+      ON football_analysis_history (market_key)
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_football_analysis_history_kickoff
+      ON football_analysis_history (kickoff)
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_football_analysis_history_model_version
+      ON football_analysis_history (model_version)
+    ''');
+
     // MLB snapshots are stored before the first pitch. A result is useful for
     // model calibration even without odds; units/ROI stay at zero until a
     // licensed odds source provides a real market price.
@@ -279,6 +317,17 @@ class PhoenixDatabase {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         PRIMARY KEY (scan_run_id, fixture_id)
       )
+    ''');
+
+    // Section 31: footballDataCoverage filtert über league_id und joint per
+    // fixture_id mit football_matches für den Team-Filter.
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_football_phase_two_results_league
+      ON football_phase_two_results (league_id)
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_football_phase_two_results_fixture
+      ON football_phase_two_results (fixture_id)
     ''');
 
     await db.execute('''
@@ -3384,6 +3433,10 @@ class PhoenixDatabase {
           l.total_samples,
           l.successful_full_analyses,
           l.last_seen_at,
+          EXISTS (
+            SELECT 1 FROM football_assets fa
+            WHERE fa.asset_type = 'league' AND fa.asset_id = l.league_id
+          ) AS has_logo,
           COALESCE(
             jsonb_agg(
               jsonb_build_object(
@@ -4994,7 +5047,11 @@ class PhoenixDatabase {
         Sql.named('''
           WITH first_predictions AS (
             SELECT DISTINCT ON (h.prediction_date, h.fixture_id)
-              h.assigned_units, h.result_status, h.profit_units, h.kickoff
+              h.assigned_units, h.result_status, h.profit_units, h.kickoff,
+              h.market_key, h.market_odds,
+              COALESCE(
+                NULLIF(h.payload #>> '{selection,value,valuePercent}', ''), '0'
+              )::double precision AS value_percent
             FROM football_analysis_history h
             INNER JOIN football_matches m ON m.id = h.fixture_id
             $where
@@ -5004,12 +5061,16 @@ class PhoenixDatabase {
             date_trunc(@bucket, kickoff) AS period,
             COUNT(*) FILTER (WHERE result_status = 'won' AND assigned_units > 0) AS won,
             COUNT(*) FILTER (WHERE result_status = 'lost' AND assigned_units > 0) AS lost,
+            COUNT(*) FILTER (WHERE result_status = 'push' AND assigned_units > 0) AS push,
+            COUNT(*) FILTER (WHERE market_key <> '') AS tip_count,
             COALESCE(SUM(assigned_units) FILTER (
               WHERE result_status IN ('won','lost','push') AND assigned_units > 0
             ), 0) AS staked_units,
             COALESCE(SUM(profit_units) FILTER (
               WHERE result_status IN ('won','lost','push') AND assigned_units > 0
-            ), 0) AS profit_units
+            ), 0) AS profit_units,
+            AVG(market_odds) FILTER (WHERE market_odds > 1) AS avg_odds,
+            AVG(value_percent) FILTER (WHERE market_key <> '') AS avg_value
           FROM first_predictions
           WHERE kickoff IS NOT NULL
           GROUP BY period
@@ -5027,13 +5088,20 @@ class PhoenixDatabase {
         final decided = won + lost;
         final staked = number('staked_units');
         final profit = number('profit_units');
+        final roiPercent = staked == 0 ? null : profit / staked * 100;
         final period = row['period'];
         return {
           'period': period is DateTime ? period.toUtc().toIso8601String() : period,
           'won': won,
           'lost': lost,
+          'push': integer('push'),
+          'tipCount': integer('tip_count'),
           'hitRatePercent': decided == 0 ? null : won / decided * 100,
-          'roiPercent': staked == 0 ? null : profit / staked * 100,
+          'roiPercent': roiPercent,
+          'yieldPercent': roiPercent,
+          'profitUnits': profit,
+          'avgOdds': row['avg_odds'] == null ? null : number('avg_odds'),
+          'avgValuePercent': row['avg_value'] == null ? null : number('avg_value'),
         };
       }).toList(growable: false);
     }
@@ -5105,10 +5173,11 @@ class PhoenixDatabase {
     final row = Map<String, Object?>.from(result.first.toColumnMap());
     final total = int.tryParse(row['total']?.toString() ?? '') ?? 0;
 
+    int countOf(String key) => int.tryParse(row[key]?.toString() ?? '') ?? 0;
+
     double coverage(String key) {
       if (total == 0) return 0;
-      final count = int.tryParse(row[key]?.toString() ?? '') ?? 0;
-      return count / total * 100;
+      return countOf(key) / total * 100;
     }
 
     String status(double pct) {
@@ -5118,18 +5187,32 @@ class PhoenixDatabase {
       return 'missing';
     }
 
+    // Section 18: jede Kategorie liefert zusätzlich zur Prozentzahl die
+    // rohen Zähler (mit/ohne), damit ein Klick auf die Kategorie eine echte
+    // Drilldown-Ansicht mit "Spiele insgesamt / mit X / ohne X" zeigen kann,
+    // statt nur den Prozentwert zu wiederholen.
+    Map<String, Object?> categoryOf(String key, double pct) {
+      final withCount = key == 'results' ? total : countOf(key);
+      return {
+        'coveragePercent': pct,
+        'status': status(pct),
+        'withCount': withCount,
+        'withoutCount': total - withCount,
+      };
+    }
+
     final categories = {
-      'results': {'coveragePercent': total == 0 ? 0.0 : 100.0, 'status': total == 0 ? 'unknown' : 'available'},
-      'standings': {'coveragePercent': coverage('standings'), 'status': status(coverage('standings'))},
-      'form': {'coveragePercent': coverage('form'), 'status': status(coverage('form'))},
-      'h2h': {'coveragePercent': coverage('h2h'), 'status': status(coverage('h2h'))},
-      'odds': {'coveragePercent': coverage('odds'), 'status': status(coverage('odds'))},
-      'injuries': {'coveragePercent': coverage('injuries'), 'status': status(coverage('injuries'))},
-      'statistics': {'coveragePercent': coverage('statistics'), 'status': status(coverage('statistics'))},
+      'results': categoryOf('results', total == 0 ? 0.0 : 100.0),
+      'standings': categoryOf('standings', coverage('standings')),
+      'form': categoryOf('form', coverage('form')),
+      'h2h': categoryOf('h2h', coverage('h2h')),
+      'odds': categoryOf('odds', coverage('odds')),
+      'injuries': categoryOf('injuries', coverage('injuries')),
+      'statistics': categoryOf('statistics', coverage('statistics')),
       // Strukturell nie verfügbar (siehe Doc-Kommentar) - ehrlich als 0
       // ausgegeben statt weggelassen.
-      'lineups': {'coveragePercent': 0.0, 'status': 'missing'},
-      'xg': {'coveragePercent': 0.0, 'status': 'missing'},
+      'lineups': {'coveragePercent': 0.0, 'status': 'missing', 'withCount': 0, 'withoutCount': total},
+      'xg': {'coveragePercent': 0.0, 'status': 'missing', 'withCount': 0, 'withoutCount': total},
     };
 
     final avgDq = row['avg_data_quality'];
@@ -7424,41 +7507,189 @@ class PhoenixDatabase {
   /// einem gespeicherten Match vorkam - das deckt praktisch jedes Team ab,
   /// sobald seine Liga mindestens einmal gescannt wurde. Kein Live-Aufruf
   /// beim Provider nötig, keine zusätzliche API-Quota.
+  /// Section 10: Teams-Hauptseite braucht echte serverseitige Filter/
+  /// Sortierung statt nur Suche+Pagination - jedes Team wird hier einmal
+  /// mit Liga, Logo-Status, Datenabdeckung, Analysen/Tipps-Vorhandensein
+  /// und Performance angereichert, damit Filter wie "Logo fehlt" oder
+  /// "keine Analysen" echte Datensätze treffen statt nur die UI zu zeigen.
   Future<Map<String, Object?>> listFootballTeamsAdmin({
     String? search,
+    String? leagueId,
+    String? country,
+    String? activeStatus,
+    String? dataStatus,
+    String? logoStatus,
+    String? analysesStatus,
+    String? tipsStatus,
+    String sortBy = 'name',
+    String sortDir = 'asc',
     int limit = 50,
     int offset = 0,
   }) async {
     final db = await connection();
-    final searchClause = (search != null && search.trim().isNotEmpty)
-        ? "WHERE t.name ILIKE @search"
-        : '';
+
+    const baseCte = '''
+      WITH teams AS (
+        SELECT home_team_id AS id, home_team_name AS name,
+               home_logo AS logo, league_id, league_name, country,
+               kickoff_utc
+        FROM football_matches WHERE home_team_id <> ''
+        UNION ALL
+        SELECT away_team_id, away_team_name, away_logo, league_id,
+               league_name, country, kickoff_utc
+        FROM football_matches WHERE away_team_id <> ''
+      ),
+      latest AS (
+        SELECT DISTINCT ON (id) id, name, logo, league_id, league_name,
+               country
+        FROM teams
+        ORDER BY id, kickoff_utc DESC
+      ),
+      activity AS (
+        SELECT id AS team_id, COUNT(*) AS stored_matches,
+               MAX(kickoff_utc) AS last_kickoff
+        FROM teams
+        GROUP BY id
+      ),
+      team_fixtures AS (
+        SELECT home_team_id AS team_id, id AS fixture_id
+        FROM football_matches WHERE home_team_id <> ''
+        UNION ALL
+        SELECT away_team_id, id
+        FROM football_matches WHERE away_team_id <> ''
+      ),
+      first_predictions AS (
+        SELECT DISTINCT ON (prediction_date, fixture_id)
+          fixture_id, market_key, result_status, assigned_units, profit_units
+        FROM football_analysis_history
+        ORDER BY prediction_date, fixture_id, created_at ASC
+      ),
+      team_predictions AS (
+        SELECT tf.team_id, fp.fixture_id, fp.market_key, fp.result_status,
+               fp.assigned_units, fp.profit_units
+        FROM team_fixtures tf
+        INNER JOIN first_predictions fp ON fp.fixture_id = tf.fixture_id
+      ),
+      predicted AS (
+        SELECT team_id,
+          COUNT(DISTINCT fixture_id) AS analyzed_matches,
+          COUNT(DISTINCT fixture_id)
+            FILTER (WHERE market_key <> '') AS tips_count,
+          COUNT(*) FILTER (
+            WHERE assigned_units > 0 AND result_status = 'won'
+          ) AS won,
+          COUNT(*) FILTER (
+            WHERE assigned_units > 0 AND result_status = 'lost'
+          ) AS lost,
+          COALESCE(SUM(assigned_units) FILTER (WHERE assigned_units > 0), 0)
+            AS staked_units,
+          COALESCE(SUM(profit_units) FILTER (WHERE assigned_units > 0), 0)
+            AS profit_units
+        FROM team_predictions
+        GROUP BY team_id
+      ),
+      combined AS (
+        SELECT
+          l.id, l.name, l.logo, l.league_id, l.league_name, l.country,
+          COALESCE(a.stored_matches, 0) AS stored_matches,
+          COALESCE(p.analyzed_matches, 0) AS analyzed_matches,
+          COALESCE(p.tips_count, 0) AS tips_count,
+          COALESCE(p.won, 0) AS won,
+          COALESCE(p.lost, 0) AS lost,
+          COALESCE(p.staked_units, 0) AS staked_units,
+          COALESCE(p.profit_units, 0) AS profit_units,
+          (l.logo <> '') AS has_logo,
+          CASE
+            WHEN COALESCE(a.stored_matches, 0) = 0 THEN 'missing'
+            WHEN COALESCE(p.analyzed_matches, 0) = 0 THEN 'missing'
+            WHEN p.analyzed_matches < a.stored_matches THEN 'partial'
+            ELSE 'full'
+          END AS data_status,
+          CASE
+            WHEN a.last_kickoff IS NOT NULL
+              AND a.last_kickoff >= NOW() - INTERVAL '365 days'
+            THEN 'active' ELSE 'inactive'
+          END AS active_status,
+          CASE WHEN COALESCE(p.won, 0) + COALESCE(p.lost, 0) = 0 THEN NULL
+            ELSE p.won::double precision / (p.won + p.lost) * 100
+          END AS hit_rate_percent,
+          CASE WHEN COALESCE(p.staked_units, 0) = 0 THEN NULL
+            ELSE p.profit_units / p.staked_units * 100
+          END AS roi_percent,
+          CASE WHEN COALESCE(a.stored_matches, 0) = 0 THEN NULL
+            ELSE COALESCE(p.analyzed_matches, 0)::double precision
+              / a.stored_matches * 100
+          END AS coverage_percent
+        FROM latest l
+        LEFT JOIN activity a ON a.team_id = l.id
+        LEFT JOIN predicted p ON p.team_id = l.id
+      )
+    ''';
+
+    final conditions = <String>[];
+    final parameters = <String, Object?>{};
+    if (search != null && search.trim().isNotEmpty) {
+      conditions.add('name ILIKE @search');
+      parameters['search'] = '%${search.trim()}%';
+    }
+    if (leagueId != null && leagueId.trim().isNotEmpty) {
+      conditions.add('league_id = @league_id');
+      parameters['league_id'] = leagueId.trim();
+    }
+    if (country != null && country.trim().isNotEmpty) {
+      conditions.add('country = @country');
+      parameters['country'] = country.trim();
+    }
+    if (activeStatus == 'active' || activeStatus == 'inactive') {
+      conditions.add('active_status = @active_status');
+      parameters['active_status'] = activeStatus;
+    }
+    if (dataStatus == 'present') {
+      conditions.add("data_status = 'full'");
+    } else if (dataStatus == 'partial') {
+      conditions.add("data_status = 'partial'");
+    } else if (dataStatus == 'missing') {
+      conditions.add("data_status = 'missing'");
+    }
+    if (logoStatus == 'present') {
+      conditions.add('has_logo = TRUE');
+    } else if (logoStatus == 'missing') {
+      conditions.add('has_logo = FALSE');
+    }
+    if (analysesStatus == 'present') {
+      conditions.add('analyzed_matches > 0');
+    } else if (analysesStatus == 'missing') {
+      conditions.add('analyzed_matches = 0');
+    }
+    if (tipsStatus == 'present') {
+      conditions.add('tips_count > 0');
+    } else if (tipsStatus == 'missing') {
+      conditions.add('tips_count = 0');
+    }
+    final where = conditions.isEmpty ? '' : 'WHERE ${conditions.join(' AND ')}';
+
+    const sortColumns = {
+      'name': 'name',
+      'league': 'league_name',
+      'hitRate': 'hit_rate_percent',
+      'roi': 'roi_percent',
+      'tips': 'tips_count',
+      'coverage': 'coverage_percent',
+    };
+    final sortColumn = sortColumns[sortBy] ?? 'name';
+    final direction = sortDir == 'desc' ? 'DESC' : 'ASC';
+    final orderBy = 'ORDER BY $sortColumn $direction NULLS LAST, name ASC';
+
     final rows = await db.execute(
       Sql.named('''
-        WITH teams AS (
-          SELECT home_team_id AS id, home_team_name AS name,
-                 home_logo AS logo, league_id, league_name, country,
-                 kickoff_utc
-          FROM football_matches WHERE home_team_id <> ''
-          UNION ALL
-          SELECT away_team_id, away_team_name, away_logo, league_id,
-                 league_name, country, kickoff_utc
-          FROM football_matches WHERE away_team_id <> ''
-        ),
-        latest AS (
-          SELECT DISTINCT ON (id) id, name, logo, league_id, league_name,
-                 country
-          FROM teams
-          ORDER BY id, kickoff_utc DESC
-        )
-        SELECT t.* FROM latest t
-        $searchClause
-        ORDER BY t.name
+        $baseCte
+        SELECT * FROM combined
+        $where
+        $orderBy
         LIMIT @limit OFFSET @offset
       '''),
       parameters: {
-        if (search != null && search.trim().isNotEmpty)
-          'search': '%${search.trim()}%',
+        ...parameters,
         'limit': limit.clamp(1, 200),
         'offset': offset.clamp(0, 1 << 30),
       },
@@ -7466,19 +7697,11 @@ class PhoenixDatabase {
 
     final countRows = await db.execute(
       Sql.named('''
-        WITH teams AS (
-          SELECT home_team_id AS id, home_team_name AS name
-          FROM football_matches WHERE home_team_id <> ''
-          UNION
-          SELECT away_team_id, away_team_name
-          FROM football_matches WHERE away_team_id <> ''
-        )
-        SELECT COUNT(*) AS total FROM teams t $searchClause
+        $baseCte
+        SELECT COUNT(*) AS total FROM combined
+        $where
       '''),
-      parameters: {
-        if (search != null && search.trim().isNotEmpty)
-          'search': '%${search.trim()}%',
-      },
+      parameters: parameters,
     );
     final total = int.tryParse(
           countRows.first.toColumnMap()['total']?.toString() ?? '',

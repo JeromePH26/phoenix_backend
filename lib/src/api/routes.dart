@@ -977,6 +977,15 @@ class ApiRoutes {
       try {
         final result = await database.listFootballTeamsAdmin(
           search: query['search'],
+          leagueId: query['leagueId'],
+          country: query['country'],
+          activeStatus: query['activeStatus'],
+          dataStatus: query['dataStatus'],
+          logoStatus: query['logoStatus'],
+          analysesStatus: query['analysesStatus'],
+          tipsStatus: query['tipsStatus'],
+          sortBy: query['sortBy'] ?? 'name',
+          sortDir: query['sortDir'] ?? 'asc',
           limit: limit,
           offset: offset,
         );
