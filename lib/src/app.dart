@@ -16,6 +16,7 @@ import 'services/football_service.dart';
 import 'services/firebase_push_service.dart';
 import 'services/football_favorite_live_monitor.dart';
 import 'services/football_news_service.dart';
+import 'services/push_schedule_service.dart';
 import 'services/tennis_service.dart';
 
 class PhoenixBackend {
@@ -27,6 +28,7 @@ class PhoenixBackend {
     required this.tennis,
     required this.favoriteLiveMonitor,
     required this.news,
+    required this.pushSchedule,
   });
 
   final AppConfig config;
@@ -36,6 +38,7 @@ class PhoenixBackend {
   final TennisService tennis;
   final FootballFavoriteLiveMonitor favoriteLiveMonitor;
   final FootballNewsService news;
+  final PushScheduleService pushSchedule;
 
   static Future<PhoenixBackend> create() async {
     final config = AppConfig.fromEnvironment();
@@ -60,6 +63,7 @@ class PhoenixBackend {
       push: push,
       football: football,
     );
+    final pushSchedule = PushScheduleService(database: database, push: push);
 
     if (database.isConfigured) {
       try {
@@ -116,6 +120,7 @@ class PhoenixBackend {
 
     if (config.hasFirebasePush && database.isConfigured) {
       favoriteLiveMonitor.start();
+      pushSchedule.start();
     }
     if (database.isConfigured) news.start();
 
@@ -127,6 +132,7 @@ class PhoenixBackend {
       tennis: tennis,
       favoriteLiveMonitor: favoriteLiveMonitor,
       news: news,
+      pushSchedule: pushSchedule,
     );
   }
 
@@ -139,6 +145,7 @@ class PhoenixBackend {
 
   Future<void> close() async {
     favoriteLiveMonitor.close();
+    pushSchedule.close();
     news.close();
     football.close();
     tennis.close();

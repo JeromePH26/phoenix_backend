@@ -1913,6 +1913,16 @@ class PhoenixDatabase {
         CHECK (target_type IN ('all', 'league'))
       )
     ''');
+    // Section 19 (AN2): Deep Link (mit in den FCM-data-Payload gepackt) und
+    // Zeitplanung. scheduled_at gesetzt + sent_at NULL = wartet noch auf den
+    // PushScheduleService; sent_at wird sowohl beim sofortigen Versand als
+    // auch beim geplanten Versand gesetzt, sobald tatsächlich gesendet wurde.
+    await db.execute('''
+      ALTER TABLE push_broadcasts
+      ADD COLUMN IF NOT EXISTS deep_link_url TEXT,
+      ADD COLUMN IF NOT EXISTS scheduled_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ
+    ''');
 
     // Section 46: nur bereits implementierte Features können hier
     // umklassifiziert werden. Die App liest diese Matrix noch nicht (out of
@@ -9107,12 +9117,20 @@ class PhoenixDatabase {
     required String targetType,
     String? targetValue,
     int? sentByEmployeeId,
+    String? deepLinkUrl,
+    DateTime? scheduledAt,
   }) async {
     final db = await connection();
     final result = await db.execute(
       Sql.named('''
-        INSERT INTO push_broadcasts (title, body, target_type, target_value, sent_by_employee_id)
-        VALUES (@title, @body, @target_type, @target_value, @sent_by_employee_id)
+        INSERT INTO push_broadcasts (
+          title, body, target_type, target_value, sent_by_employee_id,
+          deep_link_url, scheduled_at
+        )
+        VALUES (
+          @title, @body, @target_type, @target_value, @sent_by_employee_id,
+          @deep_link_url, @scheduled_at
+        )
         RETURNING id
       '''),
       parameters: {
@@ -9121,11 +9139,16 @@ class PhoenixDatabase {
         'target_type': targetType,
         'target_value': targetValue,
         'sent_by_employee_id': sentByEmployeeId,
+        'deep_link_url': deepLinkUrl,
+        'scheduled_at': scheduledAt,
       },
     );
     return result.first[0] as int;
   }
 
+  /// Wird sowohl nach einem sofortigen als auch nach einem durch
+  /// [PushScheduleService] ausgelösten Versand aufgerufen - setzt sent_at
+  /// deshalb immer mit, nie separat.
   Future<void> updatePushBroadcastCounts({
     required int id,
     required int sentCount,
@@ -9134,7 +9157,8 @@ class PhoenixDatabase {
     final db = await connection();
     await db.execute(
       Sql.named('''
-        UPDATE push_broadcasts SET sent_count = @sent_count, failed_count = @failed_count
+        UPDATE push_broadcasts
+        SET sent_count = @sent_count, failed_count = @failed_count, sent_at = NOW()
         WHERE id = @id
       '''),
       parameters: {'id': id, 'sent_count': sentCount, 'failed_count': failedCount},
@@ -9150,6 +9174,34 @@ class PhoenixDatabase {
       parameters: {'limit': limit.clamp(1, 200)},
     );
     return result.map((row) => _dateSafeRow(row.toColumnMap())).toList();
+  }
+
+  /// Section 19 (AN2): geplante Broadcasts, deren Zeitpunkt erreicht ist und
+  /// die noch nicht tatsächlich versendet wurden - abgefragt von
+  /// PushScheduleService.
+  Future<List<Map<String, Object?>>> duePushBroadcasts() async {
+    final db = await connection();
+    final result = await db.execute('''
+      SELECT * FROM push_broadcasts
+      WHERE scheduled_at IS NOT NULL AND scheduled_at <= NOW() AND sent_at IS NULL
+      ORDER BY scheduled_at ASC
+    ''');
+    return result.map((row) => _dateSafeRow(row.toColumnMap())).toList();
+  }
+
+  /// Section 19 (AN2): Push-Token für einen Test-Push an ein einzelnes,
+  /// bekanntes Gerät (per Installation-ID, z.B. von der Geräte-Seite kopiert).
+  Future<String?> pushDeviceToken(String installationId) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT push_token FROM push_devices
+        WHERE installation_id = @installation_id AND enabled = TRUE
+      '''),
+      parameters: {'installation_id': installationId},
+    );
+    if (result.isEmpty) return null;
+    return result.first[0]?.toString();
   }
 
   // -- Control Center /premium-features (Phase 5) --------------------------

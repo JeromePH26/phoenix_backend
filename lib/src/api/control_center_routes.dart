@@ -80,6 +80,8 @@ class ControlCenterRoutes {
     router.patch('/advertising/campaigns/<id|[0-9]+>', _updateAdCampaign);
     router.get('/push/broadcasts', _listPushBroadcasts);
     router.post('/push/broadcasts', _sendPushBroadcast);
+    router.get('/push/target-count', _pushTargetCount);
+    router.post('/push/test', _sendTestPush);
     router.get('/premium/features', _listPremiumFeaturesAdmin);
     router.patch('/premium/features/<featureKey>', _updatePremiumFeature);
     router.get('/feature-flags', _listFeatureFlags);
@@ -1786,6 +1788,8 @@ class ControlCenterRoutes {
       final message = body['body']?.toString().trim() ?? '';
       final targetType = body['targetType']?.toString() ?? 'all';
       final targetValue = body['targetValue']?.toString();
+      final deepLinkRaw = body['deepLink']?.toString().trim();
+      final deepLink = (deepLinkRaw == null || deepLinkRaw.isEmpty) ? null : deepLinkRaw;
       if (title.isEmpty || message.isEmpty) {
         return jsonResponse({'error': 'title und body sind erforderlich.'}, statusCode: 400);
       }
@@ -1796,13 +1800,51 @@ class ControlCenterRoutes {
         return jsonResponse({'error': 'targetValue (Liga-ID) ist erforderlich.'}, statusCode: 400);
       }
 
+      // Section 19 (AN2): "Zeitplanung" - ein zukünftiger Zeitpunkt
+      // speichert den Broadcast nur, PushScheduleService versendet ihn
+      // tatsächlich, sobald der Zeitpunkt erreicht ist.
+      final scheduledAtRaw = body['scheduledAt']?.toString().trim();
+      DateTime? scheduledAt;
+      if (scheduledAtRaw != null && scheduledAtRaw.isNotEmpty) {
+        scheduledAt = DateTime.tryParse(scheduledAtRaw);
+        if (scheduledAt == null) {
+          return jsonResponse({'error': 'scheduledAt ist kein gültiges Datum.'}, statusCode: 400);
+        }
+      }
+      final isScheduled = scheduledAt != null && scheduledAt.isAfter(DateTime.now().toUtc());
+
       final broadcastId = await database.createPushBroadcast(
         title: title,
         body: message,
         targetType: targetType,
         targetValue: targetValue,
         sentByEmployeeId: actor.id,
+        deepLinkUrl: deepLink,
+        scheduledAt: isScheduled ? scheduledAt : null,
       );
+
+      if (isScheduled) {
+        await database.insertAdminAuditLog(
+          employeeId: actor.id,
+          employeeLogin: actor.login,
+          area: 'push',
+          objectType: 'broadcast',
+          objectId: broadcastId.toString(),
+          action: 'broadcast.schedule',
+          newValue: {
+            'title': title,
+            'targetType': targetType,
+            'targetValue': targetValue,
+            'scheduledAt': scheduledAt.toIso8601String(),
+          },
+          ip: _clientIp(request),
+        );
+        return jsonResponse({
+          'id': broadcastId,
+          'scheduled': true,
+          'scheduledAt': scheduledAt.toIso8601String(),
+        }, statusCode: 201);
+      }
 
       final targets = await database.broadcastPushTargets(
         targetType: targetType,
@@ -1817,7 +1859,11 @@ class ControlCenterRoutes {
             title: title,
             body: message,
             androidChannelId: 'phoenix_news_v1',
-            data: {'type': 'phoenix_broadcast', 'broadcastId': broadcastId.toString()},
+            data: {
+              'type': 'phoenix_broadcast',
+              'broadcastId': broadcastId.toString(),
+              if (deepLink != null) 'deepLink': deepLink,
+            },
           );
           sent++;
         } catch (error) {
@@ -1844,6 +1890,94 @@ class ControlCenterRoutes {
         'sent': sent,
         'failed': failed,
       }, statusCode: 201);
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  // Section 19 (AN2): "Zielgruppen-Vorschau" - wie viele Geräte eine
+  // Zielgruppe VOR dem Versand tatsächlich hat, ohne etwas zu senden.
+  Future<Response> _pushTargetCount(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    if (!auth.employee!.hasPermission('push.manage')) return _forbidden();
+
+    final targetType = request.url.queryParameters['targetType'] ?? 'all';
+    final targetValue = request.url.queryParameters['targetValue'];
+    if (!const {'all', 'league'}.contains(targetType)) {
+      return jsonResponse({'error': 'targetType muss all oder league sein.'}, statusCode: 400);
+    }
+    if (targetType == 'league' && (targetValue == null || targetValue.isEmpty)) {
+      return jsonResponse({'error': 'targetValue (Liga-ID) ist erforderlich.'}, statusCode: 400);
+    }
+    try {
+      final targets = await database.broadcastPushTargets(
+        targetType: targetType,
+        targetValue: targetValue,
+      );
+      return jsonResponse({'count': targets.length});
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  // Section 19 (AN2): "Test-Push an Testgerät" - sendet direkt an EIN
+  // bekanntes Gerät, ohne als Broadcast in der Historie zu erscheinen (ist
+  // keine Kampagne, sondern ein Vorab-Check).
+  Future<Response> _sendTestPush(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    final actor = auth.employee!;
+    if (!actor.hasPermission('push.manage')) return _forbidden();
+
+    if (!push.isConfigured) {
+      return jsonResponse({
+        'error': 'Push ist serverseitig nicht konfiguriert (FIREBASE_PROJECT_ID/FIREBASE_SERVICE_ACCOUNT_JSON fehlen).',
+      }, statusCode: 503);
+    }
+
+    try {
+      final body = jsonDecode(await request.readAsString());
+      if (body is! Map<String, dynamic>) {
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+      }
+      final installationId = body['installationId']?.toString().trim() ?? '';
+      final title = body['title']?.toString().trim() ?? '';
+      final message = body['body']?.toString().trim() ?? '';
+      if (installationId.isEmpty || title.isEmpty || message.isEmpty) {
+        return jsonResponse({
+          'error': 'installationId, title und body sind erforderlich.',
+        }, statusCode: 400);
+      }
+
+      final token = await database.pushDeviceToken(installationId);
+      if (token == null) {
+        return jsonResponse({
+          'error': 'Kein aktives Gerät mit dieser Installation-ID gefunden.',
+        }, statusCode: 404);
+      }
+
+      final response = await push.send(
+        token: token,
+        title: title,
+        body: message,
+        androidChannelId: 'phoenix_news_v1',
+        data: const {'type': 'phoenix_test'},
+      );
+      final ok = response.statusCode < 300;
+
+      await database.insertAdminAuditLog(
+        employeeId: actor.id,
+        employeeLogin: actor.login,
+        area: 'push',
+        objectType: 'test',
+        objectId: installationId,
+        action: 'push.test',
+        newValue: {'title': title, 'ok': ok},
+        ip: _clientIp(request),
+      );
+
+      return jsonResponse({'sent': ok, 'providerStatus': response.statusCode});
     } catch (error) {
       return jsonResponse({'error': error.toString()}, statusCode: 500);
     }
