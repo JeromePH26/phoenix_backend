@@ -68,6 +68,17 @@ Future<void> main() async {
       }
     }
 
+    // Ein einziger cachebarer Provider-Aufruf hält den weltweiten
+    // Wettbewerbskatalog aktuell. Neue Ligen landen zunächst im Datenpool;
+    // dadurch entstehen keine zusätzlichen öffentlichen Tipps oder
+    // kostenintensiven Detailscans.
+    try {
+      await _syncLeagueCatalog(client: client, config: config);
+    } catch (error, stackTrace) {
+      stderr.writeln('[PHOENIX CRON] Liga-Katalog-Update übersprungen: $error');
+      stderr.writeln(stackTrace);
+    }
+
     // Danach wird der komplette heutige PHÖNIX-Lauf gestartet.
     final jobId = await _startDailyScan(
       client: client,
@@ -107,6 +118,19 @@ Future<void> main() async {
   } finally {
     client.close(force: true);
   }
+}
+
+Future<void> _syncLeagueCatalog({
+  required HttpClient client,
+  required _CronConfig config,
+}) async {
+  final response = await _requestJson(
+    client: client,
+    uri: config.uri('/api/admin/football/catalog/sync'),
+    method: 'POST',
+    adminToken: config.adminToken,
+  );
+  stdout.writeln('[PHOENIX CRON] Liga-Katalog: ${response['status']}.');
 }
 
 Future<void> _settleDate({

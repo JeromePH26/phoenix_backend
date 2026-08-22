@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'dart:io';
 
 import '../database/database.dart';
 import 'football_engine_input_service.dart';
+import 'football_background_enrichment_service.dart';
 import 'football_daily_combo_service.dart';
 import 'football_market_selection_service.dart';
 import 'football_phase_one_scan_service.dart';
@@ -219,6 +221,21 @@ class FootballDailyPipelineService {
         processed: _integer(publishResult['processed']),
         published: _integer(publishResult['published']),
         phaseTwoId: phaseTwoId,
+      );
+
+      // Datenpool und Beobachtung laufen nach der öffentlichen Pipeline mit
+      // festem Budget weiter. Sie schreiben dieselben Detail- und Coverage-
+      // Daten, erzeugen aber keine Analysen oder Tipps.
+      unawaited(
+        FootballBackgroundEnrichmentService(
+          database: database,
+          football: football,
+        ).run(date: date).then((result) {
+          stdout.writeln('[PHOENIX BACKGROUND] $result');
+        }).catchError((Object error, StackTrace stackTrace) {
+          stderr.writeln('[PHOENIX BACKGROUND] Fehler: $error');
+          stderr.writeln(stackTrace);
+        }),
       );
     } catch (error, stackTrace) {
       stderr.writeln('[PHOENIX PIPELINE] Job $jobId fehlgeschlagen: $error');

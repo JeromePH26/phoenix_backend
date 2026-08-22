@@ -11,6 +11,7 @@ import '../config/app_config.dart';
 import '../config/model_lab_config.dart';
 import '../control_center/audit.dart';
 import '../database/database.dart';
+import '../model_lab/football_league_tier.dart';
 import '../football_admin/football_admin_logic.dart';
 import '../http/json_response.dart';
 import 'app_account_routes.dart';
@@ -27,6 +28,7 @@ import '../services/football_result_settlement_service.dart';
 import '../services/football_match_backfill_service.dart';
 import '../services/historical_twin_service.dart';
 import '../services/football_daily_pipeline_service.dart';
+import '../services/football_league_catalog_service.dart';
 import '../services/football_service.dart';
 import '../services/football_asset_service.dart';
 import '../services/football_news_service.dart';
@@ -49,6 +51,7 @@ class ApiRoutes {
   final TennisService tennis;
   final FootballNewsService news;
   final ModelLabConfig modelLabConfig;
+  bool _leagueCatalogSyncInProgress = false;
 
   Router get router {
     final router = Router();
@@ -1970,6 +1973,88 @@ class ApiRoutes {
         'minimumDataQuality': minimumDataQuality,
         'simulations': simulations,
         'statusUrl': '/api/admin/football/daily-scan/$jobId',
+      }, statusCode: 202);
+    });
+
+    router.post('/api/admin/football/leagues/<leagueId>/tier', (
+      Request request,
+      String leagueId,
+    ) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+      final value = request.url.queryParameters['value']?.trim() ?? '';
+      final tier = FootballLeagueTier.values.where(
+        (candidate) => candidate.storageKey == value,
+      );
+      if (tier.isEmpty) {
+        return jsonResponse({
+          'error': 'value muss focus, watchlist, data_pool oder blocked sein.',
+        }, statusCode: 400);
+      }
+      final reason = request.url.queryParameters['reason']?.trim() ?? '';
+      if (reason.isEmpty) {
+        return jsonResponse({'error': 'reason ist erforderlich.'},
+            statusCode: 400);
+      }
+      try {
+        final selected = tier.first;
+        final previous = await database.setFootballLeagueTier(
+          leagueId: leagueId,
+          tier: selected,
+        );
+        if (previous == null) {
+          return jsonResponse({'error': 'Liga nicht gefunden.'}, statusCode: 404);
+        }
+        await database.insertAdminAuditLog(
+          employeeId: null,
+          employeeLogin: 'legacy_admin_token',
+          area: 'football',
+          objectType: 'league',
+          objectId: leagueId,
+          action: 'league.tier_change',
+          previousValue: {'tier': previous},
+          newValue: {'tier': selected.storageKey},
+          reason: reason,
+          ip: _clientIp(request),
+        );
+        return jsonResponse({
+          'status': 'updated',
+          'leagueId': leagueId,
+          'tier': selected.storageKey,
+        });
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
+    router.post('/api/admin/football/catalog/sync', (Request request) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+      if (_leagueCatalogSyncInProgress) {
+        return jsonResponse({
+          'status': 'already_running',
+          'message': 'Der Liga-Katalog wird bereits synchronisiert.',
+        }, statusCode: 409);
+      }
+
+      _leagueCatalogSyncInProgress = true;
+      unawaited(
+        FootballLeagueCatalogService(database: database, football: football)
+            .run()
+            .then((result) {
+          stdout.writeln('[PHOENIX CATALOG] Synchronisiert: $result');
+        }).catchError((Object error, StackTrace stackTrace) {
+          stderr.writeln('[PHOENIX CATALOG] Fehler: $error');
+          stderr.writeln(stackTrace);
+        }).whenComplete(() {
+          _leagueCatalogSyncInProgress = false;
+        }),
+      );
+      return jsonResponse({
+        'status': 'started',
+        'message': 'Liga-Katalog wird im Hintergrund in den Datenpool geladen.',
       }, statusCode: 202);
     });
 

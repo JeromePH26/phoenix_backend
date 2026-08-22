@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import '../database/database.dart';
+import '../model_lab/football_league_tier.dart';
 import 'football_service.dart';
 
 class FootballPhaseOneScanService {
@@ -25,19 +26,27 @@ class FootballPhaseOneScanService {
       stdout.writeln(
         '[PHOENIX PHASE1] Provider-Spieltag geladen: ${matches.length} Fixtures.',
       );
-      // Nur Whitelist-Ligen können später eine Analyse erhalten. Die
-      // Providerantwort enthält aber den globalen Spieltag; ohne diesen
-      // Vorfilter würde jedes fremde Fixture einzeln einen Profil- und
-      // Schreibzugriff verursachen und den Cron unnötig um Minuten strecken.
-      final whitelistedLeagueIds =
-          await database.whitelistedFootballLeagueIds();
+      // Der Spielplan wird weltweit in den Datenpool übernommen. Nur die
+      // Fokus-Ligen dürfen später in Phase 2 zur öffentlichen Analyse
+      // weiterlaufen; Beobachtung und Datenpool bauen dagegen ausschließlich
+      // Historie, Tabellen und spätere Shadow-/Learning-Daten auf.
+      final knownTiers = await database.footballLeagueTiers(
+        matches.map((match) => _string(match['leagueId'])),
+      );
       final relevantMatches = matches.where((match) {
         final leagueId = _string(match['leagueId']);
-        return leagueId.isNotEmpty && whitelistedLeagueIds.contains(leagueId);
+        return leagueId.isNotEmpty &&
+            (knownTiers[leagueId] ?? FootballLeagueTier.dataPool) !=
+                FootballLeagueTier.blocked;
       }).toList(growable: false);
+      final focusCount = relevantMatches.where((match) {
+        return (knownTiers[_string(match['leagueId'])] ??
+                FootballLeagueTier.dataPool) ==
+            FootballLeagueTier.focus;
+      }).length;
       stdout.writeln(
-        '[PHOENIX PHASE1] Whitelist: ${whitelistedLeagueIds.length} Ligen, '
-        '${relevantMatches.length} Fixtures heute.',
+        '[PHOENIX PHASE1] Datenpool: ${relevantMatches.length} Fixtures, '
+        '$focusCount Fokus-Fixtures heute.',
       );
       final eligible = <Map<String, Object?>>[];
       final excluded = <Map<String, Object?>>[];
@@ -50,18 +59,28 @@ class FootballPhaseOneScanService {
           break;
         }
         processed++;
-        // Der Tages-Spielplan ist unabhängig von einer späteren Analyse. So
-        // bleiben auch bereits gestartete, abgesagte oder wegen fehlender
-        // Detaildaten ausgeschlossene Whitelist-Spiele in der App sichtbar,
-        // selbst wenn das Provider-Limit später erreicht wird.
+        final leagueId = _string(match['leagueId']);
+        final tier = knownTiers[leagueId] ?? FootballLeagueTier.dataPool;
+        await _ensureLeagueInDataPool(match);
+
+        // Der Tages-Spielplan bleibt für jede nicht gesperrte Liga erhalten.
+        // Dies ist bewusst der gemeinsame Datenpfad: Fokus, Beobachtung und
+        // Datenpool nutzen später dieselben Tabellen, Teams und Ergebnisse.
         await database.upsertFootballMatchFromPayload(
           fixtureId: _string(match['id']),
           payload: match,
         );
-        // Die Liga wurde unmittelbar davor gegen die manuelle Whitelist
-        // geprüft. Ein erneuter Profil-Lookup plus Upsert pro Fixture wäre
-        // reine Doppelarbeit; hier reichen die fachlichen Pre-Match-Gates.
-        final decision = _decideWhitelisted(match);
+
+        // Nur Fokus-Ligen erhalten eine Phase-2-Freigabe. Dadurch bleiben
+        // öffentliche Analysen stabil, während alle anderen Ligen trotzdem
+        // langfristig vollständige historische Daten aufbauen.
+        final decision = tier == FootballLeagueTier.focus
+            ? _decideWhitelisted(match)
+            : _PhaseOneDecision(
+                eligible: false,
+                status: tier.storageKey,
+                reason: 'background_${tier.storageKey}',
+              );
 
         await database.savePhaseOneDecision(
           scanRunId: scanRunId,
@@ -116,6 +135,25 @@ class FootballPhaseOneScanService {
       await database.failFootballScanRun(scanRunId, error);
       rethrow;
     }
+  }
+
+  Future<void> _ensureLeagueInDataPool(Map<String, Object?> match) async {
+    final leagueId = _string(match['leagueId']);
+    final leagueName = _string(match['league']);
+    final season = _int(match['season']);
+    if (leagueId.isEmpty || leagueName.isEmpty || season <= 0) return;
+
+    final level = _detectCompetitionLevel(leagueName);
+    await database.upsertLeagueSeen(
+      leagueId: leagueId,
+      leagueName: leagueName,
+      country: _string(match['country']),
+      season: season,
+      gender: _detectGender(leagueName),
+      competitionLevel: level,
+      initialHistoricalStatus: 'observation',
+      initialSeasonStatus: 'observation',
+    );
   }
 
   Future<_PhaseOneDecision> _decide(Map<String, Object?> match) async {

@@ -15,6 +15,7 @@ class FootballEngineInputService {
   Future<Map<String, Object?>> prepare({
     int? phaseTwoScanRunId,
     int? limit,
+    bool includeBackground = false,
   }) async {
     final scanRunId = phaseTwoScanRunId;
     if (scanRunId == null) {
@@ -24,6 +25,7 @@ class FootballEngineInputService {
     final rows = await database.phaseFourCandidates(
       phaseTwoScanRunId: scanRunId,
       limit: limit ?? 1000000,
+      includeBackground: includeBackground,
     );
 
     final results = <Map<String, Object?>>[];

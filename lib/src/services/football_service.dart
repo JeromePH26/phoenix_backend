@@ -56,6 +56,47 @@ class FootballService {
         .toList();
   }
 
+  /// Katalog aller aktuell vom Provider geführten Wettbewerbe. Dieser Abruf
+  /// ist bewusst ein einzelner, cachebarer Request und bildet die Grundlage
+  /// für den PHÖNIX-Datenpool – er startet weder Match-Analysen noch
+  /// Detailabfragen.
+  Future<List<Map<String, Object?>>> activeLeagueCatalog() async {
+    final decoded = await providerRequest(
+      path: '/leagues',
+      query: const <String, String>{'current': 'true'},
+    );
+    final rows = decoded['response'];
+    if (rows is! List) return const <Map<String, Object?>>[];
+
+    final catalog = <Map<String, Object?>>[];
+    for (final value in rows.whereType<Map>()) {
+      final row = Map<String, dynamic>.from(value);
+      final league = _map(row['league']);
+      final country = _map(row['country']);
+      final seasons = row['seasons'] is List ? row['seasons'] as List : const [];
+      final currentSeason = seasons.whereType<Map>().cast<Map>().firstWhere(
+            (season) => season['current'] == true,
+            orElse: () => const <String, dynamic>{},
+          );
+      final year = currentSeason['year'] is num
+          ? (currentSeason['year'] as num).toInt()
+          : int.tryParse(currentSeason['year']?.toString() ?? '') ?? 0;
+      final id = league['id']?.toString().trim() ?? '';
+      final name = league['name']?.toString().trim() ?? '';
+      if (id.isEmpty || name.isEmpty || year <= 0) continue;
+      catalog.add({
+        'leagueId': id,
+        'league': name,
+        'country': country['name']?.toString() ?? '',
+        'countryCode': country['code']?.toString() ?? '',
+        'type': league['type']?.toString() ?? '',
+        'logo': league['logo']?.toString() ?? '',
+        'season': year,
+      });
+    }
+    return catalog;
+  }
+
   /// Holt einen einzelnen, nicht vom Tagescache abhängigen Endstand. Diese
   /// Abfrage ist ausschließlich für offene Historie-Tipps gedacht, wenn der
   /// zuvor geladene Spieltag noch einen alten Live-/NS-Status enthält.

@@ -2,6 +2,8 @@ import 'dart:convert';
 
 import 'package:postgres/postgres.dart';
 
+import '../model_lab/football_league_tier.dart';
+
 class PhoenixDatabase {
   PhoenixDatabase(this.databaseUrl);
 
@@ -482,6 +484,52 @@ class PhoenixDatabase {
       )
     ''');
 
+    // Liga-Tiers erweitern die historische Whitelist, statt sie zu brechen.
+    // Alle Tabellen/Teams/Spiele behalten dadurch dasselbe Datenmodell. Die
+    // Stufe entscheidet ausschließlich über Scan-Tiefe und Sichtbarkeit.
+    await db.execute('''
+      ALTER TABLE football_leagues
+      ADD COLUMN IF NOT EXISTS collection_tier TEXT NOT NULL DEFAULT 'data_pool'
+    ''');
+    await db.execute('''
+      ALTER TABLE football_leagues
+      ADD COLUMN IF NOT EXISTS background_enabled BOOLEAN NOT NULL DEFAULT TRUE
+    ''');
+    await db.execute('''
+      ALTER TABLE football_leagues
+      ADD COLUMN IF NOT EXISTS detail_refresh_hours INTEGER NOT NULL DEFAULT 24
+    ''');
+    await db.execute('''
+      UPDATE football_leagues
+      SET collection_tier = CASE manual_status
+        WHEN 'whitelist' THEN 'focus'
+        WHEN 'blacklist' THEN 'blocked'
+        ELSE COALESCE(NULLIF(collection_tier, ''), 'data_pool')
+      END,
+      background_enabled = manual_status <> 'blacklist',
+      detail_refresh_hours = CASE manual_status
+        WHEN 'whitelist' THEN 1
+        WHEN 'blacklist' THEN 0
+        ELSE 24
+      END
+      WHERE collection_tier NOT IN ('focus', 'watchlist', 'data_pool', 'blocked')
+         OR collection_tier = 'data_pool'
+         OR manual_status IN ('whitelist', 'blacklist')
+    ''');
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS football_league_sync_state (
+        league_id TEXT PRIMARY KEY REFERENCES football_leagues(league_id)
+          ON DELETE CASCADE,
+        catalog_synced_at TIMESTAMPTZ,
+        fixtures_synced_at TIMESTAMPTZ,
+        results_synced_at TIMESTAMPTZ,
+        standings_synced_at TIMESTAMPTZ,
+        details_synced_at TIMESTAMPTZ,
+        last_error TEXT,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    ''');
+
     // PHÖNIX feste Wettbewerbs-Whitelist:
     // 22 nationale Ligen, 11 nationale Pokale und 3 UEFA-Wettbewerbe.
     // Bereits vorhandene Datensätze werden auf whitelist aktualisiert.
@@ -494,47 +542,50 @@ class PhoenixDatabase {
         competition_level,
         manual_status,
         historical_status,
+        collection_tier,
+        background_enabled,
+        detail_refresh_hours,
         updated_at
       )
       VALUES
-        ('39',  'Premier League',              'England',     'men', 1, 'whitelist', 'approved', NOW()),
-        ('40',  'Championship',                'England',     'men', 2, 'whitelist', 'approved', NOW()),
-        ('61',  'Ligue 1',                     'France',      'men', 1, 'whitelist', 'approved', NOW()),
-        ('78',  'Bundesliga',                  'Germany',     'men', 1, 'whitelist', 'approved', NOW()),
-        ('79',  '2. Bundesliga',               'Germany',     'men', 2, 'whitelist', 'approved', NOW()),
-        ('80',  '3. Liga',                     'Germany',     'men', 3, 'whitelist', 'approved', NOW()),
-        ('88',  'Eredivisie',                  'Netherlands', 'men', 1, 'whitelist', 'approved', NOW()),
-        ('94',  'Primeira Liga',               'Portugal',    'men', 1, 'whitelist', 'approved', NOW()),
-        ('103', 'Eliteserien',                 'Norway',      'men', 1, 'whitelist', 'approved', NOW()),
-        ('113', 'Allsvenskan',                 'Sweden',      'men', 1, 'whitelist', 'approved', NOW()),
-        ('119', 'Superliga',                   'Denmark',     'men', 1, 'whitelist', 'approved', NOW()),
-        ('135', 'Serie A',                     'Italy',       'men', 1, 'whitelist', 'approved', NOW()),
-        ('140', 'La Liga',                     'Spain',       'men', 1, 'whitelist', 'approved', NOW()),
-        ('141', 'Segunda Division',            'Spain',       'men', 2, 'whitelist', 'approved', NOW()),
-        ('144', 'Jupiler Pro League',          'Belgium',     'men', 1, 'whitelist', 'approved', NOW()),
-        ('203', 'Süper Lig',                   'Turkey',      'men', 1, 'whitelist', 'approved', NOW()),
-        ('244', 'Veikkausliiga',               'Finland',     'men', 1, 'whitelist', 'approved', NOW()),
-        ('207', 'Super League',                 'Switzerland', 'men', 1, 'whitelist', 'approved', NOW()),
-        ('210', 'HNL',                          'Croatia',     'men', 1, 'whitelist', 'approved', NOW()),
-        ('218', '2. Liga',                      'Austria',     'men', 2, 'whitelist', 'approved', NOW()),
-        ('253', 'Major League Soccer',          'USA',         'men', 1, 'whitelist', 'approved', NOW()),
+        ('39',  'Premier League',              'England',     'men', 1, 'whitelist', 'approved', 'focus', TRUE, 1, NOW()),
+        ('40',  'Championship',                'England',     'men', 2, 'whitelist', 'approved', 'focus', TRUE, 1, NOW()),
+        ('61',  'Ligue 1',                     'France',      'men', 1, 'whitelist', 'approved', 'focus', TRUE, 1, NOW()),
+        ('78',  'Bundesliga',                  'Germany',     'men', 1, 'whitelist', 'approved', 'focus', TRUE, 1, NOW()),
+        ('79',  '2. Bundesliga',               'Germany',     'men', 2, 'whitelist', 'approved', 'focus', TRUE, 1, NOW()),
+        ('80',  '3. Liga',                     'Germany',     'men', 3, 'whitelist', 'approved', 'focus', TRUE, 1, NOW()),
+        ('88',  'Eredivisie',                  'Netherlands', 'men', 1, 'whitelist', 'approved', 'focus', TRUE, 1, NOW()),
+        ('94',  'Primeira Liga',               'Portugal',    'men', 1, 'whitelist', 'approved', 'focus', TRUE, 1, NOW()),
+        ('103', 'Eliteserien',                 'Norway',      'men', 1, 'whitelist', 'approved', 'focus', TRUE, 1, NOW()),
+        ('113', 'Allsvenskan',                 'Sweden',      'men', 1, 'whitelist', 'approved', 'focus', TRUE, 1, NOW()),
+        ('119', 'Superliga',                   'Denmark',     'men', 1, 'whitelist', 'approved', 'focus', TRUE, 1, NOW()),
+        ('135', 'Serie A',                     'Italy',       'men', 1, 'whitelist', 'approved', 'focus', TRUE, 1, NOW()),
+        ('140', 'La Liga',                     'Spain',       'men', 1, 'whitelist', 'approved', 'focus', TRUE, 1, NOW()),
+        ('141', 'Segunda Division',            'Spain',       'men', 2, 'whitelist', 'approved', 'focus', TRUE, 1, NOW()),
+        ('144', 'Jupiler Pro League',          'Belgium',     'men', 1, 'whitelist', 'approved', 'focus', TRUE, 1, NOW()),
+        ('203', 'Süper Lig',                   'Turkey',      'men', 1, 'whitelist', 'approved', 'focus', TRUE, 1, NOW()),
+        ('244', 'Veikkausliiga',               'Finland',     'men', 1, 'whitelist', 'approved', 'focus', TRUE, 1, NOW()),
+        ('207', 'Super League',                 'Switzerland', 'men', 1, 'whitelist', 'approved', 'focus', TRUE, 1, NOW()),
+        ('210', 'HNL',                          'Croatia',     'men', 1, 'whitelist', 'approved', 'focus', TRUE, 1, NOW()),
+        ('218', '2. Liga',                      'Austria',     'men', 2, 'whitelist', 'approved', 'focus', TRUE, 1, NOW()),
+        ('253', 'Major League Soccer',          'USA',         'men', 1, 'whitelist', 'approved', 'focus', TRUE, 1, NOW()),
 
-        ('45',  'FA Cup',                      'England',     'men', NULL, 'whitelist', 'approved', NOW()),
-        ('48',  'EFL Cup',                     'England',     'men', NULL, 'whitelist', 'approved', NOW()),
-        ('66',  'Coupe de France',             'France',      'men', NULL, 'whitelist', 'approved', NOW()),
-        ('81',  'DFB Pokal',                   'Germany',     'men', NULL, 'whitelist', 'approved', NOW()),
-        ('90',  'KNVB Beker',                  'Netherlands', 'men', NULL, 'whitelist', 'approved', NOW()),
-        ('96',  'Taça de Portugal',            'Portugal',    'men', NULL, 'whitelist', 'approved', NOW()),
-        ('104', 'NM Cupen',                    'Norway',      'men', NULL, 'whitelist', 'approved', NOW()),
-        ('106', 'Ekstraklasa',                 'Poland',      'men', 1, 'whitelist', 'approved', NOW()),
-        ('137', 'Coppa Italia',                'Italy',       'men', NULL, 'whitelist', 'approved', NOW()),
-        ('143', 'Copa del Rey',                'Spain',       'men', NULL, 'whitelist', 'approved', NOW()),
-        ('147', 'Belgian Cup',                 'Belgium',     'men', NULL, 'whitelist', 'approved', NOW()),
-        ('245', 'Suomen Cup',                  'Finland',     'men', NULL, 'whitelist', 'approved', NOW()),
+        ('45',  'FA Cup',                      'England',     'men', NULL, 'whitelist', 'approved', 'focus', TRUE, 1, NOW()),
+        ('48',  'EFL Cup',                     'England',     'men', NULL, 'whitelist', 'approved', 'focus', TRUE, 1, NOW()),
+        ('66',  'Coupe de France',             'France',      'men', NULL, 'whitelist', 'approved', 'focus', TRUE, 1, NOW()),
+        ('81',  'DFB Pokal',                   'Germany',     'men', NULL, 'whitelist', 'approved', 'focus', TRUE, 1, NOW()),
+        ('90',  'KNVB Beker',                  'Netherlands', 'men', NULL, 'whitelist', 'approved', 'focus', TRUE, 1, NOW()),
+        ('96',  'Taça de Portugal',            'Portugal',    'men', NULL, 'whitelist', 'approved', 'focus', TRUE, 1, NOW()),
+        ('104', 'NM Cupen',                    'Norway',      'men', NULL, 'whitelist', 'approved', 'focus', TRUE, 1, NOW()),
+        ('106', 'Ekstraklasa',                 'Poland',      'men', 1, 'whitelist', 'approved', 'focus', TRUE, 1, NOW()),
+        ('137', 'Coppa Italia',                'Italy',       'men', NULL, 'whitelist', 'approved', 'focus', TRUE, 1, NOW()),
+        ('143', 'Copa del Rey',                'Spain',       'men', NULL, 'whitelist', 'approved', 'focus', TRUE, 1, NOW()),
+        ('147', 'Belgian Cup',                 'Belgium',     'men', NULL, 'whitelist', 'approved', 'focus', TRUE, 1, NOW()),
+        ('245', 'Suomen Cup',                  'Finland',     'men', NULL, 'whitelist', 'approved', 'focus', TRUE, 1, NOW()),
 
-        ('2',   'UEFA Champions League',       'World',       'men', NULL, 'whitelist', 'approved', NOW()),
-        ('3',   'UEFA Europa League',          'World',       'men', NULL, 'whitelist', 'approved', NOW()),
-        ('848', 'UEFA Conference League',      'World',       'men', NULL, 'whitelist', 'approved', NOW())
+        ('2',   'UEFA Champions League',       'World',       'men', NULL, 'whitelist', 'approved', 'focus', TRUE, 1, NOW()),
+        ('3',   'UEFA Europa League',          'World',       'men', NULL, 'whitelist', 'approved', 'focus', TRUE, 1, NOW()),
+        ('848', 'UEFA Conference League',      'World',       'men', NULL, 'whitelist', 'approved', 'focus', TRUE, 1, NOW())
       ON CONFLICT (league_id) DO UPDATE SET
         league_name = EXCLUDED.league_name,
         country = EXCLUDED.country,
@@ -542,6 +593,9 @@ class PhoenixDatabase {
         competition_level = EXCLUDED.competition_level,
         manual_status = 'whitelist',
         historical_status = 'approved',
+        collection_tier = 'focus',
+        background_enabled = TRUE,
+        detail_refresh_hours = 1,
         updated_at = NOW()
     ''');
 
@@ -550,10 +604,11 @@ class PhoenixDatabase {
     await db.execute(r'''
       INSERT INTO football_leagues (
         league_id, league_name, country, gender, competition_level,
-        manual_status, historical_status, updated_at
+        manual_status, historical_status, collection_tier, background_enabled,
+        detail_refresh_hours, updated_at
       ) VALUES (
         '116', 'Premier League', 'Belarus', 'men', 1,
-        'blacklist', 'blacklist', NOW()
+        'blacklist', 'blacklist', 'blocked', FALSE, 0, NOW()
       )
       ON CONFLICT (league_id) DO UPDATE SET
         league_name = EXCLUDED.league_name,
@@ -562,6 +617,9 @@ class PhoenixDatabase {
         competition_level = EXCLUDED.competition_level,
         manual_status = 'blacklist',
         historical_status = 'blacklist',
+        collection_tier = 'blocked',
+        background_enabled = FALSE,
+        detail_refresh_hours = 0,
         updated_at = NOW()
     ''');
 
@@ -3345,6 +3403,9 @@ class PhoenixDatabase {
           l.gender,
           l.competition_level,
           l.manual_status,
+          l.collection_tier,
+          l.background_enabled,
+          l.detail_refresh_hours,
           l.historical_status,
           l.total_samples,
           s.season,
@@ -3377,6 +3438,114 @@ class PhoenixDatabase {
         .map((row) => row[0]?.toString().trim() ?? '')
         .where((id) => id.isNotEmpty)
         .toSet();
+  }
+
+  /// Liefert die aktuelle Verarbeitungsstufe für eine Menge Provider-Ligen.
+  /// Unbekannte Ligen gehören bewusst zum Datenpool: Sie werden gespeichert
+  /// und können Daten aufbauen, erscheinen aber nie als öffentliche Tipps.
+  Future<Map<String, FootballLeagueTier>> footballLeagueTiers(
+    Iterable<String> leagueIds,
+  ) async {
+    final ids = leagueIds
+        .map((id) => id.trim())
+        .where((id) => id.isNotEmpty)
+        .toSet()
+        .toList(growable: false);
+    if (ids.isEmpty) return const <String, FootballLeagueTier>{};
+
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT league_id, collection_tier, manual_status
+        FROM football_leagues
+        WHERE league_id = ANY(@league_ids)
+      '''),
+      parameters: {'league_ids': ids},
+    );
+    return {
+      for (final row in result)
+        row[0].toString(): FootballLeagueTier.fromStorage(
+          row[1] ?? row[2],
+        ),
+    };
+  }
+
+  Future<List<Map<String, Object?>>> footballLeagueBackgroundPolicies({
+    int limit = 2000,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT league_id, league_name, country, collection_tier,
+               detail_refresh_hours, last_seen_at
+        FROM football_leagues
+        WHERE background_enabled = TRUE
+          AND collection_tier IN ('focus', 'watchlist', 'data_pool')
+        ORDER BY
+          CASE collection_tier
+            WHEN 'focus' THEN 1
+            WHEN 'watchlist' THEN 2
+            ELSE 3
+          END,
+          last_seen_at DESC
+        LIMIT @limit
+      '''),
+      parameters: {'limit': limit.clamp(1, 5000)},
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList(growable: false);
+  }
+
+  Future<String?> setFootballLeagueTier({
+    required String leagueId,
+    required FootballLeagueTier tier,
+  }) async {
+    final db = await connection();
+    final previousRows = await db.execute(
+      Sql.named('''
+        SELECT collection_tier, manual_status
+        FROM football_leagues
+        WHERE league_id = @league_id
+      '''),
+      parameters: {'league_id': leagueId},
+    );
+    if (previousRows.isEmpty) return null;
+
+    final previous = FootballLeagueTier.fromStorage(
+      previousRows.first[0] ?? previousRows.first[1],
+    );
+    final manualStatus = switch (tier) {
+      FootballLeagueTier.focus => 'whitelist',
+      FootballLeagueTier.blocked => 'blacklist',
+      _ => 'auto',
+    };
+    final refreshHours = switch (tier) {
+      FootballLeagueTier.focus => 1,
+      FootballLeagueTier.watchlist => 6,
+      FootballLeagueTier.dataPool => 24,
+      FootballLeagueTier.blocked => 0,
+    };
+
+    await db.execute(
+      Sql.named('''
+        UPDATE football_leagues
+        SET collection_tier = @tier,
+            manual_status = @manual_status,
+            background_enabled = @enabled,
+            detail_refresh_hours = @refresh_hours,
+            updated_at = NOW()
+        WHERE league_id = @league_id
+      '''),
+      parameters: {
+        'league_id': leagueId,
+        'tier': tier.storageKey,
+        'manual_status': manualStatus,
+        'enabled': tier.isBackgroundEnabled,
+        'refresh_hours': refreshHours,
+      },
+    );
+    return previous.storageKey;
   }
 
   Future<void> upsertLeagueSeen({
@@ -3589,6 +3758,9 @@ class PhoenixDatabase {
           l.gender,
           l.competition_level,
           l.manual_status,
+          l.collection_tier,
+          l.background_enabled,
+          l.detail_refresh_hours,
           l.historical_status,
           l.total_samples,
           l.successful_full_analyses,
@@ -3670,13 +3842,29 @@ class PhoenixDatabase {
     final previousStatus =
         previousRows.first.toColumnMap()['manual_status']?.toString() ?? 'auto';
 
+    final tier = FootballLeagueTier.fromLegacyManualStatus(manualStatus);
+    final refreshHours = switch (tier) {
+      FootballLeagueTier.focus => 1,
+      FootballLeagueTier.blocked => 0,
+      _ => 24,
+    };
     await db.execute(
       Sql.named('''
         UPDATE football_leagues
-        SET manual_status = @manual_status, updated_at = NOW()
+        SET manual_status = @manual_status,
+            collection_tier = @collection_tier,
+            background_enabled = @background_enabled,
+            detail_refresh_hours = @refresh_hours,
+            updated_at = NOW()
         WHERE league_id = @league_id
       '''),
-      parameters: {'league_id': leagueId, 'manual_status': manualStatus},
+      parameters: {
+        'league_id': leagueId,
+        'manual_status': manualStatus,
+        'collection_tier': tier.storageKey,
+        'background_enabled': tier.isBackgroundEnabled,
+        'refresh_hours': refreshHours,
+      },
     );
 
     return previousStatus;
@@ -3935,6 +4123,62 @@ class PhoenixDatabase {
     );
   }
 
+  /// Budgetierte Kandidaten für den Hintergrund-Detailscan. Sie verwenden
+  /// exakt dieselben Phase-2-/Coverage-Tabellen wie Fokus-Ligen, werden aber
+  /// mit `analysis_allowed=false` gespeichert und können daher nie als
+  /// öffentlicher Tipp erscheinen.
+  Future<List<Map<String, Object?>>> backgroundEnrichmentCandidates({
+    required DateTime anchorDate,
+    int limit = 30,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT
+          m.id AS fixture_id,
+          m.league_id,
+          m.raw_json,
+          l.collection_tier,
+          COALESCE(NULLIF(m.raw_json->>'season', '')::INTEGER,
+                   EXTRACT(YEAR FROM m.kickoff_utc)::INTEGER) AS season,
+          COALESCE(last_detail.created_at, '-infinity'::timestamptz)
+            AS last_detail_at,
+          l.detail_refresh_hours
+        FROM football_matches m
+        INNER JOIN football_leagues l ON l.league_id = m.league_id
+        LEFT JOIN LATERAL (
+          SELECT p.created_at
+          FROM football_phase_two_results p
+          WHERE p.fixture_id = m.id
+          ORDER BY p.created_at DESC
+          LIMIT 1
+        ) last_detail ON TRUE
+        WHERE l.background_enabled = TRUE
+          AND l.collection_tier IN ('watchlist', 'data_pool')
+          AND m.kickoff_utc >= @from_date
+          AND m.kickoff_utc < @until_date
+          AND (
+            last_detail.created_at IS NULL
+            OR last_detail.created_at < NOW()
+              - make_interval(hours => l.detail_refresh_hours)
+          )
+        ORDER BY
+          CASE l.collection_tier WHEN 'watchlist' THEN 1 ELSE 2 END,
+          last_detail_at ASC,
+          m.kickoff_utc ASC
+        LIMIT @limit
+      '''),
+      parameters: {
+        'from_date': anchorDate.toUtc().subtract(const Duration(days: 7)),
+        'until_date': anchorDate.toUtc().add(const Duration(days: 3)),
+        'limit': limit.clamp(1, 100),
+      },
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList(growable: false);
+  }
+
   Future<List<Map<String, Object?>>> geminiPhaseTwoCandidates({
     required int phaseTwoScanRunId,
     int limit = 1000000,
@@ -3994,6 +4238,7 @@ class PhoenixDatabase {
   Future<List<Map<String, Object?>>> phaseFourCandidates({
     required int phaseTwoScanRunId,
     int limit = 1000000,
+    bool includeBackground = false,
   }) async {
     final db = await connection();
     final result = await db.execute(
@@ -4052,10 +4297,13 @@ class PhoenixDatabase {
         ) fallback_context
           ON current_context.context_result IS NULL
         WHERE p.scan_run_id = @scan_run_id
-          AND p.analysis_allowed = TRUE
+          AND (p.analysis_allowed = TRUE OR @include_background = TRUE)
         ORDER BY p.data_quality DESC, p.fixture_id
       '''),
-      parameters: {'scan_run_id': phaseTwoScanRunId},
+      parameters: {
+        'scan_run_id': phaseTwoScanRunId,
+        'include_background': includeBackground,
+      },
     );
     return result
         .map((row) => Map<String, Object?>.from(row.toColumnMap()))
@@ -6082,7 +6330,8 @@ class PhoenixDatabase {
 
   /// Section 19/21: Leakage-sicherer Rohdatensatz für das Learning-System -
   /// ein Datensatz je Fixture (der letzte VOR dem Kickoff gespeicherte
-  /// Pre-Match-Snapshot), nur für whitelisted Ligen, nur für abgeschlossene
+  /// Pre-Match-Snapshot), nur für Fokus- und Beobachtungs-Ligen, nur für
+  /// abgeschlossene
   /// Matches mit bekanntem Endstand. Das Outcome (home_goals/away_goals)
   /// stammt ausschließlich aus dem NACH Matchende befüllten football_matches
   /// - niemals aus denselben Feldern, die als Pre-Match-Feature dienen.
@@ -6122,7 +6371,7 @@ class PhoenixDatabase {
           FROM football_live_events
           WHERE fixture_id = ei.fixture_id AND event_type = 'redCard'
         ) rc ON TRUE
-        WHERE fl.manual_status = 'whitelist'
+        WHERE fl.collection_tier IN ('focus', 'watchlist')
           AND m.status = ANY(@finished_statuses)
           AND m.home_goals IS NOT NULL
           AND m.away_goals IS NOT NULL
@@ -6174,7 +6423,8 @@ class PhoenixDatabase {
         m.status,
         m.home_goals,
         m.away_goals,
-        fl.manual_status
+        fl.manual_status,
+        fl.collection_tier
       FROM football_engine_inputs ei
       LEFT JOIN football_matches m ON m.id = ei.fixture_id
       LEFT JOIN football_leagues fl ON fl.league_id = ei.league_id
@@ -6212,7 +6462,7 @@ class PhoenixDatabase {
         FROM football_engine_inputs ei
         JOIN football_matches m ON m.id = ei.fixture_id
         JOIN football_leagues fl ON fl.league_id = ei.league_id
-        WHERE fl.manual_status = 'whitelist'
+        WHERE fl.collection_tier IN ('focus', 'watchlist')
           AND m.kickoff_utc IS NOT NULL
           AND m.kickoff_utc > NOW()
           AND ei.created_at < m.kickoff_utc
@@ -6226,14 +6476,16 @@ class PhoenixDatabase {
         .toList();
   }
 
-  /// Alle für das Model Lab whitelisted Ligen mit Basisdaten (Section 3/90).
+  /// Alle für das Model Lab zugelassenen Fokus- und Beobachtungs-Ligen.
+  /// Der Datenpool bleibt bewusst ein reiner Datensammler, damit ein späterer
+  /// Modelllauf nicht tausende noch unzureichend geprüfte Ligen trainiert.
   Future<List<Map<String, Object?>>> modelLabWhitelistedLeagues() async {
     final db = await connection();
     final result = await db.execute('''
       SELECT league_id, league_name, country, gender, competition_level,
-             total_samples, successful_full_analyses
+             total_samples, successful_full_analyses, collection_tier
       FROM football_leagues
-      WHERE manual_status = 'whitelist'
+      WHERE collection_tier IN ('focus', 'watchlist')
       ORDER BY league_name
     ''');
     return result
