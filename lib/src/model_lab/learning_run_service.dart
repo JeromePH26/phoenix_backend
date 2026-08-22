@@ -42,10 +42,23 @@ class LearningRunService {
       await baselineRegistry.ensureGlobalBaseline(market.key);
     }
 
-    final locked = await database.acquireModelLabLock(
+    var locked = await database.acquireModelLabLock(
       lockName,
       staleAfterMinutes: config.staleLockMinutes,
     );
+    // Ein alter Prozess kann durch Deploy/Crash verschwinden, ohne seinen
+    // Datenbank-Lock zu entfernen. Vor einem vorschnellen "skipped" wird
+    // deshalb genau einmal die sichere Orphan-Reconciliation versucht und
+    // der Lock erneut erworben. Ein frischer Run bleibt dabei unberührt.
+    if (!locked) {
+      await database.recoverOrphanedLearningRunAndLock(
+        staleAfterMinutes: config.staleLockMinutes,
+      );
+      locked = await database.acquireModelLabLock(
+        lockName,
+        staleAfterMinutes: config.staleLockMinutes,
+      );
+    }
     if (!locked) {
       return {
         'status': 'skipped',

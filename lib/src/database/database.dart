@@ -6669,12 +6669,22 @@ class PhoenixDatabase {
   /// aber älter als [staleAfterMinutes] sind, als "failed" nach. Wird direkt
   /// nach dem (ggf. per Stale-Reclaim erfolgreichen) Lock-Erwerb aufgerufen,
   /// damit die UI nie unbegrenzt einen toten Run als RUNNING anzeigt.
-  Future<void> reconcileOrphanedLearningRuns({
+  /// Repariert einen abgebrochenen Learning-Run inklusive seines Locks.
+  ///
+  /// Ein normaler Run schreibt seinen Status immer in [completeLearningRun]
+  /// und entfernt den Lock im finally-Block. Bleibt nach einem Deploy/Crash
+  /// trotzdem eine alte `running`-Zeile zurück, darf sie keinen neuen
+  /// Spieltag blockieren. Die Bereinigung greift ausschließlich, wenn es
+  /// KEINEN frischen Learning-Run innerhalb der konfigurierten Lease-Zeit
+  /// gibt. Sie markiert den alten Lauf nachvollziehbar als failed und gibt
+  /// seinen Lock frei; Modelle oder Produktionsprognosen werden nie gelöscht.
+  Future<int> recoverOrphanedLearningRunAndLock({
     required int staleAfterMinutes,
   }) async {
     final db = await connection();
-    await db.execute(
-      Sql.named('''
+    return db.runTx((session) async {
+      final orphaned = await session.execute(
+        Sql.named('''
         UPDATE phoenix_learning_runs SET
           status = 'failed',
           completed_at = NOW(),
@@ -6682,15 +6692,45 @@ class PhoenixDatabase {
           errors = CAST(@errors AS JSONB)
         WHERE status = 'running'
           AND started_at < NOW() - make_interval(mins => @stale_minutes)
+        RETURNING id
       '''),
-      parameters: {
-        'stale_minutes': staleAfterMinutes,
-        'errors': jsonEncode([
-          'Orphaned: Prozess wurde vor Abschluss beendet (z.B. durch einen '
-              'Deploy) und automatisch per Stale-Lock-Reconciliation als '
-              'failed markiert.',
-        ]),
-      },
+        parameters: {
+          'stale_minutes': staleAfterMinutes,
+          'errors': jsonEncode([
+            'Orphaned: Prozess wurde vor Abschluss beendet (z.B. durch einen '
+                'Deploy) und automatisch per Stale-Lock-Reconciliation als '
+                'failed markiert.',
+          ]),
+        },
+      );
+
+      if (orphaned.isEmpty) return 0;
+
+      // Nur wenn nach der Bereinigung kein frischer Run existiert, darf ein
+      // alter Lock entfernt werden. Das verhindert Paralleltraining bei
+      // einem tatsächlich aktiven Run.
+      await session.execute(
+        Sql.named('''
+          DELETE FROM phoenix_model_lab_locks
+          WHERE lock_name = 'learning_run'
+            AND NOT EXISTS (
+              SELECT 1 FROM phoenix_learning_runs
+              WHERE status = 'running'
+                AND started_at >= NOW() - make_interval(mins => @stale_minutes)
+            )
+        '''),
+        parameters: {'stale_minutes': staleAfterMinutes},
+      );
+      return orphaned.length;
+    });
+  }
+
+  /// Rückwärtskompatibler Name für bestehende Aufrufer.
+  Future<void> reconcileOrphanedLearningRuns({
+    required int staleAfterMinutes,
+  }) async {
+    await recoverOrphanedLearningRunAndLock(
+      staleAfterMinutes: staleAfterMinutes,
     );
   }
 
