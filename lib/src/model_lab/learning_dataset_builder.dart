@@ -21,6 +21,26 @@ class LearningDatasetBuilder {
       minDataQuality: config.minDataQuality,
     );
 
+    return _samplesFromRows(rows);
+  }
+
+  /// Lädt den gemeinsamen, leakage-sicheren Rohdatensatz genau einmal und
+  /// gruppiert ihn anschließend nach Liga. Ein Learning-Run bewertet viele
+  /// Märkte auf denselben Fixtures; ohne diesen Batch-Pfad wurde derselbe
+  /// Datenbank-Scan bisher für jeden Markt erneut ausgeführt.
+  Future<Map<String, List<LearningSample>>> buildSamplesByLeague() async {
+    final rows = await database.modelLabRawDataset(
+      minDataQuality: config.minDataQuality,
+    );
+    final grouped = <String, List<LearningSample>>{};
+    for (final sample in _samplesFromRows(rows)) {
+      grouped.putIfAbsent(sample.leagueId, () => <LearningSample>[])
+          .add(sample);
+    }
+    return grouped;
+  }
+
+  List<LearningSample> _samplesFromRows(List<Map<String, Object?>> rows) {
     final samples = <LearningSample>[];
     for (final row in rows) {
       final sample = _rowToSample(row);
@@ -202,4 +222,3 @@ class EligibilityAudit {
     'perLeague': perLeague.map((e) => e.toJson()).toList(),
   };
 }
-

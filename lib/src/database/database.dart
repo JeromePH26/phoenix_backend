@@ -5616,6 +5616,7 @@ class PhoenixDatabase {
                market_odds, assigned_units, payload
         FROM football_analysis_history
         WHERE TRUE
+          AND market_key <> ''
           $statusFilter
           $dateFilter
         ORDER BY kickoff
@@ -6540,6 +6541,45 @@ class PhoenixDatabase {
         UPDATE phoenix_learning_runs SET current_step = @step WHERE id = @id
       '''),
       parameters: {'id': id, 'step': currentStep},
+    );
+  }
+
+  /// Aktualisiert die sichtbaren Zwischenstände eines laufenden Learning-Runs.
+  /// Damit zeigt das Control Center während langer Auswertungen echten
+  /// Fortschritt statt dauerhaft 0/0 bis zur finalen Speicherung.
+  Future<void> updateLearningRunProgress({
+    required int id,
+    required String currentStep,
+    required int leaguesProcessed,
+    required int marketsProcessed,
+    required int eligibleMatches,
+    required int excludedMatches,
+    required int challengersCreated,
+    Map<String, Object?> summary = const {},
+  }) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        UPDATE phoenix_learning_runs SET
+          current_step = @step,
+          leagues_processed = @leagues_processed,
+          markets_processed = @markets_processed,
+          eligible_matches = @eligible_matches,
+          excluded_matches = @excluded_matches,
+          challengers_created = @challengers_created,
+          summary = CAST(@summary AS JSONB)
+        WHERE id = @id AND status = 'running'
+      '''),
+      parameters: {
+        'id': id,
+        'step': currentStep,
+        'leagues_processed': leaguesProcessed,
+        'markets_processed': marketsProcessed,
+        'eligible_matches': eligibleMatches,
+        'excluded_matches': excludedMatches,
+        'challengers_created': challengersCreated,
+        'summary': jsonEncode(summary),
+      },
     );
   }
 

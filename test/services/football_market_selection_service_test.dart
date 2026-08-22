@@ -263,6 +263,62 @@ void main() {
     );
 
     test(
+      'keeps a fallback as analysis lead but never publishes it as a '
+      'PHOENIX tip when it misses the 68 percent gate',
+      () {
+        final selection = service.selectForFixture(
+          fixtureId: 'fallback-only-fixture',
+          simulation: simulationWith(
+            probabilities: {
+              'homeWin': 0.36,
+              'draw': 0.27,
+              'awayWin': 0.37,
+              'over25': 0.44,
+              'under25': 0.56,
+              'bttsYes': 0.65,
+              'bttsNo': 0.35,
+            },
+            fairOdds: {'bttsYes': 1.54},
+            dataQuality: 90,
+            simulations: 100000,
+          ),
+          minimumProbabilityDecimal: 0.68,
+        );
+
+        expect(selection, isNotNull);
+        expect((selection!['phoenixTip'] as Map)['marketKey'], 'bttsYes');
+        expect(selection['qualifiesForTip'], isFalse);
+        expect((selection['display'] as Map)['showPhoenixTip'], isFalse);
+      },
+    );
+
+    test('publishes only candidates that clear probability and trust gates',
+        () {
+      final selection = service.selectForFixture(
+        fixtureId: 'qualified-fixture',
+        simulation: simulationWith(
+          probabilities: {
+            'homeWin': 0.74,
+            'draw': 0.14,
+            'awayWin': 0.12,
+            'over25': 0.45,
+            'under25': 0.55,
+            'bttsYes': 0.48,
+            'bttsNo': 0.52,
+          },
+          fairOdds: {'homeWin': 1.45},
+          dataQuality: 90,
+          simulations: 100000,
+        ),
+        minimumProbabilityDecimal: 0.68,
+      );
+
+      expect(selection, isNotNull);
+      expect(selection!['qualifiesForTip'], isTrue);
+      expect((selection['display'] as Map)['showPhoenixTip'], isTrue);
+    });
+
+    test(
       'never silently reports 100000 simulations when the raw field is '
       'missing - reports the honest value instead',
       () {

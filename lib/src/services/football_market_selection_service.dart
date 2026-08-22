@@ -377,13 +377,15 @@ class FootballMarketSelectionService {
         realXgAvailable: realXgAvailable,
       );
 
-      // Publish Gate: ohne echte Simulationsläufe oder Datenqualität keine
-      // vertrauenswürdige Empfehlung veröffentlichen - das Spiel bleibt
-      // sichtbar, aber ohne Tipp (qualifiesForTip: false).
+      // Publish Gate: Eine rechnerische Markt-Führung ist noch kein
+      // veröffentlichter PHÖNIX-Tipp. Unsichere Fallbacks bleiben als
+      // Analyse sichtbar, dürfen aber weder in die Tipp-Historie noch in die
+      // Performance einfließen.
       final qualifiesForTip =
           bestProbability >= minimumProbabilityDecimal.clamp(0.0, 1.0) &&
               simulations > 0 &&
-              dataQuality > 0;
+              dataQuality >= 60 &&
+              trustScore >= 60;
 
       final selection = <String, Object?>{
         'fixtureId': fixtureId,
@@ -433,10 +435,12 @@ class FootballMarketSelectionService {
         'display': {
           'primaryLabel': 'PHÖNIX-TIPP',
           'valueLabel': 'VALUE-TIPP',
-          'showPhoenixTip': true,
+          'showPhoenixTip': qualifiesForTip,
           'showValueTip': false,
         },
         'warnings': [
+          if (!qualifiesForTip)
+            'Analyse vorhanden, aber kein PHÖNIX-Tipp: Mindestwerte nicht erreicht.',
           if (!realXgAvailable) 'Noch keine echten xG/xGA-Daten vorhanden.',
           if (aiContext['lineupStatus'] != 'confirmed')
             'Bestätigte Aufstellung ist noch nicht verfügbar.',
@@ -474,57 +478,13 @@ class FootballMarketSelectionService {
     };
   }
 
-  /// Balanciert Sicherheit und Aussagekraft. Ohne diese Gewichtung gewinnt
-  /// fast immer die mathematisch breiteste Absicherung (1X/X2 oder Ü1,5),
-  /// obwohl ein konkreter Markt nur wenige Prozentpunkte dahinterliegt. Die
-  /// Modellwahrscheinlichkeit selbst bleibt dabei vollständig unverändert.
+  /// Die Markt-Auswahl bleibt neutral: Sie folgt ausschließlich der
+  /// modellierten Wahrscheinlichkeit. Mindestquoten und der Publish-Gate
+  /// schützen bereits vor trivialen Absicherungen; künstliche Boni für BTTS,
+  /// Tore oder einzelne Marktarten würden die Engine sonst systematisch
+  /// verzerren.
   double _selectionScore(Map<String, Object?> candidate) {
-    final key = _string(candidate['key']);
-    final probability = _asProbability(candidate['probability']);
-    final fairOdds = _number(candidate['fairOdds']) ??
-        (probability > 0 ? 1 / probability : 0);
-
-    var specificityAdjustment = 0.0;
-    if (const {'over05', 'under55'}.contains(key)) {
-      specificityAdjustment = -0.20;
-    } else if (const {'over15', 'dc1x', 'dcX2'}.contains(key)) {
-      specificityAdjustment = -0.09;
-    } else if (key == 'dc12' || key == 'under45') {
-      specificityAdjustment = -0.04;
-    } else if (key.startsWith('combo')) {
-      specificityAdjustment = 0.055;
-    } else if (const {
-      'homeWin',
-      'draw',
-      'awayWin',
-      'over35',
-      'under35',
-      'over25',
-      'under25',
-      'bttsYes',
-      'bttsNo',
-      'homeOver15',
-      'homeUnder15',
-      'awayOver15',
-      'awayUnder15',
-      'homeOver25',
-      'homeUnder25',
-      'awayOver25',
-      'awayUnder25',
-      'dnbHome',
-      'dnbAway',
-    }.contains(key)) {
-      specificityAdjustment = 0.025;
-    }
-
-    // Faire Quoten im praxisnahen Bereich erhalten einen kleinen Bonus.
-    // Sehr niedrige Quoten bleiben sichtbar, dominieren aber nicht den Pick.
-    final oddsAdjustment = fairOdds >= 1.40 && fairOdds <= 2.80
-        ? 0.02
-        : fairOdds < 1.30
-            ? -0.04
-            : 0.0;
-    return probability + specificityAdjustment + oddsAdjustment;
+    return _asProbability(candidate['probability']);
   }
 
   /// Marktbezogene Mindestquoten sind ein Qualitätsfilter, keine implizite

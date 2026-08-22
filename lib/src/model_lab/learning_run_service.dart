@@ -150,8 +150,29 @@ class LearningRunService {
         id: runId, currentStep: 'loading_whitelist');
     final leagues = await database.modelLabWhitelistedLeagues();
 
+    // Alle Märkte eines Fixtures verwenden denselben Pre-Match-Snapshot.
+    // Der Batch verhindert damit 17 identische Datenbank-Abfragen pro
+    // Liga und macht die Lernläufe auch bei vielen historischen Spielen
+    // zuverlässig innerhalb eines Worker-Zyklus fertig.
+    await database.updateLearningRunProgress(
+      id: runId,
+      currentStep: 'loading_training_data',
+      leaguesProcessed: 0,
+      marketsProcessed: 0,
+      eligibleMatches: audit.eligible,
+      excludedMatches: audit.notEligible,
+      challengersCreated: 0,
+      summary: {
+        'phase': 'loading_training_data',
+        'leagueCount': leagues.length,
+      },
+    );
+    final samplesByLeague = await datasetBuilder.buildSamplesByLeague();
+
     var challengersCreated = 0;
     var marketsProcessed = 0;
+    var leagueMarketPairsProcessed = 0;
+    final processedLeagueIds = <String>{};
     final leagueStatusSummary = <Map<String, Object?>>[];
 
     await database.updateLearningRunStep(
@@ -159,7 +180,10 @@ class LearningRunService {
       currentStep: 'processing_league_markets',
     );
 
-    for (final market in LearningMarket.values) {
+    for (var marketIndex = 0;
+        marketIndex < LearningMarket.values.length;
+        marketIndex++) {
+      final market = LearningMarket.values[marketIndex];
       // Schritt 7: Global Champion laden (bzw. anlegen, falls es der allererste
       // Lauf ist).
       await registry.ensureGlobalBaseline(market.key);
@@ -169,9 +193,11 @@ class LearningRunService {
         final leagueId = league['league_id']?.toString();
         if (leagueId == null) continue;
 
+        try {
+
         // Schritt 5/6: Trainingsdatensatz + Liga x Markt-Samples
         // aktualisieren.
-        final samples = await datasetBuilder.buildSamples(leagueId: leagueId);
+        final samples = samplesByLeague[leagueId] ?? const [];
 
         // Section 21/89: Learning-Flags je Fixture x Markt aktualisieren,
         // damit die Model-Lab-UI exakt nachvollziehen kann, welches Match
@@ -244,7 +270,15 @@ class LearningRunService {
         final championId = baselineModel['id'] as int;
 
         final grid = ChallengerGenerator.candidateAttackWeights(config);
-        for (var i = 0; i < grid.length; i++) {
+        // Die Challenger-Obergrenze ist ein echter Sicherheitsmechanismus,
+        // keine reine Konfigurations-Dokumentation. Ohne sie erzeugte jeder
+        // neue Lauf dieselben Varianten erneut bzw. meldete sie fälschlich
+        // als neu erstellt.
+        final remainingSlots =
+            config.maxChallengersPerLeagueMarket - existingChallengers.length;
+        if (remainingSlots <= 0) continue;
+        final candidates = grid.take(remainingSlots).toList(growable: false);
+        for (var i = 0; i < candidates.length; i++) {
           final challengerIndex = await registry.nextChallengerIndex(
             leagueId: leagueId,
             market: market.key,
@@ -255,7 +289,7 @@ class LearningRunService {
             market: market.key,
             generation: generation,
             challengerIndex: challengerIndex,
-            rawWeights: EngineWeightConfig(attackWeight: grid[i]),
+            rawWeights: EngineWeightConfig(attackWeight: candidates[i]),
             sampleSize: eligibleSampleSize,
             parentModelId: championId,
             trainingStart:
@@ -307,6 +341,32 @@ class LearningRunService {
               challengerModelId: created.id,
             );
           }
+        }
+        } finally {
+          leagueMarketPairsProcessed += 1;
+          processedLeagueIds.add(leagueId);
+          // Der finale Run schreibt diese Werte ebenfalls. Dieses Update
+          // während des Laufs ist bewusst klein und gibt der UI einen echten
+          // Heartbeat; bei einem Absturz bleibt so zudem der letzte sichere
+          // Arbeitsschritt nachvollziehbar.
+          await database.updateLearningRunProgress(
+            id: runId,
+            currentStep: 'processing_league_markets',
+            leaguesProcessed: processedLeagueIds.length,
+            marketsProcessed: marketIndex + 1,
+            eligibleMatches: audit.eligible,
+            excludedMatches: audit.notEligible,
+            challengersCreated: challengersCreated,
+            summary: {
+              'phase': 'processing_league_markets',
+              'currentLeagueId': leagueId,
+              'currentLeagueName': league['league_name'],
+              'currentMarket': market.key,
+              'leagueMarketPairsProcessed': leagueMarketPairsProcessed,
+              'leagueMarketPairsTotal':
+                  leagues.length * LearningMarket.values.length,
+            },
+          );
         }
       }
     }

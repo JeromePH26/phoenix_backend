@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:shelf/shelf.dart';
 import 'package:shelf_router/shelf_router.dart';
 
@@ -365,13 +367,19 @@ class ModelLabRoutes {
         }, statusCode: 503);
       }
       try {
-        // Section 79: exakt dieselbe Business-Logik wie der geplante
-        // Dienstags-Job, nur mit trigger_type='manual'.
-        final result = await LearningRunService(
+        // Ein vollständiger Run verarbeitet Liga × Markt-Kombinationen und
+        // kann mehrere Minuten dauern. Er muss deshalb im Server weiterlaufen,
+        // nachdem das Control Center die sofortige Annahme bestätigt hat -
+        // sonst läuft das Reverse-Proxy-Timeout ab, obwohl der Run gesund ist.
+        final service = LearningRunService(
           database: database,
           config: modelLabConfig,
-        ).run(triggerType: 'manual');
-        return jsonResponse(result, statusCode: 202);
+        );
+        unawaited(service.run(triggerType: 'manual'));
+        return jsonResponse({
+          'status': 'accepted',
+          'message': 'Learning-Run wurde im Hintergrund gestartet.',
+        }, statusCode: 202);
       } catch (error) {
         return jsonResponse({'error': error.toString()}, statusCode: 500);
       }

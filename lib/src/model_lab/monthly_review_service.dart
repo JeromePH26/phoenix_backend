@@ -8,8 +8,10 @@ import 'model_registry_service.dart';
 import 'walk_forward_evaluator.dart';
 
 /// Section 48-52: der monatliche Champion Review am ersten Mittwoch. Erzeugt
-/// pro Liga x Markt-Kombination mit mindestens einem Challenger EINE
-/// Empfehlung (niemals eine automatische Promotion, Section 53/95).
+/// pro Liga x Markt-Kombination mit mindestens einem Challenger eine
+/// Empfehlung. Eine automatische Promotion ist nur möglich, wenn sie
+/// explizit per ENV freigegeben ist UND alle statistischen Gates bestanden
+/// wurden; ohne dieses Opt-in bleibt der Review rein beobachtend.
 class MonthlyReviewService {
   MonthlyReviewService({required this.database, required this.config});
 
@@ -121,9 +123,9 @@ class MonthlyReviewService {
     required int year,
     required int month,
   }) async {
-    final championModel =
-        await registry.currentChampion(leagueId: leagueId, market: market.key) ??
-            await database.globalBaselineModel(market.key);
+    final championModel = await registry.currentChampion(
+            leagueId: leagueId, market: market.key) ??
+        await database.globalBaselineModel(market.key);
 
     if (championModel == null) {
       return _persistReview(
@@ -186,7 +188,8 @@ class MonthlyReviewService {
         lossDifferences: combinedDifferences,
         resamples: config.bootstrapResamples,
         confidenceLevel: config.bootstrapConfidenceLevel,
-        minSampleSize: 1, // Sample-Gate erfolgt separat gegen minPromotionSample.
+        minSampleSize:
+            1, // Sample-Gate erfolgt separat gegen minPromotionSample.
       );
 
       perChallenger.add({
@@ -242,7 +245,8 @@ class MonthlyReviewService {
       switch (uncertainty.status) {
         case ComparisonStatus.challengerClearlyBetter:
           recommendation = 'PROMOTION_EMPFOHLEN';
-          reason = 'Challenger ${bestChallenger['readable_version']} ist statistisch '
+          reason =
+              'Challenger ${bestChallenger['readable_version']} ist statistisch '
               'klar besser (Brier-Differenz ${uncertainty.meanDifference.toStringAsFixed(4)}, '
               '95%-CI [${uncertainty.lowerBound.toStringAsFixed(4)}, '
               '${uncertainty.upperBound.toStringAsFixed(4)}]).';
@@ -251,14 +255,15 @@ class MonthlyReviewService {
           reason = 'Kein statistisch eindeutiger Unterschied zum Champion.';
         case ComparisonStatus.championBetter:
           recommendation = 'CHALLENGER_SCHLECHTER';
-          reason = 'Champion performt statistisch besser als der beste Challenger.';
+          reason =
+              'Champion performt statistisch besser als der beste Challenger.';
         case ComparisonStatus.notEnoughData:
           recommendation = 'NICHT_GENUG_DATEN';
           reason = 'Statistische Unsicherheit zu groß für eine Aussage.';
       }
     }
 
-    return _persistReview(
+    final persisted = await _persistReview(
       year: year,
       month: month,
       leagueId: leagueId,
@@ -271,6 +276,38 @@ class MonthlyReviewService {
       recommendation: recommendation,
       reason: reason,
     );
+
+    // Selbstständiges Lernen bedeutet nicht, ungetestete Gewichte zu
+    // aktivieren. Nur ein klar besserer Challenger mit ausreichender,
+    // out-of-sample belegter Datenmenge darf nach expliziter ENV-Freigabe
+    // den Champion ersetzen. Die Promotion ist DB-versioniert und wird von
+    // der produktiven Simulation beim nächsten Scan marktweise gelesen.
+    if (recommendation == 'PROMOTION_EMPFOHLEN' && config.promotionEnabled) {
+      final challengerId = bestChallenger['id'] as int;
+      await database.promoteModel(
+        newChampionId: challengerId,
+        previousChampionId: championId,
+      );
+      await database.insertModelLabAuditLog(
+        action: 'promotion_automatic',
+        actor: 'model_lab',
+        modelVersionId: challengerId,
+        leagueId: leagueId,
+        market: market.key,
+        details: {
+          'reviewId': persisted['id'],
+          'combinedSample': combinedSample,
+          'meanBrierDifference': uncertainty.meanDifference,
+          'confidenceInterval': [
+            uncertainty.lowerBound,
+            uncertainty.upperBound
+          ],
+        },
+      );
+      return {...persisted, 'promotion': 'completed'};
+    }
+
+    return {...persisted, 'promotion': 'not_applied'};
   }
 
   /// Section 51: gepaarte, tatsächlich beobachtete Shadow-Performance -

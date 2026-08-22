@@ -1,6 +1,11 @@
 import 'dart:math';
 
+import '../config/model_lab_config.dart';
 import '../database/database.dart';
+import '../model_lab/engine_replica.dart';
+import '../model_lab/feature_whitelist.dart';
+import '../model_lab/learning_market.dart';
+import '../model_lab/model_registry_service.dart';
 
 class FootballSimulationService {
   FootballSimulationService({required this.database});
@@ -20,6 +25,27 @@ class FootballSimulationService {
       phaseTwoScanRunId: phaseTwoScanRunId,
       limit: limit ?? 1000000,
     );
+    final modelRegistry = ModelRegistryService(
+      database: database,
+      config: ModelLabConfig.fromEnvironment(),
+    );
+    final leagueIds = rows
+        .map((row) {
+          final input = _map(row['normalized_input']);
+          return _string(input['leagueId'] ?? row['league_id']);
+        })
+        .where((leagueId) => leagueId.isNotEmpty)
+        .toSet()
+        .toList(growable: false);
+    // Alle aktiven Liga-Champions werden in EINEM Query geladen. Ohne dieses
+    // Batch-Lookup wären bei 30 Ligen und 17 Märkten über 500 synchrone
+    // Datenbank-Roundtrips pro Tages-Scan nötig.
+    final championBatch =
+        await modelRegistry.currentChampionsAndChallengersBatch(
+      leagueIds: leagueIds,
+      markets: [for (final market in LearningMarket.values) market.key],
+    );
+    final appliedModelsByLeague = <String, _AppliedMarketModels>{};
 
     final outputs = <Map<String, Object?>>[];
 
@@ -40,11 +66,23 @@ class FootballSimulationService {
         continue;
       }
 
+      final leagueId = _string(input['leagueId'] ?? row['league_id']);
+      final activeModels = leagueId.isEmpty
+          ? const _AppliedMarketModels.empty()
+          : await _resolveLeagueChampionModels(
+              leagueId: leagueId,
+              input: input,
+              registry: modelRegistry,
+              cache: appliedModelsByLeague,
+              championsByLeagueMarket: championBatch.champions,
+            );
+
       final result = _simulate(
         input: input,
         homeLambda: homeLambda.clamp(0.05, 5.0).toDouble(),
         awayLambda: awayLambda.clamp(0.05, 5.0).toDouble(),
         simulations: safeSimulations,
+        activeModels: activeModels,
       );
 
       await database.saveFootballSimulationResult(
@@ -73,6 +111,7 @@ class FootballSimulationService {
     required double homeLambda,
     required double awayLambda,
     required int simulations,
+    required _AppliedMarketModels activeModels,
   }) {
     final fixtureId = _string(input['fixtureId']);
     final random = Random(_stableSeed(fixtureId, simulations));
@@ -191,6 +230,19 @@ class FootballSimulationService {
 
     final aiContext = _map(input['aiContext']);
     final normalized = _map(input['normalized']);
+    double learned(String key, double baseline) =>
+        activeModels.probabilities[key] ?? baseline;
+
+    final activeHome = learned('home', homeWinProbability);
+    final activeDraw = learned('draw', drawProbability);
+    final activeAway = learned('away', awayWinProbability);
+    final activeOver25 = learned('over25', over25Probability);
+    final activeUnder25 = learned('under25', under25Probability);
+    final activeBttsYes = learned('bttsYes', bttsYesProbability);
+    final activeBttsNo = learned('bttsNo', bttsNoProbability);
+    for (final entry in activeModels.probabilities.entries) {
+      extendedProbabilities[entry.key] = entry.value;
+    }
 
     return {
       'fixtureId': fixtureId,
@@ -211,40 +263,47 @@ class FootballSimulationService {
         'sourceType': input['sourceType'],
         'realXgAvailable': input['realXgAvailable'] == true,
       },
+      'modelLab': {
+        'applied': activeModels.models.isNotEmpty,
+        'marketModels': activeModels.models,
+        'note': activeModels.models.isEmpty
+            ? 'Kein liga-spezifischer Champion aktiv; statistische Global-Basis verwendet.'
+            : 'Aktive Liga-Champions wurden marktweise auf den gespeicherten Pre-Match-Input angewendet.',
+      },
       'probabilities': {
-        'home': _probability(homeWinProbability),
-        'draw': _probability(drawProbability),
-        'away': _probability(awayWinProbability),
-        'homeWin': _probability(homeWinProbability),
-        'awayWin': _probability(awayWinProbability),
-        'over25': _probability(over25Probability),
-        'under25': _probability(under25Probability),
-        'bttsYes': _probability(bttsYesProbability),
-        'bttsNo': _probability(bttsNoProbability),
+        'home': _probability(activeHome),
+        'draw': _probability(activeDraw),
+        'away': _probability(activeAway),
+        'homeWin': _probability(activeHome),
+        'awayWin': _probability(activeAway),
+        'over25': _probability(activeOver25),
+        'under25': _probability(activeUnder25),
+        'bttsYes': _probability(activeBttsYes),
+        'bttsNo': _probability(activeBttsNo),
         for (final entry in extendedProbabilities.entries)
           entry.key: _probability(entry.value),
       },
       'probabilitiesPercent': {
-        'home': _percent(homeWinProbability),
-        'draw': _percent(drawProbability),
-        'away': _percent(awayWinProbability),
-        'over25': _percent(over25Probability),
-        'under25': _percent(under25Probability),
-        'bttsYes': _percent(bttsYesProbability),
-        'bttsNo': _percent(bttsNoProbability),
+        'home': _percent(activeHome),
+        'draw': _percent(activeDraw),
+        'away': _percent(activeAway),
+        'over25': _percent(activeOver25),
+        'under25': _percent(activeUnder25),
+        'bttsYes': _percent(activeBttsYes),
+        'bttsNo': _percent(activeBttsNo),
         for (final entry in extendedProbabilities.entries)
           entry.key: _percent(entry.value),
       },
       'fairOdds': {
-        'home': _fairOdds(homeWinProbability),
-        'draw': _fairOdds(drawProbability),
-        'away': _fairOdds(awayWinProbability),
-        'homeWin': _fairOdds(homeWinProbability),
-        'awayWin': _fairOdds(awayWinProbability),
-        'over25': _fairOdds(over25Probability),
-        'under25': _fairOdds(under25Probability),
-        'bttsYes': _fairOdds(bttsYesProbability),
-        'bttsNo': _fairOdds(bttsNoProbability),
+        'home': _fairOdds(activeHome),
+        'draw': _fairOdds(activeDraw),
+        'away': _fairOdds(activeAway),
+        'homeWin': _fairOdds(activeHome),
+        'awayWin': _fairOdds(activeAway),
+        'over25': _fairOdds(activeOver25),
+        'under25': _fairOdds(activeUnder25),
+        'bttsYes': _fairOdds(activeBttsYes),
+        'bttsNo': _fairOdds(activeBttsNo),
         for (final entry in extendedProbabilities.entries)
           entry.key: _fairOdds(entry.value),
       },
@@ -267,8 +326,93 @@ class FootballSimulationService {
           'Kein verifizierter Gemini-Kontext in dieser Simulation.',
         if (aiContext['fallbackUsed'] == true)
           'Kontext-Fallback aus einem vorherigen verifizierten Lauf verwendet.',
+        if (activeModels.models.isNotEmpty)
+          'Liga-spezifische Champion-Modelle wurden marktweise angewendet.',
       ],
     };
+  }
+
+  Future<_AppliedMarketModels> _resolveLeagueChampionModels({
+    required String leagueId,
+    required Map<String, Object?> input,
+    required ModelRegistryService registry,
+    required Map<String, _AppliedMarketModels> cache,
+    required Map<String, Map<String, Object?>> championsByLeagueMarket,
+  }) async {
+    final cached = cache[leagueId];
+    if (cached != null) return cached;
+
+    final features = FeatureWhitelist.extract(input);
+    final probabilities = <String, double>{};
+    final models = <String, Object?>{};
+
+    for (final market in LearningMarket.values) {
+      // Nur ein tatsächlich beförderter Liga-Champion verändert künftige
+      // Vorhersagen. Die globale 50/50-Basis bleibt exakt die bisherige
+      // Produktionsformel und wird nicht als angeblich neue Erkenntnis
+      // ausgegeben.
+      final champion = championsByLeagueMarket[
+          ModelRegistryService.leagueMarketKey(leagueId, market.key)];
+      if (champion == null) continue;
+
+      final output = EngineReplica.evaluate(
+        market: market,
+        features: features,
+        weights: registry.weightsFromModel(champion),
+      );
+      _mergeLearnedProbabilities(
+        probabilities: probabilities,
+        market: market,
+        classProbabilities: output.classProbabilities,
+        classLabels: output.classLabels,
+      );
+      final weights = registry.weightsFromModel(champion);
+      models[market.key] = {
+        'modelVersionId': champion['id'],
+        'readableVersion': champion['readable_version'],
+        'attackWeight': _round(weights.attackWeight),
+        'defenseWeight': _round(weights.defenseWeight),
+      };
+    }
+
+    final resolved = _AppliedMarketModels(
+      probabilities: probabilities,
+      models: models,
+    );
+    cache[leagueId] = resolved;
+    return resolved;
+  }
+
+  void _mergeLearnedProbabilities({
+    required Map<String, double> probabilities,
+    required LearningMarket market,
+    required List<double> classProbabilities,
+    required List<String> classLabels,
+  }) {
+    double value(int index) => index < classProbabilities.length
+        ? classProbabilities[index].clamp(0.0, 1.0).toDouble()
+        : 0.0;
+
+    switch (market) {
+      case LearningMarket.oneXTwo:
+        probabilities['home'] = value(0);
+        probabilities['draw'] = value(1);
+        probabilities['away'] = value(2);
+        return;
+      case LearningMarket.drawNoBetHome:
+        final nonDraw = value(0) + value(2);
+        probabilities['dnbHome'] = nonDraw > 0 ? value(0) / nonDraw : 0.0;
+        return;
+      case LearningMarket.drawNoBetAway:
+        final nonDraw = value(0) + value(2);
+        probabilities['dnbAway'] = nonDraw > 0 ? value(0) / nonDraw : 0.0;
+        return;
+      default:
+        for (var index = 0; index < classLabels.length; index++) {
+          probabilities[classLabels[index]] = value(index);
+        }
+        return;
+    }
   }
 
   int _samplePoisson(double lambda, Random random) {
@@ -320,4 +464,18 @@ class FootballSimulationService {
     if (value is num) return value.round();
     return int.tryParse(value?.toString() ?? '') ?? 0;
   }
+}
+
+class _AppliedMarketModels {
+  const _AppliedMarketModels({
+    required this.probabilities,
+    required this.models,
+  });
+
+  const _AppliedMarketModels.empty()
+      : probabilities = const {},
+        models = const {};
+
+  final Map<String, double> probabilities;
+  final Map<String, Object?> models;
 }

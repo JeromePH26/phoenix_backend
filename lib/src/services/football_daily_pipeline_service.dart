@@ -275,7 +275,9 @@ class FootballDailyPipelineService {
         'probabilities': rawProbabilities,
         'fairOdds': rawFairOdds,
       };
-      final phoenixTip = _map(selection['phoenixTip']);
+      final analysisLead = _map(selection['phoenixTip']);
+      final qualifiesForTip = selection['qualifiesForTip'] == true;
+      final phoenixTip = qualifiesForTip ? analysisLead : <String, Object?>{};
       final trust = _map(selection['trust']);
       final aiContext = _map(simulation['aiContext']);
 
@@ -288,12 +290,20 @@ class FootballDailyPipelineService {
         100,
       );
 
-      // Every complete model run receives one stable PHOENIX top pick. The
-      // display guard still controls value/odds messaging, but it must not
-      // erase the model selection: otherwise the app shows a pick that cannot
-      // be persisted, settled or included in the long-term hit-rate.
+      // Eine Markt-Führung bleibt als Analysehinweis erhalten. Als PHÖNIX-Tipp
+      // wird sie jedoch nur veröffentlicht und gespeichert, wenn der strenge
+      // Publish-Gate erfüllt ist. Sonst verfälschen Fallbacks die Trefferquote.
       final recommendation = _string(phoenixTip['market']);
       final marketKey = _string(phoenixTip['marketKey']);
+      final publicSelection = <String, Object?>{
+        ...selection,
+        'analysisLead': analysisLead,
+        'phoenixTip': phoenixTip,
+        'display': {
+          ..._map(selection['display']),
+          'showPhoenixTip': qualifiesForTip,
+        },
+      };
 
       final homeProbability = _probability(
         rawProbabilities['home'] ?? rawProbabilities['homeWin'],
@@ -358,7 +368,8 @@ class FootballDailyPipelineService {
         'goalExpectations': simulation['goalExpectations'],
         'topScorelines': simulation['topScorelines'],
         'phoenixTip': phoenixTip,
-        'selection': selection,
+        'analysisLead': analysisLead,
+        'selection': publicSelection,
         'simulation': publicSimulation,
         'simulationCount': simulation['simulations'],
         'aiContext': aiContext,
