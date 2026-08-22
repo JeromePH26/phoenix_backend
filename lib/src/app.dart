@@ -72,25 +72,6 @@ class PhoenixBackend {
     );
     final pushSchedule = PushScheduleService(database: database, push: push);
 
-    if (database.isConfigured) {
-      try {
-        await database.migrate();
-      } catch (error, stackTrace) {
-        stderr.writeln('Database migration failed: $error');
-        stderr.writeln(stackTrace);
-      }
-
-      // PHÖNIX CONTROL CENTER: einmaliger Bootstrap des ersten OWNER-
-      // Mitarbeiters, siehe control_center/bootstrap.dart. Läuft NUR, wenn
-      // admin_employees leer ist und rührt eine nicht-leere Tabelle nie an.
-      try {
-        await ControlCenterBootstrap(database: database, config: config).run();
-      } catch (error, stackTrace) {
-        stderr.writeln('Control Center bootstrap failed: $error');
-        stderr.writeln(stackTrace);
-      }
-    }
-
     final routes = ApiRoutes(
       config: config,
       database: database,
@@ -151,11 +132,12 @@ class PhoenixBackend {
       shared: true,
     );
 
-    // Die Baselines dürfen niemals den Healthcheck blockieren. Nach dem
-    // erfolgreichen Serverstart werden fehlende Markt-Champions kontrolliert
-    // und idempotent nachgezogen; vorhandene Versionen bleiben unverändert.
+    // Datenbank-Migrationen, Control-Center- und Model-Lab-Bootstrap dürfen
+    // niemals den Healthcheck blockieren. In Produktion ist das Schema
+    // bereits vorhanden; deshalb kann der Webserver zuerst gesund werden und
+    // die idempotente Initialisierung danach kontrolliert nachziehen.
     if (database.isConfigured) {
-      unawaited(_bootstrapModelLabBaselines());
+      unawaited(_initializeDatabase());
     }
     return server;
   }
@@ -173,6 +155,26 @@ class PhoenixBackend {
       stderr.writeln('Model Lab baseline bootstrap failed: $error');
       stderr.writeln(stackTrace);
     }
+  }
+
+  Future<void> _initializeDatabase() async {
+    try {
+      await database.migrate();
+    } catch (error, stackTrace) {
+      stderr.writeln('Database migration failed: $error');
+      stderr.writeln(stackTrace);
+    }
+
+    // Einmaliger Bootstrap des ersten OWNER-Mitarbeiters. Die Operation ist
+    // bewusst idempotent und verändert eine bestehende Tabelle nicht.
+    try {
+      await ControlCenterBootstrap(database: database, config: config).run();
+    } catch (error, stackTrace) {
+      stderr.writeln('Control Center bootstrap failed: $error');
+      stderr.writeln(stackTrace);
+    }
+
+    await _bootstrapModelLabBaselines();
   }
 
   Future<void> close() async {
