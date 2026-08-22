@@ -1659,6 +1659,8 @@ class ControlCenterRoutes {
         targetCountry: body['targetCountry']?.toString(),
         targetAudience: targetAudience,
         createdByEmployeeId: actor.id,
+        budgetAmount: body['budgetAmount'] == null ? null : double.tryParse(body['budgetAmount'].toString()),
+        frequencyCapPerDay: body['frequencyCapPerDay'] == null ? null : int.tryParse(body['frequencyCapPerDay'].toString()),
       );
       await database.insertAdminAuditLog(
         employeeId: actor.id,
@@ -1711,6 +1713,8 @@ class ControlCenterRoutes {
       final hasStartKey = body.containsKey('startDate');
       final hasEndKey = body.containsKey('endDate');
       final hasCountryKey = body.containsKey('targetCountry');
+      final hasBudgetKey = body.containsKey('budgetAmount');
+      final hasFrequencyCapKey = body.containsKey('frequencyCapPerDay');
 
       final updated = await database.updateAdCampaign(
         id: campaignId,
@@ -1726,6 +1730,12 @@ class ControlCenterRoutes {
             : PhoenixDatabase.unsetSentinel,
         targetCountry: hasCountryKey ? body['targetCountry']?.toString() : PhoenixDatabase.unsetSentinel,
         targetAudience: body['targetAudience']?.toString(),
+        budgetAmount: hasBudgetKey
+            ? (body['budgetAmount'] == null ? null : double.tryParse(body['budgetAmount'].toString()))
+            : PhoenixDatabase.unsetSentinel,
+        frequencyCapPerDay: hasFrequencyCapKey
+            ? (body['frequencyCapPerDay'] == null ? null : int.tryParse(body['frequencyCapPerDay'].toString()))
+            : PhoenixDatabase.unsetSentinel,
       );
       if (updated == null) {
         return jsonResponse({'error': 'Kampagne nicht gefunden.'}, statusCode: 404);

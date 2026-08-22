@@ -1898,6 +1898,14 @@ class PhoenixDatabase {
       CREATE INDEX IF NOT EXISTS idx_ad_campaigns_slot_active
       ON ad_campaigns (slot, active)
     ''');
+    // Section 21 (AN2): "Kampagnen brauchen ... Budget, Frequency Cap" -
+    // reine Planungsfelder, solange die App keinen Ad-Slot ausliest (kein
+    // Ausgaben-Tracking, keine echte Impressions-Deckelung dahinter).
+    await db.execute('''
+      ALTER TABLE ad_campaigns
+      ADD COLUMN IF NOT EXISTS budget_amount NUMERIC,
+      ADD COLUMN IF NOT EXISTS frequency_cap_per_day INTEGER
+    ''');
 
     await db.execute('''
       CREATE TABLE IF NOT EXISTS push_broadcasts (
@@ -8939,16 +8947,20 @@ class PhoenixDatabase {
     String? targetCountry,
     String targetAudience = 'ALL',
     int? createdByEmployeeId,
+    double? budgetAmount,
+    int? frequencyCapPerDay,
   }) async {
     final db = await connection();
     final result = await db.execute(
       Sql.named('''
         INSERT INTO ad_campaigns (
           name, slot, image_url, link_url, active, start_date, end_date,
-          target_country, target_audience, created_by_employee_id
+          target_country, target_audience, created_by_employee_id,
+          budget_amount, frequency_cap_per_day
         ) VALUES (
           @name, @slot, @image_url, @link_url, @active, @start_date, @end_date,
-          @target_country, @target_audience, @created_by_employee_id
+          @target_country, @target_audience, @created_by_employee_id,
+          @budget_amount, @frequency_cap_per_day
         )
         RETURNING *
       '''),
@@ -8963,6 +8975,8 @@ class PhoenixDatabase {
         'target_country': targetCountry,
         'target_audience': targetAudience,
         'created_by_employee_id': createdByEmployeeId,
+        'budget_amount': budgetAmount,
+        'frequency_cap_per_day': frequencyCapPerDay,
       },
     );
     return _dateSafeRow(result.first.toColumnMap());
@@ -9008,6 +9022,8 @@ class PhoenixDatabase {
     Object? endDate = unsetSentinel,
     Object? targetCountry = unsetSentinel,
     String? targetAudience,
+    Object? budgetAmount = unsetSentinel,
+    Object? frequencyCapPerDay = unsetSentinel,
   }) async {
     final db = await connection();
     final result = await db.execute(
@@ -9021,6 +9037,8 @@ class PhoenixDatabase {
           end_date = CASE WHEN @end_date_set THEN @end_date ELSE end_date END,
           target_country = CASE WHEN @target_country_set THEN @target_country ELSE target_country END,
           target_audience = COALESCE(@target_audience, target_audience),
+          budget_amount = CASE WHEN @budget_amount_set THEN @budget_amount ELSE budget_amount END,
+          frequency_cap_per_day = CASE WHEN @frequency_cap_set THEN @frequency_cap ELSE frequency_cap_per_day END,
           updated_at = NOW()
         WHERE id = @id
         RETURNING *
@@ -9038,6 +9056,10 @@ class PhoenixDatabase {
         'target_country_set': !identical(targetCountry, unsetSentinel),
         'target_country': identical(targetCountry, unsetSentinel) ? null : targetCountry,
         'target_audience': targetAudience,
+        'budget_amount_set': !identical(budgetAmount, unsetSentinel),
+        'budget_amount': identical(budgetAmount, unsetSentinel) ? null : budgetAmount,
+        'frequency_cap_set': !identical(frequencyCapPerDay, unsetSentinel),
+        'frequency_cap': identical(frequencyCapPerDay, unsetSentinel) ? null : frequencyCapPerDay,
       },
     );
     if (result.isEmpty) return null;
