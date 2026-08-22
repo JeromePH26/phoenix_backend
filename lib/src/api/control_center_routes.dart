@@ -18,6 +18,7 @@ import '../database/database.dart';
 import '../football_admin/football_admin_logic.dart';
 import '../http/json_response.dart';
 import '../model_lab/learning_dataset_builder.dart';
+import '../security/totp.dart';
 import '../services/firebase_push_service.dart';
 
 /// PHÖNIX CONTROL CENTER Admin-API. Wird über
@@ -45,6 +46,11 @@ class ControlCenterRoutes {
     final router = Router();
 
     router.post('/auth/login', _login);
+    router.post('/auth/2fa/verify-login', _verifyTwoFactorLogin);
+    router.get('/auth/2fa/status', _twoFactorStatus);
+    router.post('/auth/2fa/setup', _setupTwoFactor);
+    router.post('/auth/2fa/confirm', _confirmTwoFactor);
+    router.post('/auth/2fa/disable', _disableTwoFactor);
     router.post('/auth/logout', _logout);
     router.get('/auth/me', _me);
     router.get('/employees', _listEmployees);
@@ -96,6 +102,7 @@ class ControlCenterRoutes {
     router.get('/incidents/<id|[0-9]+>/timeline', _listIncidentTimeline);
     router.post('/incidents/<id|[0-9]+>/timeline', _addIncidentTimelineEvent);
     router.get('/security/sessions', _listSessions);
+    router.get('/security/sessions/history', _sessionsHistory);
     router.post('/security/sessions/<token>/revoke', _revokeSession);
     router.get('/security/failed-logins', _listFailedLogins);
     router.get('/system-health', _systemHealth);
@@ -131,6 +138,20 @@ class ControlCenterRoutes {
       final password = body['password']?.toString() ?? '';
       if (login.isEmpty || password.isEmpty) return _invalidCredentials();
 
+      // Section 32 (AN2): "Rate Limits" - vor jeder weiteren Prüfung, damit
+      // ein Angreifer nicht beliebig viele Passwörter gegen denselben Login
+      // durchprobieren kann. Zählt nur bereits gespeicherte fehlgeschlagene
+      // Versuche, kein zusätzlicher Zustand nötig.
+      final recentFailures = await database.countRecentFailedLogins(
+        login: login,
+        within: kLoginRateLimitWindow,
+      );
+      if (recentFailures >= kLoginRateLimitMaxAttempts) {
+        return jsonResponse({
+          'error': 'Zu viele fehlgeschlagene Login-Versuche. Bitte in ein paar Minuten erneut versuchen.',
+        }, statusCode: 429);
+      }
+
       final row = await database.adminEmployeeByLogin(login);
       if (row == null) {
         await database.recordFailedLogin(login: login, ip: _clientIp(request));
@@ -144,6 +165,25 @@ class ControlCenterRoutes {
       if (!passwordOk || !employee.isActive) {
         await database.recordFailedLogin(login: login, ip: _clientIp(request));
         return _invalidCredentials();
+      }
+
+      // Section 32 (AN2): 2FA - Passwort korrekt, aber noch kein Session-
+      // Token. Der Client muss zuerst /auth/2fa/verify-login mit dem
+      // pendingToken + TOTP-Code aufrufen.
+      final twoFactorStatus = await database.employeeTwoFactorStatus(employee.id);
+      if (twoFactorStatus?['two_factor_enabled'] == true) {
+        final pendingToken = generateSessionToken();
+        await database.createPendingTwoFactorLogin(
+          token: pendingToken,
+          employeeId: employee.id,
+          expiresAt: DateTime.now().toUtc().add(const Duration(minutes: 5)),
+          ip: _clientIp(request),
+          userAgent: request.headers['user-agent'],
+        );
+        return jsonResponse({
+          'requiresTwoFactor': true,
+          'pendingToken': pendingToken,
+        });
       }
 
       final token = generateSessionToken();
@@ -169,6 +209,177 @@ class ControlCenterRoutes {
           'department': employee.department,
         },
       });
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  // Section 32 (AN2): 2. Schritt nach requiresTwoFactor=true - konsumiert
+  // das Einmal-Token und prüft den TOTP-Code, bevor eine echte Session
+  // entsteht.
+  Future<Response> _verifyTwoFactorLogin(Request request) async {
+    try {
+      final body = jsonDecode(await request.readAsString());
+      if (body is! Map<String, dynamic>) {
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+      }
+      final pendingToken = body['pendingToken']?.toString() ?? '';
+      final code = body['code']?.toString() ?? '';
+      if (pendingToken.isEmpty || code.isEmpty) {
+        return jsonResponse({'error': 'pendingToken und code sind erforderlich.'}, statusCode: 400);
+      }
+
+      final employeeId = await database.consumePendingTwoFactorLogin(pendingToken);
+      if (employeeId == null) {
+        return jsonResponse({
+          'error': 'Ungültiger oder abgelaufener Vorgang. Bitte erneut einloggen.',
+        }, statusCode: 401);
+      }
+
+      final status = await database.employeeTwoFactorStatus(employeeId);
+      final secret = status?['two_factor_secret']?.toString();
+      if (status?['two_factor_enabled'] != true || secret == null || secret.isEmpty) {
+        return jsonResponse({'error': '2FA ist für dieses Konto nicht aktiv.'}, statusCode: 400);
+      }
+      if (!verifyTotpCode(secret, code)) {
+        return jsonResponse({'error': 'Falscher Code.'}, statusCode: 401);
+      }
+
+      final row = await database.adminEmployeeById(employeeId);
+      if (row == null) {
+        return jsonResponse({'error': 'Mitarbeiter nicht gefunden.'}, statusCode: 404);
+      }
+      final employee = Employee.fromRow(row);
+      if (!employee.isActive) {
+        return jsonResponse({'error': 'Konto ist deaktiviert.'}, statusCode: 403);
+      }
+
+      final token = generateSessionToken();
+      final expiresAt = DateTime.now().toUtc().add(kControlCenterSessionTtl);
+      await database.createAdminSession(
+        employeeId: employee.id,
+        token: token,
+        expiresAt: expiresAt,
+        ip: _clientIp(request),
+        userAgent: request.headers['user-agent'],
+      );
+      await database.touchAdminEmployeeLastLogin(employee.id);
+
+      return jsonResponse({
+        'token': token,
+        'expiresAt': expiresAt.toIso8601String(),
+        'employee': {
+          'id': employee.id,
+          'name': employee.name,
+          'login': employee.login,
+          'email': employee.email,
+          'role': employee.role,
+          'department': employee.department,
+        },
+      });
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  Future<Response> _twoFactorStatus(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    final actor = auth.employee!;
+    try {
+      final status = await database.employeeTwoFactorStatus(actor.id);
+      return jsonResponse({'enabled': status?['two_factor_enabled'] == true});
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  // Section 32 (AN2): eigenes 2FA einrichten - erzeugt ein neues Secret,
+  // aktiviert aber noch nichts (siehe _confirmTwoFactorSetup).
+  Future<Response> _setupTwoFactor(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    final actor = auth.employee!;
+
+    try {
+      final secret = generateTotpSecret();
+      await database.setEmployeeTwoFactorSecret(actor.id, secret);
+      return jsonResponse({
+        'secret': secret,
+        'otpauthUrl': totpAuthUrl(secret: secret, accountLogin: actor.login),
+      });
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  Future<Response> _confirmTwoFactor(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    final actor = auth.employee!;
+
+    try {
+      final body = jsonDecode(await request.readAsString());
+      if (body is! Map<String, dynamic>) {
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+      }
+      final code = body['code']?.toString() ?? '';
+      final status = await database.employeeTwoFactorStatus(actor.id);
+      final secret = status?['two_factor_secret']?.toString();
+      if (secret == null || secret.isEmpty) {
+        return jsonResponse({
+          'error': 'Zuerst /auth/2fa/setup aufrufen, um ein Secret zu erzeugen.',
+        }, statusCode: 400);
+      }
+      if (!verifyTotpCode(secret, code)) {
+        return jsonResponse({'error': 'Falscher Code.'}, statusCode: 400);
+      }
+      await database.enableEmployeeTwoFactor(actor.id);
+      await database.insertAdminAuditLog(
+        employeeId: actor.id,
+        employeeLogin: actor.login,
+        area: 'security',
+        objectType: 'employee',
+        objectId: actor.id.toString(),
+        action: 'two_factor.enable',
+        ip: _clientIp(request),
+      );
+      return jsonResponse({'status': 'enabled'});
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  Future<Response> _disableTwoFactor(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    final actor = auth.employee!;
+
+    try {
+      final body = jsonDecode(await request.readAsString());
+      if (body is! Map<String, dynamic>) {
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+      }
+      final code = body['code']?.toString() ?? '';
+      final status = await database.employeeTwoFactorStatus(actor.id);
+      final secret = status?['two_factor_secret']?.toString();
+      if (status?['two_factor_enabled'] != true || secret == null || secret.isEmpty) {
+        return jsonResponse({'error': '2FA ist für dieses Konto nicht aktiv.'}, statusCode: 400);
+      }
+      if (!verifyTotpCode(secret, code)) {
+        return jsonResponse({'error': 'Falscher Code.'}, statusCode: 400);
+      }
+      await database.disableEmployeeTwoFactor(actor.id);
+      await database.insertAdminAuditLog(
+        employeeId: actor.id,
+        employeeLogin: actor.login,
+        area: 'security',
+        objectType: 'employee',
+        objectId: actor.id.toString(),
+        action: 'two_factor.disable',
+        ip: _clientIp(request),
+      );
+      return jsonResponse({'status': 'disabled'});
     } catch (error) {
       return jsonResponse({'error': error.toString()}, statusCode: 500);
     }
@@ -2412,6 +2623,21 @@ class ControlCenterRoutes {
 
     try {
       final sessions = await database.listActiveAdminSessions();
+      return jsonResponse({'sessions': sessions.map(_jsonSafe).toList()});
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  // Section 32 (AN2): "Login-Verlauf" - auch abgelaufene/beendete Sessions,
+  // nicht nur die aktuell aktiven.
+  Future<Response> _sessionsHistory(Request request) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    if (!auth.employee!.hasPermission('security.view')) return _forbidden();
+
+    try {
+      final sessions = await database.listAdminSessionsHistory(limit: 100);
       return jsonResponse({'sessions': sessions.map(_jsonSafe).toList()});
     } catch (error) {
       return jsonResponse({'error': error.toString()}, statusCode: 500);

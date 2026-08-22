@@ -1182,6 +1182,12 @@ class PhoenixDatabase {
     await db.execute('''
       ALTER TABLE admin_employees ADD COLUMN IF NOT EXISTS two_factor_method TEXT
     ''');
+    // Section 32 (AN2, "Priorität hoch"): das eigentliche TOTP-Secret - die
+    // beiden Spalten oben existierten bereits (vorbereitet, nie genutzt),
+    // hier kommt die tatsächliche Implementierung dazu.
+    await db.execute('''
+      ALTER TABLE admin_employees ADD COLUMN IF NOT EXISTS two_factor_secret TEXT
+    ''');
     await db.execute('''
       ALTER TABLE admin_employees
       ADD COLUMN IF NOT EXISTS staff_app_access BOOLEAN NOT NULL DEFAULT FALSE
@@ -1713,6 +1719,20 @@ class PhoenixDatabase {
     await db.execute('''
       CREATE INDEX IF NOT EXISTS idx_admin_sessions_expiry
       ON admin_sessions (expires_at)
+    ''');
+
+    // Section 32 (AN2): Kurzlebiger Zwischenzustand "Passwort korrekt, TOTP
+    // noch ausstehend" - erst nach erfolgreicher Code-Prüfung entsteht eine
+    // echte admin_sessions-Zeile. Single-Use (wird bei Verbrauch gelöscht).
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS admin_pending_two_factor_logins (
+        token TEXT PRIMARY KEY,
+        employee_id BIGINT NOT NULL REFERENCES admin_employees(id),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        expires_at TIMESTAMPTZ NOT NULL,
+        ip TEXT,
+        user_agent TEXT
+      )
     ''');
 
     await db.execute('''
@@ -9741,6 +9761,131 @@ class PhoenixDatabase {
       parameters: {'token': token},
     );
     return result.isNotEmpty;
+  }
+
+  /// Section 32 (AN2): "Login-Verlauf" - anders als [listActiveAdminSessions]
+  /// auch abgelaufene/beendete Sessions, damit man sieht, wann sich wer
+  /// eingeloggt hat, nicht nur wer gerade online ist.
+  Future<List<Map<String, Object?>>> listAdminSessionsHistory({int limit = 100}) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT s.token, s.employee_id, e.name AS employee_name, e.login AS employee_login,
+          s.created_at::text AS created_at, s.expires_at::text AS expires_at,
+          s.revoked_at::text AS revoked_at,
+          (s.revoked_at IS NULL AND s.expires_at > NOW()) AS active,
+          s.ip, s.user_agent
+        FROM admin_sessions s
+        JOIN admin_employees e ON e.id = s.employee_id
+        ORDER BY s.created_at DESC
+        LIMIT @limit
+      '''),
+      parameters: {'limit': limit.clamp(1, 500)},
+    );
+    return result.map((row) => Map<String, Object?>.from(row.toColumnMap())).toList();
+  }
+
+  /// Section 32 (AN2): "Rate Limits" - echte Zählung bereits gespeicherter
+  /// fehlgeschlagener Versuche, kein separater Zähler-Mechanismus nötig.
+  Future<int> countRecentFailedLogins({required String login, required Duration within}) async {
+    final db = await connection();
+    final cutoff = DateTime.now().toUtc().subtract(within);
+    final result = await db.execute(
+      Sql.named('''
+        SELECT COUNT(*) FROM admin_failed_logins
+        WHERE login = @login AND attempted_at > @cutoff
+      '''),
+      parameters: {'login': login, 'cutoff': cutoff},
+    );
+    return int.tryParse(result.first[0]?.toString() ?? '') ?? 0;
+  }
+
+  // -- Section 32 (AN2): TOTP-2FA -------------------------------------------
+
+  Future<Map<String, Object?>?> employeeTwoFactorStatus(int employeeId) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT two_factor_enabled, two_factor_secret, two_factor_method
+        FROM admin_employees WHERE id = @id
+      '''),
+      parameters: {'id': employeeId},
+    );
+    if (result.isEmpty) return null;
+    return Map<String, Object?>.from(result.first.toColumnMap());
+  }
+
+  /// Speichert ein neues Secret, OHNE 2FA bereits scharf zu schalten - das
+  /// passiert erst in [enableEmployeeTwoFactor], nach bestätigtem Code.
+  Future<void> setEmployeeTwoFactorSecret(int employeeId, String secret) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        UPDATE admin_employees
+        SET two_factor_secret = @secret, two_factor_method = 'totp'
+        WHERE id = @id
+      '''),
+      parameters: {'id': employeeId, 'secret': secret},
+    );
+  }
+
+  Future<void> enableEmployeeTwoFactor(int employeeId) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('UPDATE admin_employees SET two_factor_enabled = TRUE WHERE id = @id'),
+      parameters: {'id': employeeId},
+    );
+  }
+
+  Future<void> disableEmployeeTwoFactor(int employeeId) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        UPDATE admin_employees
+        SET two_factor_enabled = FALSE, two_factor_secret = NULL, two_factor_method = NULL
+        WHERE id = @id
+      '''),
+      parameters: {'id': employeeId},
+    );
+  }
+
+  Future<void> createPendingTwoFactorLogin({
+    required String token,
+    required int employeeId,
+    required DateTime expiresAt,
+    String? ip,
+    String? userAgent,
+  }) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        INSERT INTO admin_pending_two_factor_logins (token, employee_id, expires_at, ip, user_agent)
+        VALUES (@token, @employee_id, @expires_at, @ip, @user_agent)
+      '''),
+      parameters: {
+        'token': token,
+        'employee_id': employeeId,
+        'expires_at': expiresAt,
+        'ip': ip,
+        'user_agent': userAgent,
+      },
+    );
+  }
+
+  /// Single-Use: liefert die employee_id nur, wenn das Token existiert und
+  /// noch nicht abgelaufen ist, und löscht es in derselben Abfrage.
+  Future<int?> consumePendingTwoFactorLogin(String token) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        DELETE FROM admin_pending_two_factor_logins
+        WHERE token = @token AND expires_at > NOW()
+        RETURNING employee_id
+      '''),
+      parameters: {'token': token},
+    );
+    if (result.isEmpty) return null;
+    return result.first[0] as int?;
   }
 
   // -- Control Center /system-health (Phase 6) ------------------------------

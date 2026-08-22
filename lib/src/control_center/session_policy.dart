@@ -10,6 +10,12 @@ import 'dart:math';
 /// Standard-Sitzungsdauer für Control-Center-Sessions.
 const Duration kControlCenterSessionTtl = Duration(hours: 12);
 
+/// Section 32 (AN2): "Rate Limits" für den Login - nach so vielen
+/// fehlgeschlagenen Versuchen innerhalb des Zeitfensters wird ein Login für
+/// denselben Login-Namen vorübergehend abgelehnt, unabhängig vom Passwort.
+const Duration kLoginRateLimitWindow = Duration(minutes: 15);
+const int kLoginRateLimitMaxAttempts = 10;
+
 /// Erzeugt ein kryptografisch zufälliges Session-Token (32 Byte / 256 Bit
 /// Entropie, hex-kodiert -> 64 Zeichen).
 String generateSessionToken({int bytes = 32}) {
