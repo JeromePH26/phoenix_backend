@@ -1,6 +1,9 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
+
+import '../database/database.dart';
 
 class _FootballCacheEntry {
   const _FootballCacheEntry({
@@ -13,11 +16,16 @@ class _FootballCacheEntry {
 }
 
 class FootballService {
-  FootballService({required this.apiKey, http.Client? client})
+  FootballService({required this.apiKey, this.database, http.Client? client})
       : _client = client ?? http.Client();
 
   static const _baseUrl = 'https://v3.football.api-sports.io';
   final String apiKey;
+  // Section 25 (AN2, "Höchste Priorität"): optionale, rein für Sichtbarkeit
+  // gedachte Nutzungs-/Fehler-Aufzeichnung (Control Center → API Usage).
+  // Nullable und fire-and-forget, damit ein DB-Problem hier niemals einen
+  // echten API-Football-Aufruf blockiert oder zum Absturz bringt.
+  final PhoenixDatabase? database;
   final http.Client _client;
 
   final Map<String, _FootballCacheEntry> _providerCache =
@@ -586,43 +594,61 @@ class FootballService {
   ) async {
     if (!isConfigured) throw StateError('API_FOOTBALL_KEY fehlt.');
 
-    final uri = Uri.parse('$_baseUrl$path').replace(
-      queryParameters: query,
-    );
-    // Ein hängender Provider-Request darf den gesamten Hintergrundlauf nicht
-    // dauerhaft blockieren. coverageForFixture behandelt den einzelnen
-    // fehlenden Datenbaustein bereits als nicht verfügbar und verarbeitet
-    // danach die restlichen Whitelist-Spiele weiter.
-    final response = await _client
-        .get(uri, headers: {
-          'x-apisports-key': apiKey,
-          'accept': 'application/json',
-        })
-        .timeout(const Duration(seconds: 20));
-
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw StateError('Football API HTTP ${response.statusCode}');
-    }
-
-    final decoded = jsonDecode(response.body);
-    if (decoded is! Map) {
-      throw StateError('Ungültige Football-Antwort.');
-    }
-
-    final payload = Map<String, dynamic>.from(decoded);
-    final errors = payload['errors'];
-    if (errors is Map && errors.isNotEmpty) {
-      throw StateError(
-        'Football API: ${errors.values.map((value) => value.toString()).join(', ')}',
+    try {
+      final uri = Uri.parse('$_baseUrl$path').replace(
+        queryParameters: query,
       );
-    }
-    if (errors is List && errors.isNotEmpty) {
-      throw StateError(
-        'Football API: ${errors.map((value) => value.toString()).join(', ')}',
-      );
-    }
+      // Ein hängender Provider-Request darf den gesamten Hintergrundlauf nicht
+      // dauerhaft blockieren. coverageForFixture behandelt den einzelnen
+      // fehlenden Datenbaustein bereits als nicht verfügbar und verarbeitet
+      // danach die restlichen Whitelist-Spiele weiter.
+      final response = await _client
+          .get(uri, headers: {
+            'x-apisports-key': apiKey,
+            'accept': 'application/json',
+          })
+          .timeout(const Duration(seconds: 20));
 
-    return payload;
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw StateError('Football API HTTP ${response.statusCode}');
+      }
+
+      final decoded = jsonDecode(response.body);
+      if (decoded is! Map) {
+        throw StateError('Ungültige Football-Antwort.');
+      }
+
+      final payload = Map<String, dynamic>.from(decoded);
+      final errors = payload['errors'];
+      if (errors is Map && errors.isNotEmpty) {
+        throw StateError(
+          'Football API: ${errors.values.map((value) => value.toString()).join(', ')}',
+        );
+      }
+      if (errors is List && errors.isNotEmpty) {
+        throw StateError(
+          'Football API: ${errors.map((value) => value.toString()).join(', ')}',
+        );
+      }
+
+      _recordUsage();
+      return payload;
+    } catch (error) {
+      _recordError();
+      rethrow;
+    }
+  }
+
+  void _recordUsage() {
+    final db = database;
+    if (db == null || !db.isConfigured) return;
+    unawaited(db.recordApiSportsUsage('football').catchError((_) {}));
+  }
+
+  void _recordError() {
+    final db = database;
+    if (db == null || !db.isConfigured) return;
+    unawaited(db.recordApiSportsError('football').catchError((_) {}));
   }
 
   List<dynamic> _responseRows(Map<String, dynamic> decoded) {

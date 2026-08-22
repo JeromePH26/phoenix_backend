@@ -60,6 +60,15 @@ class PhoenixDatabase {
         PRIMARY KEY (api_name, usage_date)
       )
     ''');
+    // Section 25 (AN2, "Höchste Priorität"): bis hierhin zählte diese
+    // Tabelle NUR die sekundären API-Sports-Free-Produkte (ApiSportsTeamEngine
+    // - andere Sportarten als Fußball), nie die tatsächliche
+    // API-Football-Hauptnutzung von FootballService, die den eigentlichen
+    // API-Kostentreiber darstellt. `errors` neu für eine echte Fehlerquote.
+    await db.execute('''
+      ALTER TABLE api_sports_daily_usage
+      ADD COLUMN IF NOT EXISTS errors INTEGER NOT NULL DEFAULT 0
+    ''');
 
     await db.execute('''
       CREATE TABLE IF NOT EXISTS football_matches (
@@ -3180,6 +3189,40 @@ class PhoenixDatabase {
       },
     );
     return rows.isEmpty ? null : rows.first[0] as int?;
+  }
+
+  /// Section 25 (AN2): reine, ungedeckelte Zählung für Datenquellen ohne
+  /// eigenes Free-Plan-Sicherheitslimit (aktuell: die echte
+  /// API-Football-Hauptnutzung über FootballService). Kein Blocken, kein
+  /// safetyLimit - nur Sichtbarkeit. Fire-and-forget vom Aufrufer.
+  Future<void> recordApiSportsUsage(String apiName) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        INSERT INTO api_sports_daily_usage (api_name, usage_date, requests)
+        VALUES (@apiName, (NOW() AT TIME ZONE 'UTC')::DATE, 1)
+        ON CONFLICT (api_name, usage_date) DO UPDATE
+        SET requests = api_sports_daily_usage.requests + 1,
+            updated_at = NOW()
+      '''),
+      parameters: {'apiName': apiName.toLowerCase()},
+    );
+  }
+
+  /// Section 25 (AN2): "Fehlerquote" - Gegenstück zu [recordApiSportsUsage]
+  /// für fehlgeschlagene Anfragen (HTTP-Fehler, Timeouts).
+  Future<void> recordApiSportsError(String apiName) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        INSERT INTO api_sports_daily_usage (api_name, usage_date, requests, errors)
+        VALUES (@apiName, (NOW() AT TIME ZONE 'UTC')::DATE, 0, 1)
+        ON CONFLICT (api_name, usage_date) DO UPDATE
+        SET errors = api_sports_daily_usage.errors + 1,
+            updated_at = NOW()
+      '''),
+      parameters: {'apiName': apiName.toLowerCase()},
+    );
   }
 
   Future<bool> ping() async {

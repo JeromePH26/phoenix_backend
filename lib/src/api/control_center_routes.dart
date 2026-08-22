@@ -904,7 +904,7 @@ class ControlCenterRoutes {
       final todayStats = await database.controlCenterTodayStats();
 
       return jsonResponse({
-        'apiUsage': apiUsage.map(_jsonSafe).toList(),
+        'apiUsage': apiUsage.map((row) => _jsonSafe(_apiUsageRowWithLimit(row))).toList(),
         'footballToday': footballToday,
         'today': todayStats,
         'whitelist': {
@@ -932,6 +932,10 @@ class ControlCenterRoutes {
 
   // -- API Usage --------------------------------------------------------
 
+  // Section 25 (AN2, "Höchste Priorität"): reichert jede Zeile um das
+  // konfigurierte Tageslimit an (API_<NAME>_DAILY_LIMIT), damit das
+  // Frontend Prozent/Verbleibend/Warnschwellen berechnen kann, statt selbst
+  // zu raten. Kein Limit konfiguriert = null, niemals ein erfundener Wert.
   Future<Response> _apiUsage(Request request) async {
     final auth = await guard.authenticate(request);
     if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
@@ -941,8 +945,8 @@ class ControlCenterRoutes {
       final today = await database.apiSportsDailyUsageToday();
       final history = await database.apiSportsDailyUsageHistory(days: 14);
       return jsonResponse({
-        'today': today.map(_jsonSafe).toList(),
-        'history': history.map(_jsonSafe).toList(),
+        'today': today.map((row) => _jsonSafe(_apiUsageRowWithLimit(row))).toList(),
+        'history': history.map((row) => _jsonSafe(_apiUsageRowWithLimit(row))).toList(),
       });
     } catch (error) {
       return jsonResponse({'error': error.toString()}, statusCode: 500);
@@ -2395,7 +2399,7 @@ class ControlCenterRoutes {
       final openIncidents = await database.listIncidents(status: 'OPEN');
 
       return jsonResponse({
-        'apiUsage': apiUsage.map(_jsonSafe).toList(),
+        'apiUsage': apiUsage.map((row) => _jsonSafe(_apiUsageRowWithLimit(row))).toList(),
         'pendingJobs': {
           'footballDailyPipeline': pendingPipelineJobs,
           'footballMatchSettlement': pendingSettlementJobs,
@@ -2453,13 +2457,20 @@ class ControlCenterRoutes {
       final warnings = <String>[];
       final critical = <String>[];
 
+      // Section 25 (AN2): früher wurde die rohe Anfragenzahl direkt gegen
+      // 85/95 verglichen, als wäre sie bereits ein Prozentwert - ohne
+      // bekanntes Tageslimit war das eine erfundene Schwelle. Jetzt: echter
+      // Prozentsatz gegen das konfigurierte Limit, nur wenn eines gesetzt ist.
       for (final row in apiUsage) {
-        final requests = (row['requests'] as num?) ?? 0;
+        final requests = ((row['requests'] as num?) ?? 0).toInt();
         final apiName = row['api_name']?.toString() ?? 'API';
-        if (requests >= 95) {
-          critical.add('$apiName: API-Budget bei $requests (>=95).');
-        } else if (requests >= 85) {
-          warnings.add('$apiName: API-Budget bei $requests (>=85).');
+        final limit = config.apiSportsDailyLimitFor(apiName);
+        if (limit == null || limit <= 0) continue;
+        final percent = (requests / limit) * 100;
+        if (percent >= 95) {
+          critical.add('$apiName: API-Budget bei ${percent.toStringAsFixed(0)}% ($requests von $limit).');
+        } else if (percent >= 85) {
+          warnings.add('$apiName: API-Budget bei ${percent.toStringAsFixed(0)}% ($requests von $limit).');
         }
       }
       if (pendingPipelineJobs > 0) warnings.add('$pendingPipelineJobs offene Daily-Pipeline-Läufe.');
@@ -2688,6 +2699,18 @@ class ControlCenterRoutes {
     }
     if (value is Iterable) return value.map(_jsonSafe).toList();
     return value.toString();
+  }
+
+  // Section 25 (AN2): gemeinsame Anreicherung um das konfigurierte
+  // Tageslimit, überall wo api_sports_daily_usage-Zeilen ausgegeben werden
+  // (Overview, System Health, API Usage) - eine einzige Quelle, damit sich
+  // die drei Stellen nie widersprechen können.
+  Map<String, Object?> _apiUsageRowWithLimit(Map<String, Object?> row) {
+    final apiName = row['api_name']?.toString() ?? '';
+    return {
+      ...row,
+      'daily_limit': config.apiSportsDailyLimitFor(apiName),
+    };
   }
 
   // Identische Logik zu RoutesRegistrar._berlinNow() in routes.dart (dort

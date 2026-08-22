@@ -43,7 +43,10 @@ class PhoenixBackend {
   static Future<PhoenixBackend> create() async {
     final config = AppConfig.fromEnvironment();
     final database = PhoenixDatabase(config.databaseUrl);
-    final football = FootballService(apiKey: config.apiFootballKey);
+    final football = FootballService(
+      apiKey: config.apiFootballKey,
+      database: database,
+    );
     final tennis = TennisService(
       apiKey: config.sportradarTennisApiKey,
       accessLevel: config.sportradarAccessLevel,

@@ -58,6 +58,19 @@ class AppConfig {
     return specific?.isNotEmpty == true ? specific! : apiSportsKey;
   }
 
+  /// Section 25 (AN2): "Höchste Priorität" - echtes, konfiguriertes
+  /// Tageslimit je externer Datenquelle (z.B. API_FOOTBALL_DAILY_LIMIT=75000
+  /// für den tatsächlichen API-Football-Tarif). Kein eingebauter Default -
+  /// ohne Umgebungsvariable ist der Limit-Wert null und das Frontend zeigt
+  /// "nicht konfiguriert" statt eine Prozentzahl gegen eine erfundene Zahl
+  /// zu berechnen (Section 25: "Keine Schätzung, nur echte Messwerte").
+  int? apiSportsDailyLimitFor(String apiName) {
+    final normalized = apiName.trim().toUpperCase().replaceAll('-', '_');
+    final raw = Platform.environment['API_${normalized}_DAILY_LIMIT']?.trim();
+    if (raw == null || raw.isEmpty) return null;
+    return int.tryParse(raw);
+  }
+
   bool get hasTennisApi => sportradarTennisApiKey.trim().isNotEmpty;
   bool get hasFirebasePush =>
       firebaseProjectId.isNotEmpty && firebaseServiceAccountJson.isNotEmpty;
