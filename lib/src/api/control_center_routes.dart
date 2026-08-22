@@ -843,6 +843,7 @@ class ControlCenterRoutes {
     final employeeIdParam = params['employeeId'];
     final employeeId = employeeIdParam == null ? null : int.tryParse(employeeIdParam);
     final action = params['action'];
+    final objectId = params['objectId'];
     final dateFrom = params['dateFrom'] == null ? null : DateTime.tryParse(params['dateFrom']!);
     final dateTo = params['dateTo'] == null ? null : DateTime.tryParse(params['dateTo']!);
     final limit = int.tryParse(params['limit'] ?? '') ?? 100;
@@ -853,6 +854,7 @@ class ControlCenterRoutes {
         area: area,
         employeeId: employeeId,
         action: action,
+        objectId: objectId,
         dateFrom: dateFrom,
         dateTo: dateTo,
         limit: limit,

@@ -7227,6 +7227,7 @@ class PhoenixDatabase {
     String? area,
     int? employeeId,
     String? action,
+    String? objectId,
     DateTime? dateFrom,
     DateTime? dateTo,
     int limit = 100,
@@ -7249,6 +7250,12 @@ class PhoenixDatabase {
     if (action != null && action.trim().isNotEmpty) {
       conditions.add('a.action = @action');
       parameters['action'] = action;
+    }
+    // Section 20 (AN2): "Historie" auf News/FAQ-Artikeln - dieselbe
+    // Audit-Log-Tabelle, gefiltert auf ein einzelnes Objekt.
+    if (objectId != null && objectId.trim().isNotEmpty) {
+      conditions.add('a.object_id = @object_id');
+      parameters['object_id'] = objectId;
     }
     if (dateFrom != null) {
       conditions.add('a.created_at >= @date_from');
