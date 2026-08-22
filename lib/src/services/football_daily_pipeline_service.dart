@@ -38,10 +38,12 @@ class FootballDailyPipelineService {
     int simulations = 100000,
   }) async {
     try {
-      // Kein fachliches 20er-Limit mehr: verarbeitet alle Spiele der festen
-      // Liga-Whitelist. 1000 ist nur ein technischer Schutz gegen fehlerhafte
-      // Providerantworten und liegt weit über der Whitelist-Tagesmenge.
-      const effectiveLimit = 1000;
+      // Kein fachliches 20er-Limit mehr: Standard sind alle Fokus-Spiele.
+      // Der manuelle Wert bleibt aber absichtlich wirksam, damit das Control
+      // Center bei Bedarf einen gezielten, kleineren Testlauf starten kann.
+      // 1000 ist ausschließlich der technische Schutz gegen fehlerhafte
+      // Providerantworten und liegt weit über der Fokus-Tagesmenge.
+      final effectiveLimit = (limit ?? 1000).clamp(1, 1000);
       final safeQuality = minimumDataQuality.clamp(0, 100);
       final safeSimulations = simulations.clamp(1000, 100000);
 
