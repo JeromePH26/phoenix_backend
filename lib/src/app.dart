@@ -12,6 +12,9 @@ import 'http/football_analysis_api.dart';
 import 'http/json_response.dart';
 import 'http/phoenix_api_guard.dart';
 import 'http/tennis_analysis_api.dart';
+import 'config/model_lab_config.dart';
+import 'model_lab/learning_market.dart';
+import 'model_lab/model_registry_service.dart';
 import 'services/football_service.dart';
 import 'services/firebase_push_service.dart';
 import 'services/football_favorite_live_monitor.dart';
@@ -73,6 +76,23 @@ class PhoenixBackend {
         await database.migrate();
       } catch (error, stackTrace) {
         stderr.writeln('Database migration failed: $error');
+        stderr.writeln(stackTrace);
+      }
+
+      // Das Model Lab muss auch ohne einen manuell gestarteten Learning-Run
+      // eine vollständige, produktive Baseline je Markt besitzen. Die
+      // Registry-Methode ist idempotent: vorhandene Champions bleiben
+      // unverändert, fehlende Markt-Champions werden genau einmal angelegt.
+      try {
+        final registry = ModelRegistryService(
+          database: database,
+          config: ModelLabConfig.fromEnvironment(),
+        );
+        for (final market in LearningMarket.values) {
+          await registry.ensureGlobalBaseline(market.key);
+        }
+      } catch (error, stackTrace) {
+        stderr.writeln('Model Lab baseline bootstrap failed: $error');
         stderr.writeln(stackTrace);
       }
 
