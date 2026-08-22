@@ -965,7 +965,7 @@ class ControlCenterRoutes {
     try {
       final ban = await database.banUser(
         userId: userId,
-        reason: reason,
+        reason: reason ?? '',
         internalReport: internalReport,
         durationType: durationType,
         expiresAt: expiresAt ?? _expiryForDuration(durationType),
