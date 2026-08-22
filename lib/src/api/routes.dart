@@ -2140,6 +2140,43 @@ class ApiRoutes {
       }
     });
 
+    router.post('/api/admin/football/leagues/watchlist/fill', (
+      Request request,
+    ) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+      try {
+        const minimumQuality = 30;
+        final promoted =
+            await database.promoteEligibleDataPoolLeaguesToWatchlist(
+          minimumQuality: minimumQuality,
+        );
+        await database.insertAdminAuditLog(
+          employeeId: null,
+          employeeLogin: 'legacy_admin_token',
+          area: 'football',
+          objectType: 'league',
+          objectId: 'watchlist',
+          action: 'league.watchlist_autofill',
+          newValue: {
+            'promotedCount': promoted.length,
+            'minimumDataQuality': minimumQuality,
+            'excluded': 'youth_competitions_and_quality_below_30',
+          },
+          ip: _clientIp(request),
+        );
+        return jsonResponse({
+          'status': 'updated',
+          'promotedCount': promoted.length,
+          'minimumDataQuality': minimumQuality,
+          'promoted': promoted,
+        });
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
     router.post('/api/admin/football/catalog/sync', (Request request) async {
       if (!_isAdmin(request)) {
         return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);

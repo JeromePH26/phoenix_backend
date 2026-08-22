@@ -3740,6 +3740,60 @@ class PhoenixDatabase {
     return previous.storageKey;
   }
 
+  /// Füllt die Beobachtungsliste ausschließlich mit belastbaren Erwachsenen-
+  /// Wettbewerben aus dem Datenpool. Maßgeblich ist der Mittelwert der letzten
+  /// 50 vollständigen Phase-2-Datensätze je Liga; unbekannte oder schwache
+  /// Ligen bleiben bewusst im Datenpool.
+  Future<List<Map<String, Object?>>> promoteEligibleDataPoolLeaguesToWatchlist({
+    int minimumQuality = 30,
+  }) async {
+    final db = await connection();
+    final rows = await db.execute(
+      Sql.named('''
+        WITH recent_quality AS (
+          SELECT
+            l.league_id,
+            ROUND(AVG(p.data_quality))::INTEGER AS average_quality
+          FROM football_leagues l
+          JOIN LATERAL (
+            SELECT data_quality
+            FROM football_phase_two_results
+            WHERE league_id = l.league_id
+              AND data_quality IS NOT NULL
+            ORDER BY created_at DESC
+            LIMIT 50
+          ) p ON TRUE
+          WHERE l.collection_tier = 'data_pool'
+            AND COALESCE(l.league_name, '') !~* @youth_pattern
+          GROUP BY l.league_id
+        ), promoted AS (
+          UPDATE football_leagues l
+          SET collection_tier = 'watchlist',
+              manual_status = 'auto',
+              background_enabled = TRUE,
+              detail_refresh_hours = 6,
+              updated_at = NOW()
+          FROM recent_quality q
+          WHERE l.league_id = q.league_id
+            AND q.average_quality >= @minimum_quality
+          RETURNING l.league_id, l.league_name, l.country
+        )
+        SELECT p.league_id, p.league_name, p.country, q.average_quality
+        FROM promoted p
+        INNER JOIN recent_quality q ON q.league_id = p.league_id
+        ORDER BY p.country NULLS LAST, p.league_name
+      '''),
+      parameters: {
+        'minimum_quality': minimumQuality.clamp(0, 100),
+        'youth_pattern':
+            r'(^|[^a-z0-9])(u[- ]?(1[0-9]|2[0-3])|under[- ]?(1[0-9]|2[0-3])|youth|junior|juniors)([^a-z0-9]|$)',
+      },
+    );
+    return rows
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList(growable: false);
+  }
+
   Future<void> upsertLeagueSeen({
     required String leagueId,
     required String leagueName,
