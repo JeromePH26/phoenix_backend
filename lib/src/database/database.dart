@@ -2011,6 +2011,14 @@ class PhoenixDatabase {
         CHECK (id = 1)
       )
     ''');
+    // Section 24 (AN2): "App-Kompatibilität" - Mindest-Betriebssystemversion
+    // je Plattform, rein informativ vom Admin gepflegt (keine Store-API
+    // angebunden, die das automatisch liefern könnte).
+    await db.execute('''
+      ALTER TABLE app_release_config
+      ADD COLUMN IF NOT EXISTS minimum_os_android TEXT,
+      ADD COLUMN IF NOT EXISTS minimum_os_ios TEXT
+    ''');
     await db.execute('''
       INSERT INTO app_release_config (id) VALUES (1) ON CONFLICT (id) DO NOTHING
     ''');
@@ -9434,6 +9442,7 @@ class PhoenixDatabase {
     final db = await connection();
     final result = await db.execute('''
       SELECT current_version, minimum_supported_version, forced_update, changelog,
+        minimum_os_android, minimum_os_ios,
         updated_at::text AS updated_at, updated_by
       FROM app_release_config WHERE id = 1
     ''');
@@ -9443,6 +9452,8 @@ class PhoenixDatabase {
         'minimum_supported_version': null,
         'forced_update': false,
         'changelog': '',
+        'minimum_os_android': null,
+        'minimum_os_ios': null,
         'updated_at': null,
         'updated_by': null,
       };
@@ -9455,6 +9466,8 @@ class PhoenixDatabase {
     String? minimumSupportedVersion,
     bool? forcedUpdate,
     String? changelog,
+    String? minimumOsAndroid,
+    String? minimumOsIos,
     required String updatedBy,
   }) async {
     final db = await connection();
@@ -9465,10 +9478,13 @@ class PhoenixDatabase {
           minimum_supported_version = COALESCE(@minimum_supported_version, minimum_supported_version),
           forced_update = COALESCE(@forced_update, forced_update),
           changelog = COALESCE(@changelog, changelog),
+          minimum_os_android = COALESCE(@minimum_os_android, minimum_os_android),
+          minimum_os_ios = COALESCE(@minimum_os_ios, minimum_os_ios),
           updated_at = NOW(),
           updated_by = @updated_by
         WHERE id = 1
         RETURNING current_version, minimum_supported_version, forced_update, changelog,
+          minimum_os_android, minimum_os_ios,
           updated_at::text AS updated_at, updated_by
       '''),
       parameters: {
@@ -9476,6 +9492,8 @@ class PhoenixDatabase {
         'minimum_supported_version': minimumSupportedVersion,
         'forced_update': forcedUpdate,
         'changelog': changelog,
+        'minimum_os_android': minimumOsAndroid,
+        'minimum_os_ios': minimumOsIos,
         'updated_by': updatedBy,
       },
     );

@@ -2204,6 +2204,8 @@ class ControlCenterRoutes {
         minimumSupportedVersion: body['minimumSupportedVersion']?.toString(),
         forcedUpdate: body['forcedUpdate'] as bool?,
         changelog: body['changelog']?.toString(),
+        minimumOsAndroid: body['minimumOsAndroid']?.toString(),
+        minimumOsIos: body['minimumOsIos']?.toString(),
         updatedBy: actor.login,
       );
       await database.insertAdminAuditLog(
