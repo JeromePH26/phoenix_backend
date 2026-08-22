@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:shelf/shelf.dart';
@@ -79,23 +80,6 @@ class PhoenixBackend {
         stderr.writeln(stackTrace);
       }
 
-      // Das Model Lab muss auch ohne einen manuell gestarteten Learning-Run
-      // eine vollständige, produktive Baseline je Markt besitzen. Die
-      // Registry-Methode ist idempotent: vorhandene Champions bleiben
-      // unverändert, fehlende Markt-Champions werden genau einmal angelegt.
-      try {
-        final registry = ModelRegistryService(
-          database: database,
-          config: ModelLabConfig.fromEnvironment(),
-        );
-        for (final market in LearningMarket.values) {
-          await registry.ensureGlobalBaseline(market.key);
-        }
-      } catch (error, stackTrace) {
-        stderr.writeln('Model Lab baseline bootstrap failed: $error');
-        stderr.writeln(stackTrace);
-      }
-
       // PHÖNIX CONTROL CENTER: einmaliger Bootstrap des ersten OWNER-
       // Mitarbeiters, siehe control_center/bootstrap.dart. Läuft NUR, wenn
       // admin_employees leer ist und rührt eine nicht-leere Tabelle nie an.
@@ -159,12 +143,37 @@ class PhoenixBackend {
     );
   }
 
-  Future<HttpServer> serve() => shelf_io.serve(
-        handler,
-        InternetAddress.anyIPv4,
-        config.port,
-        shared: true,
+  Future<HttpServer> serve() async {
+    final server = await shelf_io.serve(
+      handler,
+      InternetAddress.anyIPv4,
+      config.port,
+      shared: true,
+    );
+
+    // Die Baselines dürfen niemals den Healthcheck blockieren. Nach dem
+    // erfolgreichen Serverstart werden fehlende Markt-Champions kontrolliert
+    // und idempotent nachgezogen; vorhandene Versionen bleiben unverändert.
+    if (database.isConfigured) {
+      unawaited(_bootstrapModelLabBaselines());
+    }
+    return server;
+  }
+
+  Future<void> _bootstrapModelLabBaselines() async {
+    try {
+      final registry = ModelRegistryService(
+        database: database,
+        config: ModelLabConfig.fromEnvironment(),
       );
+      for (final market in LearningMarket.values) {
+        await registry.ensureGlobalBaseline(market.key);
+      }
+    } catch (error, stackTrace) {
+      stderr.writeln('Model Lab baseline bootstrap failed: $error');
+      stderr.writeln(stackTrace);
+    }
+  }
 
   Future<void> close() async {
     favoriteLiveMonitor.close();
