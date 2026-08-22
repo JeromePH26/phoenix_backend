@@ -29,6 +29,19 @@ class LearningRunService {
   static const String lockName = 'learning_run';
 
   Future<Map<String, Object?>> run({required String triggerType}) async {
+    // Ein abgebrochener oder noch gesperrter Learning-Run darf die
+    // Initialisierung neuer, bereits produktiv verfügbarer Markt-Familien
+    // nicht blockieren. Die globale Baseline ist idempotent und verändert
+    // weder einen bestehenden Champion noch eine Produktionsanalyse.
+    // Sie wird deshalb bewusst VOR dem Run-Lock sichergestellt.
+    final baselineRegistry = ModelRegistryService(
+      database: database,
+      config: config,
+    );
+    for (final market in LearningMarket.values) {
+      await baselineRegistry.ensureGlobalBaseline(market.key);
+    }
+
     final locked = await database.acquireModelLabLock(
       lockName,
       staleAfterMinutes: config.staleLockMinutes,
@@ -96,7 +109,10 @@ class LearningRunService {
         action: 'learning_failed',
         actor: 'system',
         learningRunId: runId,
-        details: {'error': error.toString(), 'stackTrace': stackTrace.toString()},
+        details: {
+          'error': error.toString(),
+          'stackTrace': stackTrace.toString()
+        },
       );
       return {'status': 'failed', 'runId': runId, 'error': error.toString()};
     } finally {
@@ -113,10 +129,12 @@ class LearningRunService {
 
     // Schritt 1-4: neue gesettelte Matches finden, Whitelist/Eligibility/
     // Pre-Match-Integrity prüfen (Section 46, Punkte 1-4).
-    await database.updateLearningRunStep(id: runId, currentStep: 'auditing_eligibility');
+    await database.updateLearningRunStep(
+        id: runId, currentStep: 'auditing_eligibility');
     final audit = await datasetBuilder.auditEligibility();
 
-    await database.updateLearningRunStep(id: runId, currentStep: 'loading_whitelist');
+    await database.updateLearningRunStep(
+        id: runId, currentStep: 'loading_whitelist');
     final leagues = await database.modelLabWhitelistedLeagues();
 
     var challengersCreated = 0;
