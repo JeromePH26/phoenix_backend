@@ -71,6 +71,15 @@ class AppConfig {
     return int.tryParse(raw);
   }
 
+  /// Section 28 (AN2): "Warnschwellen" für die Datenbankgröße - echtes,
+  /// vom Admin gesetztes Limit (z.B. das Speicherlimit des Railway-Plans in
+  /// MB). Kein Default, ohne Konfiguration keine Warnschwelle.
+  int? get databaseSizeLimitMb {
+    final raw = Platform.environment['DATABASE_SIZE_LIMIT_MB']?.trim();
+    if (raw == null || raw.isEmpty) return null;
+    return int.tryParse(raw);
+  }
+
   bool get hasTennisApi => sportradarTennisApiKey.trim().isNotEmpty;
   bool get hasFirebasePush =>
       firebaseProjectId.isNotEmpty && firebaseServiceAccountJson.isNotEmpty;

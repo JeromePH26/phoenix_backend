@@ -2473,14 +2473,79 @@ class ControlCenterRoutes {
       final openTickets = await database.listSupportTickets(status: 'NEU');
       final openIncidents = await database.listIncidents(status: 'OPEN');
 
+      // Section 28 (AN2): "Größenverlauf" - bei jedem Aufruf dieser Route
+      // (Database- und System-Health-Seite) einen echten Snapshot
+      // speichern. Darf einen bereits geladenen Health-Report niemals zum
+      // Scheitern bringen, deshalb separat abgesichert.
+      try {
+        await database.recordDatabaseSizeSnapshot();
+      } catch (_) {}
+      final sizeHistory = await database.databaseSizeHistory(limit: 30);
+
+      // Section 28 (AN2): "echte Ampel mit Ursachen" - EIN Gesamtstatus aus
+      // denselben echten Signalen, die auch die einzelnen Kacheln zeigen,
+      // mit einer Begründungsliste statt nur einer Farbe ohne Kontext.
+      final ampelReasons = <String>[];
+      var ampelStatus = 'green';
+      void escalate(String status, String reason) {
+        if (status == 'red' || (status == 'gold' && ampelStatus != 'red')) {
+          ampelStatus = status;
+        }
+        ampelReasons.add(reason);
+      }
+
+      if (openIncidents.isNotEmpty) {
+        escalate('red', '${openIncidents.length} offene(r) Incident(s)');
+      }
+      if (appStatus['status'] != 'ACTIVE') {
+        escalate('gold', 'App-Status ist "${appStatus['status']}", nicht ACTIVE');
+      }
+      if (pendingPipelineJobs > 0) {
+        escalate('gold', '$pendingPipelineJobs offene Daily-Pipeline-Läufe');
+      }
+      if (pendingSettlementJobs > 0) {
+        escalate('gold', '$pendingSettlementJobs offene Settlement-Läufe');
+      }
+      for (final row in apiUsage) {
+        final requests = ((row['requests'] as num?) ?? 0).toInt();
+        final apiName = row['api_name']?.toString() ?? 'API';
+        final limit = config.apiSportsDailyLimitFor(apiName);
+        if (limit == null || limit <= 0) continue;
+        final percent = (requests / limit) * 100;
+        if (percent >= 95) {
+          escalate('red', '$apiName: API-Budget bei ${percent.toStringAsFixed(0)}%');
+        } else if (percent >= 85) {
+          escalate('gold', '$apiName: API-Budget bei ${percent.toStringAsFixed(0)}%');
+        }
+      }
+      final dbLimit = config.databaseSizeLimitMb;
+      if (dbLimit != null && dbLimit > 0) {
+        final sizeMb = ((dbStats['sizeBytes'] as num?) ?? 0) / (1024 * 1024);
+        final dbPercent = (sizeMb / dbLimit) * 100;
+        if (dbPercent >= 95) {
+          escalate('red', 'Datenbankgröße bei ${dbPercent.toStringAsFixed(0)}% des konfigurierten Limits');
+        } else if (dbPercent >= 85) {
+          escalate('gold', 'Datenbankgröße bei ${dbPercent.toStringAsFixed(0)}% des konfigurierten Limits');
+        }
+      }
+
       return jsonResponse({
+        'ampel': {
+          'status': ampelStatus,
+          'reasons': ampelReasons,
+          'checkedAt': DateTime.now().toUtc().toIso8601String(),
+        },
         'apiUsage': apiUsage.map((row) => _jsonSafe(_apiUsageRowWithLimit(row))).toList(),
         'pendingJobs': {
           'footballDailyPipeline': pendingPipelineJobs,
           'footballMatchSettlement': pendingSettlementJobs,
         },
         'appStatus': _jsonSafe(appStatus),
-        'database': _jsonSafe(dbStats),
+        'database': {
+          ...(_jsonSafe(dbStats) as Map<String, Object?>),
+          'sizeLimitMb': config.databaseSizeLimitMb,
+          'sizeHistory': sizeHistory.map(_jsonSafe).toList(),
+        },
         'openTicketCount': openTickets.length,
         'openIncidentCount': openIncidents.length,
       });

@@ -2075,6 +2075,20 @@ class PhoenixDatabase {
       ON incident_timeline_events (incident_id, occurred_at)
     ''');
 
+    // Section 28 (AN2): "Größenverlauf" - ein Snapshot pro Seitenaufruf der
+    // Database-/System-Health-Seite (siehe recordDatabaseSizeSnapshot()).
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS database_size_snapshots (
+        id BIGSERIAL PRIMARY KEY,
+        size_bytes BIGINT NOT NULL,
+        recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_database_size_snapshots_recorded
+      ON database_size_snapshots (recorded_at DESC)
+    ''');
+
     // Section 13: Sicherheits-Vorbereitung. Noch kein 2FA/Login-Historie-UI,
     // aber fehlgeschlagene Login-Versuche werden ab jetzt festgehalten, damit
     // spätere Sicherheitswarnungen echte Daten haben statt bei Null zu
@@ -9744,12 +9758,91 @@ class PhoenixDatabase {
       ORDER BY n_live_tup DESC
       LIMIT 15
     ''');
+    // Section 28 (AN2): "Indizes" - Größe und Nutzung (wie oft genutzt) je
+    // Index, damit ungenutzte/übergroße Indizes auffallen.
+    final indexResult = await db.execute('''
+      SELECT
+        s.relname AS table_name,
+        s.indexrelname AS index_name,
+        pg_relation_size(s.indexrelid) AS size_bytes,
+        s.idx_scan AS scans
+      FROM pg_stat_user_indexes s
+      ORDER BY pg_relation_size(s.indexrelid) DESC
+      LIMIT 20
+    ''');
+    // "Langsame Queries" braucht die pg_stat_statements-Extension, die auf
+    // dieser Railway-Instanz evtl. nicht aktiviert ist - defensiv statt die
+    // ganze Seite zum Absturz zu bringen, wenn sie fehlt.
+    List<Map<String, Object?>>? slowQueries;
+    try {
+      final slowResult = await db.execute('''
+        SELECT query, calls, mean_exec_time, max_exec_time
+        FROM pg_stat_statements
+        WHERE query NOT ILIKE '%pg_stat_statements%'
+        ORDER BY mean_exec_time DESC
+        LIMIT 10
+      ''');
+      slowQueries = slowResult
+          .map((row) => {
+                'query': row[0].toString(),
+                'calls': row[1],
+                'meanExecMs': row[2],
+                'maxExecMs': row[3],
+              })
+          .toList();
+    } catch (_) {
+      slowQueries = null;
+    }
+
     return {
       'sizeBytes': sizeResult.first[0],
       'largestTables': tableResult
           .map((row) => {'table': row[0].toString(), 'rows': row[1]})
           .toList(),
+      'indexes': indexResult
+          .map((row) => {
+                'table': row[0].toString(),
+                'index': row[1].toString(),
+                'sizeBytes': row[2],
+                'scans': row[3],
+              })
+          .toList(),
+      'slowQueries': slowQueries,
+      'slowQueriesAvailable': slowQueries != null,
     };
+  }
+
+  // Section 28 (AN2): "Größenverlauf, Tabellenwachstum" - es gibt keinen
+  // eigenen Cron dafür; stattdessen wird bei jedem Aufruf der
+  // Database-/System-Health-Seite ein echter Snapshot gespeichert
+  // ("Aufruf-getriebene" Historie statt erfundener Zwischenwerte).
+  Future<void> recordDatabaseSizeSnapshot() async {
+    final db = await connection();
+    final sizeResult = await db.execute('''
+      SELECT pg_database_size(current_database()) AS size_bytes
+    ''');
+    final sizeBytes = sizeResult.first[0] as int;
+    await db.execute(
+      Sql.named('''
+        INSERT INTO database_size_snapshots (size_bytes)
+        VALUES (@size_bytes)
+      '''),
+      parameters: {'size_bytes': sizeBytes},
+    );
+  }
+
+  Future<List<Map<String, Object?>>> databaseSizeHistory({int limit = 30}) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT size_bytes, recorded_at::text AS recorded_at
+        FROM database_size_snapshots
+        ORDER BY recorded_at DESC
+        LIMIT @limit
+      '''),
+      parameters: {'limit': limit.clamp(1, 200)},
+    );
+    return result.map((row) => Map<String, Object?>.from(row.toColumnMap())).toList();
   }
 
   /// Section OVERVIEW: die drei Kennzahlen, die nicht bereits durch
