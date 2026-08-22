@@ -608,6 +608,11 @@ class ModelLabRoutes {
           'market': market.key,
           'marketLabel': market.label,
           'sampleSize': counts.eligible,
+          // Section 14 (AN2): "Noch X abgerechnete Spiele bis zur
+          // liga-spezifischen Version" - der reale Schwellenwert aus der
+          // Konfiguration, damit das Frontend den Rest selbst ausrechnen
+          // kann, statt einen Wert zu erfinden.
+          'sampleThreshold': modelLabConfig.leagueAdaptationSampleThreshold,
           'status': status.label,
           'champion': champion == null
               ? null
