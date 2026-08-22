@@ -375,7 +375,8 @@ class ApiRoutes {
       String fixtureId,
     ) async {
       if (!await database.moduleEnabled('historical_twins')) {
-        return jsonResponse({'error': 'Historical Twins ist deaktiviert.'}, statusCode: 503);
+        return jsonResponse({'error': 'Historical Twins ist deaktiviert.'},
+            statusCode: 503);
       }
       try {
         final result = await HistoricalTwinService(
@@ -588,7 +589,8 @@ class ApiRoutes {
         final modules = await database.listModuleControls();
         return jsonResponse({
           'modules': {
-            for (final module in modules) module['module_key'].toString(): module['enabled'],
+            for (final module in modules)
+              module['module_key'].toString(): module['enabled'],
           },
         });
       } catch (error) {
@@ -606,12 +608,14 @@ class ApiRoutes {
       try {
         final body = jsonDecode(await request.readAsString());
         if (body is! Map<String, dynamic>) {
-          return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+          return jsonResponse({'error': 'Ungültiger JSON-Body.'},
+              statusCode: 400);
         }
         final installationId = body['installationId']?.toString().trim() ?? '';
         final subject = body['subject']?.toString().trim() ?? '';
         final message = body['message']?.toString().trim() ?? '';
-        final category = body['category']?.toString().trim().toLowerCase() ?? 'sonstiges';
+        final category =
+            body['category']?.toString().trim().toLowerCase() ?? 'sonstiges';
         if (installationId.length < 16 || subject.isEmpty || message.isEmpty) {
           return jsonResponse({
             'error': 'installationId, subject und message sind erforderlich.',
@@ -619,7 +623,8 @@ class ApiRoutes {
         }
         if (!validCategories.contains(category)) {
           return jsonResponse({
-            'error': 'category muss eines von ${validCategories.join(', ')} sein.',
+            'error':
+                'category muss eines von ${validCategories.join(', ')} sein.',
           }, statusCode: 400);
         }
         final ticket = await database.createSupportTicket(
@@ -644,9 +649,11 @@ class ApiRoutes {
       final installationId =
           request.headers['x-phoenix-installation-id']?.trim() ?? '';
       if (installationId.length < 16) {
-        return jsonResponse({'error': 'Installation-ID fehlt.'}, statusCode: 401);
+        return jsonResponse({'error': 'Installation-ID fehlt.'},
+            statusCode: 401);
       }
-      final tickets = await database.supportTicketsForInstallation(installationId);
+      final tickets =
+          await database.supportTicketsForInstallation(installationId);
       return jsonResponse({'tickets': tickets});
     });
 
@@ -657,11 +664,13 @@ class ApiRoutes {
       final installationId =
           request.headers['x-phoenix-installation-id']?.trim() ?? '';
       if (installationId.length < 16) {
-        return jsonResponse({'error': 'Installation-ID fehlt.'}, statusCode: 401);
+        return jsonResponse({'error': 'Installation-ID fehlt.'},
+            statusCode: 401);
       }
       final ticket = await database.supportTicket(int.parse(id));
       if (ticket == null || ticket['installation_id'] != installationId) {
-        return jsonResponse({'error': 'Ticket nicht gefunden.'}, statusCode: 404);
+        return jsonResponse({'error': 'Ticket nicht gefunden.'},
+            statusCode: 404);
       }
       final messages = await database.supportTicketMessages(
         int.parse(id),
@@ -677,20 +686,25 @@ class ApiRoutes {
       final installationId =
           request.headers['x-phoenix-installation-id']?.trim() ?? '';
       if (installationId.length < 16) {
-        return jsonResponse({'error': 'Installation-ID fehlt.'}, statusCode: 401);
+        return jsonResponse({'error': 'Installation-ID fehlt.'},
+            statusCode: 401);
       }
       final ticket = await database.supportTicket(int.parse(id));
       if (ticket == null || ticket['installation_id'] != installationId) {
-        return jsonResponse({'error': 'Ticket nicht gefunden.'}, statusCode: 404);
+        return jsonResponse({'error': 'Ticket nicht gefunden.'},
+            statusCode: 404);
       }
       try {
         final body = jsonDecode(await request.readAsString());
-        final message = body is Map ? body['message']?.toString().trim() ?? '' : '';
+        final message =
+            body is Map ? body['message']?.toString().trim() ?? '' : '';
         if (message.isEmpty) {
-          return jsonResponse({'error': 'message ist erforderlich.'}, statusCode: 400);
+          return jsonResponse({'error': 'message ist erforderlich.'},
+              statusCode: 400);
         }
         // Nutzerantwort setzt ein wartendes Ticket wieder auf "neu für uns".
-        await database.updateSupportTicket(id: int.parse(id), status: 'IN_BEARBEITUNG');
+        await database.updateSupportTicket(
+            id: int.parse(id), status: 'IN_BEARBEITUNG');
         final saved = await database.addSupportTicketMessage(
           ticketId: int.parse(id),
           authorType: 'user',
@@ -1006,7 +1020,8 @@ class ApiRoutes {
       try {
         final team = await database.footballTeamDetail(id);
         if (team == null) {
-          return jsonResponse({'error': 'Team nicht gefunden.'}, statusCode: 404);
+          return jsonResponse({'error': 'Team nicht gefunden.'},
+              statusCode: 404);
         }
         return jsonResponse(_jsonSafe(team));
       } catch (error) {
@@ -1192,15 +1207,15 @@ class ApiRoutes {
       // wüsste.
       if (await database.countPendingFootballMatchSettlementJobs() > 0) {
         return jsonResponse({
-          'error': 'Es läuft bereits ein Settlement-Lauf. Bitte warten, bis dieser abgeschlossen ist.',
+          'error':
+              'Es läuft bereits ein Settlement-Lauf. Bitte warten, bis dieser abgeschlossen ist.',
         }, statusCode: 409);
       }
       final query = request.url.queryParameters;
       // Default 3h für den täglichen Check, Backfill-Aufrufe übergeben
       // bewusst minHours=4 gemäß Vorgabe.
-      final minHours =
-          (int.tryParse(query['minHoursSinceKickoff'] ?? '') ?? 3)
-              .clamp(0, 24 * 30);
+      final minHours = (int.tryParse(query['minHoursSinceKickoff'] ?? '') ?? 3)
+          .clamp(0, 24 * 30);
       final batchSize =
           (int.tryParse(query['batchSize'] ?? '') ?? 25).clamp(1, 100);
 
@@ -1612,6 +1627,7 @@ class ApiRoutes {
           minValue: double.tryParse(query['minValue'] ?? ''),
           groupByTime: query['groupByTime'],
           includeMarketBreakdown: query['includeMarketBreakdown'] == 'true',
+          includeTeamBreakdown: query['includeTeamBreakdown'] == 'true',
           includePreviousPeriod: query['includePreviousPeriod'] == 'true',
         );
         return jsonResponse(_jsonSafe(result));
@@ -1654,8 +1670,9 @@ class ApiRoutes {
 
         final assets = inventory
             .map((row) {
-              final updatedAt =
-                  row['updated_at'] is DateTime ? row['updated_at'] as DateTime : null;
+              final updatedAt = row['updated_at'] is DateTime
+                  ? row['updated_at'] as DateTime
+                  : null;
               final status = computeAssetStatus(
                 cached: row['mime_type'] != null,
                 hasBytes: row['has_bytes'] == true,
@@ -2001,7 +2018,8 @@ class ApiRoutes {
       }
       try {
         final body = jsonDecode(await request.readAsString());
-        final newPassword = body is Map ? body['newPassword']?.toString() ?? '' : '';
+        final newPassword =
+            body is Map ? body['newPassword']?.toString() ?? '' : '';
         if (newPassword.length < 8) {
           return jsonResponse({
             'error': 'newPassword muss mindestens 8 Zeichen lang sein.',
@@ -2013,7 +2031,8 @@ class ApiRoutes {
           passwordHash: hash,
         );
         if (!updated) {
-          return jsonResponse({'error': 'Mitarbeiter nicht gefunden.'}, statusCode: 404);
+          return jsonResponse({'error': 'Mitarbeiter nicht gefunden.'},
+              statusCode: 404);
         }
         return jsonResponse({'status': 'password_reset', 'login': login});
       } catch (error) {

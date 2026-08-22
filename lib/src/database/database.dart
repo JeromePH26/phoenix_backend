@@ -1368,7 +1368,8 @@ class PhoenixDatabase {
         parameters: {
           'email': email,
           'email_verified': emailVerified,
-          'date_of_birth': dateOfBirth.toUtc().toIso8601String().substring(0, 10),
+          'date_of_birth':
+              dateOfBirth.toUtc().toIso8601String().substring(0, 10),
           // Abschnitt 82: E-Mail bereits vom Provider verifiziert (z.B.
           // Google) -> direkt ACTIVE, sonst erst nach Verifizierung.
           'account_status':
@@ -1577,7 +1578,9 @@ class PhoenixDatabase {
       '''),
       parameters: {'user_id': userId},
     );
-    return result.map((row) => Map<String, Object?>.from(row.toColumnMap())).toList();
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
   }
 
   /// PHÖNIX CONTROL CENTER PHASE 2 (Football-Domain-Admin-APIs, additiv):
@@ -2185,7 +2188,9 @@ class PhoenixDatabase {
       FROM module_control
       ORDER BY label
     ''');
-    return result.map((row) => Map<String, Object?>.from(row.toColumnMap())).toList();
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
   }
 
   Future<Map<String, Object?>?> updateModuleControl({
@@ -2201,7 +2206,11 @@ class PhoenixDatabase {
         RETURNING module_key, label, description, enabled, enforced_in_backend,
           updated_at::text AS updated_at, updated_by
       '''),
-      parameters: {'module_key': moduleKey, 'enabled': enabled, 'updated_by': updatedBy},
+      parameters: {
+        'module_key': moduleKey,
+        'enabled': enabled,
+        'updated_by': updatedBy
+      },
     );
     if (result.isEmpty) return null;
     return Map<String, Object?>.from(result.first.toColumnMap());
@@ -2249,7 +2258,8 @@ class PhoenixDatabase {
     return Map<String, Object?>.from(result.first.toColumnMap());
   }
 
-  Future<List<Map<String, Object?>>> listSystemAuditRuns({int limit = 50}) async {
+  Future<List<Map<String, Object?>>> listSystemAuditRuns(
+      {int limit = 50}) async {
     final db = await connection();
     final result = await db.execute(
       Sql.named('''
@@ -2261,7 +2271,9 @@ class PhoenixDatabase {
       '''),
       parameters: {'limit': limit.clamp(1, 200)},
     );
-    return result.map((row) => Map<String, Object?>.from(row.toColumnMap())).toList();
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
   }
 
   /// PHÖNIX MODEL LAB (Self-Learning Engine V0). Rein additive Tabellen für
@@ -3642,11 +3654,13 @@ class PhoenixDatabase {
 
     final db = await connection();
     final previousRows = await db.execute(
-      Sql.named('SELECT manual_status FROM football_leagues WHERE league_id = @league_id'),
+      Sql.named(
+          'SELECT manual_status FROM football_leagues WHERE league_id = @league_id'),
       parameters: {'league_id': leagueId},
     );
     if (previousRows.isEmpty) return null;
-    final previousStatus = previousRows.first.toColumnMap()['manual_status']?.toString() ?? 'auto';
+    final previousStatus =
+        previousRows.first.toColumnMap()['manual_status']?.toString() ?? 'auto';
 
     await db.execute(
       Sql.named('''
@@ -4315,7 +4329,8 @@ class PhoenixDatabase {
       '''),
       parameters: {'hours': minHoursSinceKickoff.clamp(0, 24 * 30)},
     );
-    return int.tryParse(rows.first.toColumnMap()['total']?.toString() ?? '') ?? 0;
+    return int.tryParse(rows.first.toColumnMap()['total']?.toString() ?? '') ??
+        0;
   }
 
   Future<List<Map<String, Object?>>> footballMatchResultCandidates({
@@ -4807,7 +4822,8 @@ class PhoenixDatabase {
       parameters['league_id'] = leagueId.trim();
     }
     if (teamId != null && teamId.trim().isNotEmpty) {
-      conditions.add('(m.home_team_id = @team_id OR m.away_team_id = @team_id)');
+      conditions
+          .add('(m.home_team_id = @team_id OR m.away_team_id = @team_id)');
       parameters['team_id'] = teamId.trim();
     }
     if (marketKey != null && marketKey.trim().isNotEmpty) {
@@ -4879,7 +4895,11 @@ class PhoenixDatabase {
         ORDER BY l.kickoff DESC NULLS LAST
         LIMIT @limit OFFSET @offset
       '''),
-      parameters: {...parameters, 'limit': limit.clamp(1, 200), 'offset': offset.clamp(0, 1 << 30)},
+      parameters: {
+        ...parameters,
+        'limit': limit.clamp(1, 200),
+        'offset': offset.clamp(0, 1 << 30)
+      },
     );
 
     final countRows = await db.execute(
@@ -4997,6 +5017,7 @@ class PhoenixDatabase {
     double? minValue,
     String? groupByTime,
     bool includeMarketBreakdown = false,
+    bool includeTeamBreakdown = false,
     bool includePreviousPeriod = false,
   }) async {
     final db = await connection();
@@ -5013,7 +5034,8 @@ class PhoenixDatabase {
       } else if (homeAway == 'away') {
         conditions.add('m.away_team_id = @team_id');
       } else {
-        conditions.add('(m.home_team_id = @team_id OR m.away_team_id = @team_id)');
+        conditions
+            .add('(m.home_team_id = @team_id OR m.away_team_id = @team_id)');
       }
       parameters['team_id'] = teamId.trim();
     }
@@ -5044,15 +5066,18 @@ class PhoenixDatabase {
       final periodConditions = List<String>.from(conditions);
       final periodParameters = Map<String, Object?>.from(parameters);
       if (from != null) {
-        periodConditions.add('h.kickoff >= @date_from');
+        periodConditions.add(
+            'COALESCE(h.kickoff, h.prediction_date::timestamptz) >= @date_from');
         periodParameters['date_from'] = from.toUtc();
       }
       if (to != null) {
-        periodConditions.add('h.kickoff < @date_to');
+        periodConditions.add(
+            'COALESCE(h.kickoff, h.prediction_date::timestamptz) < @date_to');
         periodParameters['date_to'] = to.toUtc();
       }
-      final where =
-          periodConditions.isEmpty ? '' : 'WHERE ${periodConditions.join(' AND ')}';
+      final where = periodConditions.isEmpty
+          ? ''
+          : 'WHERE ${periodConditions.join(' AND ')}';
 
       final result = await db.execute(
         Sql.named('''
@@ -5113,7 +5138,8 @@ class PhoenixDatabase {
         'roiPercent': roiPercent,
         'yieldPercent': roiPercent,
         'avgOdds': row['avg_odds'] == null ? null : number('avg_odds'),
-        'avgValuePercent': row['avg_value'] == null ? null : number('avg_value'),
+        'avgValuePercent':
+            row['avg_value'] == null ? null : number('avg_value'),
       };
     }
 
@@ -5134,15 +5160,18 @@ class PhoenixDatabase {
       final marketConditions = List<String>.from(conditions);
       final marketParameters = Map<String, Object?>.from(parameters);
       if (dateFrom != null) {
-        marketConditions.add('h.kickoff >= @date_from');
+        marketConditions.add(
+            'COALESCE(h.kickoff, h.prediction_date::timestamptz) >= @date_from');
         marketParameters['date_from'] = dateFrom.toUtc();
       }
       if (dateTo != null) {
-        marketConditions.add('h.kickoff < @date_to');
+        marketConditions.add(
+            'COALESCE(h.kickoff, h.prediction_date::timestamptz) < @date_to');
         marketParameters['date_to'] = dateTo.toUtc();
       }
-      final where =
-          marketConditions.isEmpty ? '' : 'WHERE ${marketConditions.join(' AND ')}';
+      final where = marketConditions.isEmpty
+          ? ''
+          : 'WHERE ${marketConditions.join(' AND ')}';
 
       final rows = await db.execute(
         Sql.named('''
@@ -5176,7 +5205,8 @@ class PhoenixDatabase {
       );
       byMarket = rows.map((r) {
         final row = Map<String, Object?>.from(r.toColumnMap());
-        int integer(String key) => int.tryParse(row[key]?.toString() ?? '') ?? 0;
+        int integer(String key) =>
+            int.tryParse(row[key]?.toString() ?? '') ?? 0;
         double number(String key) =>
             double.tryParse(row[key]?.toString() ?? '') ?? 0;
         final won = integer('won');
@@ -5201,27 +5231,122 @@ class PhoenixDatabase {
       }).toList(growable: false);
     }
 
+    // Liga-Rangliste: Ein Tipp gehört für die Auswertung zu beiden beteiligten
+    // Teams. Dadurch lässt sich transparent sehen, bei welchen Teams PHÖNIX
+    // in dieser Liga bisher am besten bzw. schwächsten lag. Grundlage ist
+    // derselbe deduplizierte Tippbestand wie Summary, Markt-Tabelle und Chart.
+    List<Map<String, Object?>>? byTeam;
+    if (includeTeamBreakdown &&
+        leagueId != null &&
+        leagueId.trim().isNotEmpty) {
+      final teamConditions = List<String>.from(conditions);
+      final teamParameters = Map<String, Object?>.from(parameters);
+      if (dateFrom != null) {
+        teamConditions.add(
+            'COALESCE(h.kickoff, h.prediction_date::timestamptz) >= @date_from');
+        teamParameters['date_from'] = dateFrom.toUtc();
+      }
+      if (dateTo != null) {
+        teamConditions.add(
+            'COALESCE(h.kickoff, h.prediction_date::timestamptz) < @date_to');
+        teamParameters['date_to'] = dateTo.toUtc();
+      }
+      final where =
+          teamConditions.isEmpty ? '' : 'WHERE ${teamConditions.join(' AND ')}';
+      final rows = await db.execute(
+        Sql.named('''
+          WITH first_predictions AS (
+            SELECT DISTINCT ON (h.prediction_date, h.fixture_id)
+              h.market_key, h.market_odds, h.assigned_units, h.result_status,
+              h.profit_units,
+              m.home_team_id, m.home_team_name, m.home_logo,
+              m.away_team_id, m.away_team_name, m.away_logo
+            FROM football_analysis_history h
+            INNER JOIN football_matches m ON m.id = h.fixture_id
+            $where
+            ORDER BY h.prediction_date, h.fixture_id, h.created_at ASC
+          ), team_predictions AS (
+            SELECT home_team_id AS team_id, home_team_name AS team_name,
+                   home_logo AS team_logo, market_key, market_odds,
+                   assigned_units, result_status, profit_units
+            FROM first_predictions
+            UNION ALL
+            SELECT away_team_id, away_team_name, away_logo, market_key,
+                   market_odds, assigned_units, result_status, profit_units
+            FROM first_predictions
+          )
+          SELECT
+            team_id, MAX(team_name) AS team_name, MAX(team_logo) AS team_logo,
+            COUNT(*) FILTER (WHERE market_key <> '') AS tip_count,
+            COUNT(*) FILTER (WHERE result_status = 'won' AND assigned_units > 0) AS won,
+            COUNT(*) FILTER (WHERE result_status = 'lost' AND assigned_units > 0) AS lost,
+            COUNT(*) FILTER (WHERE result_status = 'push' AND assigned_units > 0) AS push,
+            COUNT(*) FILTER (WHERE result_status = 'pending' AND market_key <> '') AS pending,
+            COALESCE(SUM(assigned_units) FILTER (
+              WHERE result_status IN ('won','lost','push') AND assigned_units > 0
+            ), 0) AS staked_units,
+            COALESCE(SUM(profit_units) FILTER (
+              WHERE result_status IN ('won','lost','push') AND assigned_units > 0
+            ), 0) AS profit_units,
+            AVG(market_odds) FILTER (WHERE market_odds > 1) AS avg_odds
+          FROM team_predictions
+          WHERE market_key <> ''
+          GROUP BY team_id
+          ORDER BY profit_units DESC, won DESC, tip_count DESC, team_name ASC
+        '''),
+        parameters: teamParameters,
+      );
+      byTeam = rows.map((r) {
+        final row = Map<String, Object?>.from(r.toColumnMap());
+        int integer(String key) =>
+            int.tryParse(row[key]?.toString() ?? '') ?? 0;
+        double number(String key) =>
+            double.tryParse(row[key]?.toString() ?? '') ?? 0;
+        final won = integer('won');
+        final lost = integer('lost');
+        final staked = number('staked_units');
+        final profit = number('profit_units');
+        return {
+          'teamId': row['team_id'],
+          'teamName': row['team_name'],
+          'teamLogo': row['team_logo'],
+          'tipCount': integer('tip_count'),
+          'won': won,
+          'lost': lost,
+          'push': integer('push'),
+          'pending': integer('pending'),
+          'hitRatePercent': won + lost == 0 ? null : won / (won + lost) * 100,
+          'profitUnits': profit,
+          'roiPercent': staked == 0 ? null : profit / staked * 100,
+          'avgOdds': row['avg_odds'] == null ? null : number('avg_odds'),
+        };
+      }).toList(growable: false);
+    }
+
     List<Map<String, Object?>>? timeSeries;
-    if (groupByTime != null &&
-        {'day', 'week', 'month'}.contains(groupByTime)) {
+    if (groupByTime != null && {'day', 'week', 'month'}.contains(groupByTime)) {
       final seriesConditions = List<String>.from(conditions);
       final seriesParameters = Map<String, Object?>.from(parameters);
       if (dateFrom != null) {
-        seriesConditions.add('h.kickoff >= @date_from');
+        seriesConditions.add(
+            'COALESCE(h.kickoff, h.prediction_date::timestamptz) >= @date_from');
         seriesParameters['date_from'] = dateFrom.toUtc();
       }
       if (dateTo != null) {
-        seriesConditions.add('h.kickoff < @date_to');
+        seriesConditions.add(
+            'COALESCE(h.kickoff, h.prediction_date::timestamptz) < @date_to');
         seriesParameters['date_to'] = dateTo.toUtc();
       }
-      final where =
-          seriesConditions.isEmpty ? '' : 'WHERE ${seriesConditions.join(' AND ')}';
+      final where = seriesConditions.isEmpty
+          ? ''
+          : 'WHERE ${seriesConditions.join(' AND ')}';
 
       final rows = await db.execute(
         Sql.named('''
           WITH first_predictions AS (
             SELECT DISTINCT ON (h.prediction_date, h.fixture_id)
-              h.assigned_units, h.result_status, h.profit_units, h.kickoff,
+              h.assigned_units, h.result_status, h.profit_units,
+              COALESCE(h.kickoff, h.prediction_date::timestamptz) AS performance_at,
               h.market_key, h.market_odds,
               COALESCE(
                 NULLIF(h.payload #>> '{selection,value,valuePercent}', ''), '0'
@@ -5232,7 +5357,7 @@ class PhoenixDatabase {
             ORDER BY h.prediction_date, h.fixture_id, h.created_at ASC
           )
           SELECT
-            date_trunc(@bucket, kickoff) AS period,
+            date_trunc(@bucket, performance_at) AS period,
             COUNT(*) FILTER (WHERE result_status = 'won' AND assigned_units > 0) AS won,
             COUNT(*) FILTER (WHERE result_status = 'lost' AND assigned_units > 0) AS lost,
             COUNT(*) FILTER (WHERE result_status = 'push' AND assigned_units > 0) AS push,
@@ -5246,7 +5371,7 @@ class PhoenixDatabase {
             AVG(market_odds) FILTER (WHERE market_odds > 1) AS avg_odds,
             AVG(value_percent) FILTER (WHERE market_key <> '') AS avg_value
           FROM first_predictions
-          WHERE kickoff IS NOT NULL
+          WHERE performance_at IS NOT NULL
           GROUP BY period
           ORDER BY period
         '''),
@@ -5254,7 +5379,8 @@ class PhoenixDatabase {
       );
       timeSeries = rows.map((r) {
         final row = Map<String, Object?>.from(r.toColumnMap());
-        int integer(String key) => int.tryParse(row[key]?.toString() ?? '') ?? 0;
+        int integer(String key) =>
+            int.tryParse(row[key]?.toString() ?? '') ?? 0;
         double number(String key) =>
             double.tryParse(row[key]?.toString() ?? '') ?? 0;
         final won = integer('won');
@@ -5265,7 +5391,8 @@ class PhoenixDatabase {
         final roiPercent = staked == 0 ? null : profit / staked * 100;
         final period = row['period'];
         return {
-          'period': period is DateTime ? period.toUtc().toIso8601String() : period,
+          'period':
+              period is DateTime ? period.toUtc().toIso8601String() : period,
           'won': won,
           'lost': lost,
           'push': integer('push'),
@@ -5275,7 +5402,8 @@ class PhoenixDatabase {
           'yieldPercent': roiPercent,
           'profitUnits': profit,
           'avgOdds': row['avg_odds'] == null ? null : number('avg_odds'),
-          'avgValuePercent': row['avg_value'] == null ? null : number('avg_value'),
+          'avgValuePercent':
+              row['avg_value'] == null ? null : number('avg_value'),
         };
       }).toList(growable: false);
     }
@@ -5284,6 +5412,7 @@ class PhoenixDatabase {
       'summary': summary,
       if (previousPeriod != null) 'previousPeriod': previousPeriod,
       if (byMarket != null) 'byMarket': byMarket,
+      if (byTeam != null) 'byTeam': byTeam,
       if (timeSeries != null) 'timeSeries': timeSeries,
     };
   }
@@ -5308,7 +5437,8 @@ class PhoenixDatabase {
       parameters['league_id'] = leagueId.trim();
     }
     if (teamId != null && teamId.trim().isNotEmpty) {
-      conditions.add('(m.home_team_id = @team_id OR m.away_team_id = @team_id)');
+      conditions
+          .add('(m.home_team_id = @team_id OR m.away_team_id = @team_id)');
       parameters['team_id'] = teamId.trim();
     }
     final where = conditions.isEmpty ? '' : 'WHERE ${conditions.join(' AND ')}';
@@ -5385,18 +5515,29 @@ class PhoenixDatabase {
       'statistics': categoryOf('statistics', coverage('statistics')),
       // Strukturell nie verfügbar (siehe Doc-Kommentar) - ehrlich als 0
       // ausgegeben statt weggelassen.
-      'lineups': {'coveragePercent': 0.0, 'status': 'missing', 'withCount': 0, 'withoutCount': total},
-      'xg': {'coveragePercent': 0.0, 'status': 'missing', 'withCount': 0, 'withoutCount': total},
+      'lineups': {
+        'coveragePercent': 0.0,
+        'status': 'missing',
+        'withCount': 0,
+        'withoutCount': total
+      },
+      'xg': {
+        'coveragePercent': 0.0,
+        'status': 'missing',
+        'withCount': 0,
+        'withoutCount': total
+      },
     };
 
     final avgDq = row['avg_data_quality'];
     final lastUpdated = row['last_updated'];
     return {
       'sampleSize': total,
-      'overallCoveragePercent': avgDq == null
-          ? null
-          : double.tryParse(avgDq.toString()),
-      'lastUpdated': lastUpdated is DateTime ? lastUpdated.toUtc().toIso8601String() : null,
+      'overallCoveragePercent':
+          avgDq == null ? null : double.tryParse(avgDq.toString()),
+      'lastUpdated': lastUpdated is DateTime
+          ? lastUpdated.toUtc().toIso8601String()
+          : null,
       'categories': categories,
     };
   }
@@ -6194,8 +6335,7 @@ class PhoenixDatabase {
     required String market,
   }) async {
     final db = await connection();
-    final leagueFilter =
-        leagueId == null ? 'IS NULL' : '= @league_id';
+    final leagueFilter = leagueId == null ? 'IS NULL' : '= @league_id';
     final result = await db.execute(
       Sql.named('''
         SELECT * FROM phoenix_model_versions
@@ -6217,8 +6357,7 @@ class PhoenixDatabase {
     required String market,
   }) async {
     final db = await connection();
-    final leagueFilter =
-        leagueId == null ? 'IS NULL' : '= @league_id';
+    final leagueFilter = leagueId == null ? 'IS NULL' : '= @league_id';
     final result = await db.execute(
       Sql.named('''
         SELECT * FROM phoenix_model_versions
@@ -6749,8 +6888,7 @@ class PhoenixDatabase {
     required String market,
   }) async {
     final db = await connection();
-    final leagueFilter =
-        leagueId == null ? 'IS NULL' : '= @league_id';
+    final leagueFilter = leagueId == null ? 'IS NULL' : '= @league_id';
     final result = await db.execute(
       Sql.named('''
         SELECT id FROM phoenix_monthly_reviews
@@ -6886,7 +7024,8 @@ class PhoenixDatabase {
 
   Future<int> countShadowPredictions() async {
     final db = await connection();
-    final result = await db.execute('SELECT COUNT(*) FROM phoenix_shadow_predictions');
+    final result =
+        await db.execute('SELECT COUNT(*) FROM phoenix_shadow_predictions');
     return (result.first[0] as int?) ?? 0;
   }
 
@@ -7014,7 +7153,8 @@ class PhoenixDatabase {
       parameters: {'email': email},
     );
     if (employeeRows.isEmpty) return null;
-    final employee = Map<String, Object?>.from(employeeRows.first.toColumnMap());
+    final employee =
+        Map<String, Object?>.from(employeeRows.first.toColumnMap());
     final employeeId = employee['id'] as int;
 
     if (employee['user_id'] == null) {
@@ -7059,7 +7199,8 @@ class PhoenixDatabase {
 
   /// Section "GET /employees": Mitarbeiterliste inkl. Anzahl aktuell aktiver
   /// (nicht abgelaufener, nicht widerrufener) Sessions je Mitarbeiter.
-  Future<List<Map<String, Object?>>> listAdminEmployeesWithActiveSessionCounts() async {
+  Future<List<Map<String, Object?>>>
+      listAdminEmployeesWithActiveSessionCounts() async {
     final db = await connection();
     final result = await db.execute('''
       SELECT
@@ -7116,7 +7257,8 @@ class PhoenixDatabase {
       parameters['department'] = department;
     }
     if (permissionOverrides != null) {
-      setClauses.add('permission_overrides = CAST(@permission_overrides AS JSONB)');
+      setClauses
+          .add('permission_overrides = CAST(@permission_overrides AS JSONB)');
       parameters['permission_overrides'] = jsonEncode(permissionOverrides);
     }
     if (status != null) {
@@ -7336,7 +7478,8 @@ class PhoenixDatabase {
         'object_type': objectType,
         'object_id': objectId,
         'action': action,
-        'previous_value': previousValue == null ? null : jsonEncode(previousValue),
+        'previous_value':
+            previousValue == null ? null : jsonEncode(previousValue),
         'new_value': newValue == null ? null : jsonEncode(newValue),
         'reason': reason,
         'comment': comment,
@@ -7396,7 +7539,8 @@ class PhoenixDatabase {
       parameters['date_to'] = dateTo;
     }
 
-    final whereClause = conditions.isEmpty ? '' : 'WHERE ${conditions.join(' AND ')}';
+    final whereClause =
+        conditions.isEmpty ? '' : 'WHERE ${conditions.join(' AND ')}';
 
     final result = await db.execute(
       Sql.named('''
@@ -7418,7 +7562,9 @@ class PhoenixDatabase {
       Sql.named('SELECT COUNT(*) AS total FROM admin_audit_log a $whereClause'),
       parameters: parameters,
     );
-    final total = int.tryParse(countResult.first.toColumnMap()['total']?.toString() ?? '') ?? 0;
+    final total = int.tryParse(
+            countResult.first.toColumnMap()['total']?.toString() ?? '') ??
+        0;
 
     final entries = result.map((row) {
       final m = row.toColumnMap();
@@ -7483,7 +7629,8 @@ class PhoenixDatabase {
       filterParameters['league_id'] = leagueId.trim();
     }
     if (teamId != null && teamId.trim().isNotEmpty) {
-      conditions.add('(m.home_team_id = @team_id OR m.away_team_id = @team_id)');
+      conditions
+          .add('(m.home_team_id = @team_id OR m.away_team_id = @team_id)');
       filterParameters['team_id'] = teamId.trim();
     }
     if (status != null && status.trim().isNotEmpty) {
@@ -7676,7 +7823,8 @@ class PhoenixDatabase {
       parameters: {'id': id},
     );
     if (previousRows.isEmpty) return null;
-    final previous = Map<String, Object?>.from(previousRows.first.toColumnMap());
+    final previous =
+        Map<String, Object?>.from(previousRows.first.toColumnMap());
 
     final setClause = columns.map((column) => '$column = @$column').join(', ');
     await db.execute(
@@ -7692,8 +7840,25 @@ class PhoenixDatabase {
   }
 
   static const Set<String> footballMatchStatusCodes = {
-    'TBD', 'NS', '1H', 'HT', '2H', 'ET', 'BT', 'P', 'SUSP', 'INT', 'LIVE',
-    'FT', 'AET', 'PEN', 'PST', 'CANC', 'ABD', 'AWD', 'WO',
+    'TBD',
+    'NS',
+    '1H',
+    'HT',
+    '2H',
+    'ET',
+    'BT',
+    'P',
+    'SUSP',
+    'INT',
+    'LIVE',
+    'FT',
+    'AET',
+    'PEN',
+    'PST',
+    'CANC',
+    'ABD',
+    'AWD',
+    'WO',
   };
 
   /// Manuelle Statusübersteuerung (z.B. ein abgesagtes Spiel, bevor der
@@ -7969,7 +8134,8 @@ class PhoenixDatabase {
         0;
 
     return {
-      'teams': rows.map((r) => Map<String, Object?>.from(r.toColumnMap())).toList(),
+      'teams':
+          rows.map((r) => Map<String, Object?>.from(r.toColumnMap())).toList(),
       'total': total,
       'limit': limit,
       'offset': offset,
@@ -8324,7 +8490,9 @@ class PhoenixDatabase {
         'message': message,
         'updated_by': updatedBy,
         'maintenance_until_set': !identical(maintenanceUntil, unsetSentinel),
-        'maintenance_until': identical(maintenanceUntil, unsetSentinel) ? null : maintenanceUntil,
+        'maintenance_until': identical(maintenanceUntil, unsetSentinel)
+            ? null
+            : maintenanceUntil,
       },
     );
     return Map<String, Object?>.from(result.first.toColumnMap());
@@ -8358,7 +8526,11 @@ class PhoenixDatabase {
       ''');
       final row = result.first.toColumnMap();
       int n(String key) => int.tryParse(row[key]?.toString() ?? '') ?? 0;
-      return {'running': n('running'), 'failed24h': n('failed24h'), 'completed24h': n('completed24h')};
+      return {
+        'running': n('running'),
+        'failed24h': n('failed24h'),
+        'completed24h': n('completed24h')
+      };
     }
 
     return {
@@ -8571,7 +8743,10 @@ class PhoenixDatabase {
         ORDER BY d.last_seen_at DESC
         LIMIT @limit OFFSET @offset
       '''),
-      parameters: {'limit': limit.clamp(1, 500), 'offset': offset.clamp(0, 1000000)},
+      parameters: {
+        'limit': limit.clamp(1, 500),
+        'offset': offset.clamp(0, 1000000)
+      },
     );
     return result
         .map((row) => Map<String, Object?>.from(row.toColumnMap()))
@@ -8656,7 +8831,10 @@ class PhoenixDatabase {
         ORDER BY created_at DESC
         LIMIT @limit
       '''),
-      parameters: {'installation_id': installationId, 'limit': limit.clamp(1, 200)},
+      parameters: {
+        'installation_id': installationId,
+        'limit': limit.clamp(1, 200)
+      },
     );
     return result.map((row) => _supportTicketRow(row.toColumnMap())).toList();
   }
@@ -8800,10 +8978,12 @@ class PhoenixDatabase {
     // to text like the rest of this file's read paths (RETURNING * above
     // can't cast inline the way a plain SELECT can).
     if (map['created_at'] is DateTime) {
-      map['created_at'] = (map['created_at'] as DateTime).toUtc().toIso8601String();
+      map['created_at'] =
+          (map['created_at'] as DateTime).toUtc().toIso8601String();
     }
     if (map['updated_at'] is DateTime) {
-      map['updated_at'] = (map['updated_at'] as DateTime).toUtc().toIso8601String();
+      map['updated_at'] =
+          (map['updated_at'] as DateTime).toUtc().toIso8601String();
     }
     return map;
   }
@@ -8939,7 +9119,8 @@ class PhoenixDatabase {
         'breaking': breaking,
         'send_push': sendPush,
         'scheduled_at_set': !identical(scheduledAt, unsetSentinel),
-        'scheduled_at': identical(scheduledAt, unsetSentinel) ? null : scheduledAt,
+        'scheduled_at':
+            identical(scheduledAt, unsetSentinel) ? null : scheduledAt,
         'published_at': publishedAt,
         'push_sent': pushSent,
       },
@@ -8952,7 +9133,8 @@ class PhoenixDatabase {
   /// erreichtem Zeitpunkt. Kein Cron nötig, der Status selbst bleibt bis zu
   /// einer manuellen/erneuten Prüfung "SCHEDULED", nur die Sichtbarkeit wird
   /// hier lazy berechnet.
-  Future<List<Map<String, Object?>>> publicEditorialArticles({int limit = 50}) async {
+  Future<List<Map<String, Object?>>> publicEditorialArticles(
+      {int limit = 50}) async {
     final db = await connection();
     final result = await db.execute(
       Sql.named('''
@@ -8994,7 +9176,8 @@ class PhoenixDatabase {
     return _dateSafeRow(result.first.toColumnMap());
   }
 
-  Future<List<Map<String, Object?>>> listFaqArticles({String? status, String? category}) async {
+  Future<List<Map<String, Object?>>> listFaqArticles(
+      {String? status, String? category}) async {
     final db = await connection();
     final conditions = <String>[];
     final parameters = <String, Object?>{};
@@ -9008,7 +9191,8 @@ class PhoenixDatabase {
     }
     final where = conditions.isEmpty ? '' : 'WHERE ${conditions.join(' AND ')}';
     final result = await db.execute(
-      Sql.named('SELECT * FROM phoenix_faq_articles $where ORDER BY category, position, id'),
+      Sql.named(
+          'SELECT * FROM phoenix_faq_articles $where ORDER BY category, position, id'),
       parameters: parameters,
     );
     return result.map((row) => _dateSafeRow(row.toColumnMap())).toList();
@@ -9116,7 +9300,8 @@ class PhoenixDatabase {
     return _dateSafeRow(result.first.toColumnMap());
   }
 
-  Future<List<Map<String, Object?>>> listAdCampaigns({String? slot, bool? active}) async {
+  Future<List<Map<String, Object?>>> listAdCampaigns(
+      {String? slot, bool? active}) async {
     final db = await connection();
     final conditions = <String>[];
     final parameters = <String, Object?>{};
@@ -9188,12 +9373,16 @@ class PhoenixDatabase {
         'end_date_set': !identical(endDate, unsetSentinel),
         'end_date': identical(endDate, unsetSentinel) ? null : endDate,
         'target_country_set': !identical(targetCountry, unsetSentinel),
-        'target_country': identical(targetCountry, unsetSentinel) ? null : targetCountry,
+        'target_country':
+            identical(targetCountry, unsetSentinel) ? null : targetCountry,
         'target_audience': targetAudience,
         'budget_amount_set': !identical(budgetAmount, unsetSentinel),
-        'budget_amount': identical(budgetAmount, unsetSentinel) ? null : budgetAmount,
+        'budget_amount':
+            identical(budgetAmount, unsetSentinel) ? null : budgetAmount,
         'frequency_cap_set': !identical(frequencyCapPerDay, unsetSentinel),
-        'frequency_cap': identical(frequencyCapPerDay, unsetSentinel) ? null : frequencyCapPerDay,
+        'frequency_cap': identical(frequencyCapPerDay, unsetSentinel)
+            ? null
+            : frequencyCapPerDay,
       },
     );
     if (result.isEmpty) return null;
@@ -9203,7 +9392,8 @@ class PhoenixDatabase {
   Future<void> recordAdImpression(int id) async {
     final db = await connection();
     await db.execute(
-      Sql.named('UPDATE ad_campaigns SET impressions = impressions + 1 WHERE id = @id'),
+      Sql.named(
+          'UPDATE ad_campaigns SET impressions = impressions + 1 WHERE id = @id'),
       parameters: {'id': id},
     );
   }
@@ -9216,7 +9406,8 @@ class PhoenixDatabase {
     );
   }
 
-  Future<List<Map<String, Object?>>> activeAdCampaignsForSlot(String slot) async {
+  Future<List<Map<String, Object?>>> activeAdCampaignsForSlot(
+      String slot) async {
     final db = await connection();
     final result = await db.execute(
       Sql.named('''
@@ -9241,7 +9432,10 @@ class PhoenixDatabase {
       WHERE enabled = TRUE AND news_enabled = TRUE
     ''');
     return result
-        .map((row) => {'installationId': row[0].toString(), 'pushToken': row[1].toString()})
+        .map((row) => {
+              'installationId': row[0].toString(),
+              'pushToken': row[1].toString()
+            })
         .toList();
   }
 
@@ -9263,14 +9457,20 @@ class PhoenixDatabase {
         parameters: {'league_id': targetValue},
       );
       return result
-          .map((row) => {'installationId': row[0].toString(), 'pushToken': row[1].toString()})
+          .map((row) => {
+                'installationId': row[0].toString(),
+                'pushToken': row[1].toString()
+              })
           .toList();
     }
     final result = await db.execute('''
       SELECT installation_id, push_token FROM push_devices WHERE enabled = TRUE
     ''');
     return result
-        .map((row) => {'installationId': row[0].toString(), 'pushToken': row[1].toString()})
+        .map((row) => {
+              'installationId': row[0].toString(),
+              'pushToken': row[1].toString()
+            })
         .toList();
   }
 
@@ -9324,11 +9524,16 @@ class PhoenixDatabase {
         SET sent_count = @sent_count, failed_count = @failed_count, sent_at = NOW()
         WHERE id = @id
       '''),
-      parameters: {'id': id, 'sent_count': sentCount, 'failed_count': failedCount},
+      parameters: {
+        'id': id,
+        'sent_count': sentCount,
+        'failed_count': failedCount
+      },
     );
   }
 
-  Future<List<Map<String, Object?>>> listPushBroadcasts({int limit = 50}) async {
+  Future<List<Map<String, Object?>>> listPushBroadcasts(
+      {int limit = 50}) async {
     final db = await connection();
     final result = await db.execute(
       Sql.named('''
@@ -9394,7 +9599,11 @@ class PhoenixDatabase {
         WHERE feature_key = @feature_key
         RETURNING feature_key, feature_label, tier, updated_at::text AS updated_at, updated_by
       '''),
-      parameters: {'feature_key': featureKey, 'tier': tier, 'updated_by': updatedBy},
+      parameters: {
+        'feature_key': featureKey,
+        'tier': tier,
+        'updated_by': updatedBy
+      },
     );
     if (result.isEmpty) return null;
     return Map<String, Object?>.from(result.first.toColumnMap());
@@ -9429,7 +9638,9 @@ class PhoenixDatabase {
       FROM feature_flags
       ORDER BY label
     ''');
-    return result.map((row) => Map<String, Object?>.from(row.toColumnMap())).toList();
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
   }
 
   Future<Map<String, Object?>> createFeatureFlag({
@@ -9567,7 +9778,9 @@ class PhoenixDatabase {
 
   Future<List<Map<String, Object?>>> listIncidents({String? status}) async {
     final db = await connection();
-    final where = status != null && status.trim().isNotEmpty ? 'WHERE status = @status' : '';
+    final where = status != null && status.trim().isNotEmpty
+        ? 'WHERE status = @status'
+        : '';
     final result = await db.execute(
       Sql.named('SELECT * FROM incidents $where ORDER BY started_at DESC'),
       parameters: {'status': status},
@@ -9667,7 +9880,8 @@ class PhoenixDatabase {
   }
 
   // Section 27 (AN2): "Timeline" - chronologische Einzeleinträge.
-  Future<List<Map<String, Object?>>> listIncidentTimelineEvents(int incidentId) async {
+  Future<List<Map<String, Object?>>> listIncidentTimelineEvents(
+      int incidentId) async {
     final db = await connection();
     final result = await db.execute(
       Sql.named('''
@@ -9681,7 +9895,9 @@ class PhoenixDatabase {
       '''),
       parameters: {'incident_id': incidentId},
     );
-    return result.map((row) => Map<String, Object?>.from(row.toColumnMap())).toList();
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
   }
 
   Future<Map<String, Object?>> addIncidentTimelineEvent({
@@ -9713,12 +9929,14 @@ class PhoenixDatabase {
   Future<void> recordFailedLogin({required String login, String? ip}) async {
     final db = await connection();
     await db.execute(
-      Sql.named('INSERT INTO admin_failed_logins (login, ip) VALUES (@login, @ip)'),
+      Sql.named(
+          'INSERT INTO admin_failed_logins (login, ip) VALUES (@login, @ip)'),
       parameters: {'login': login, 'ip': ip},
     );
   }
 
-  Future<List<Map<String, Object?>>> recentFailedLogins({int limit = 50}) async {
+  Future<List<Map<String, Object?>>> recentFailedLogins(
+      {int limit = 50}) async {
     final db = await connection();
     final result = await db.execute(
       Sql.named('''
@@ -9729,7 +9947,9 @@ class PhoenixDatabase {
       '''),
       parameters: {'limit': limit.clamp(1, 500)},
     );
-    return result.map((row) => Map<String, Object?>.from(row.toColumnMap())).toList();
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
   }
 
   /// Aktive Sessions je Mitarbeiter - dient sowohl der Security-Ansicht
@@ -9747,7 +9967,9 @@ class PhoenixDatabase {
       WHERE s.revoked_at IS NULL AND s.expires_at > NOW()
       ORDER BY s.created_at DESC
     ''');
-    return result.map((row) => Map<String, Object?>.from(row.toColumnMap())).toList();
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
   }
 
   Future<bool> revokeAdminSessionByToken(String token) async {
@@ -9766,7 +9988,8 @@ class PhoenixDatabase {
   /// Section 32 (AN2): "Login-Verlauf" - anders als [listActiveAdminSessions]
   /// auch abgelaufene/beendete Sessions, damit man sieht, wann sich wer
   /// eingeloggt hat, nicht nur wer gerade online ist.
-  Future<List<Map<String, Object?>>> listAdminSessionsHistory({int limit = 100}) async {
+  Future<List<Map<String, Object?>>> listAdminSessionsHistory(
+      {int limit = 100}) async {
     final db = await connection();
     final result = await db.execute(
       Sql.named('''
@@ -9782,12 +10005,15 @@ class PhoenixDatabase {
       '''),
       parameters: {'limit': limit.clamp(1, 500)},
     );
-    return result.map((row) => Map<String, Object?>.from(row.toColumnMap())).toList();
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
   }
 
   /// Section 32 (AN2): "Rate Limits" - echte Zählung bereits gespeicherter
   /// fehlgeschlagener Versuche, kein separater Zähler-Mechanismus nötig.
-  Future<int> countRecentFailedLogins({required String login, required Duration within}) async {
+  Future<int> countRecentFailedLogins(
+      {required String login, required Duration within}) async {
     final db = await connection();
     final cutoff = DateTime.now().toUtc().subtract(within);
     final result = await db.execute(
@@ -9832,7 +10058,8 @@ class PhoenixDatabase {
   Future<void> enableEmployeeTwoFactor(int employeeId) async {
     final db = await connection();
     await db.execute(
-      Sql.named('UPDATE admin_employees SET two_factor_enabled = TRUE WHERE id = @id'),
+      Sql.named(
+          'UPDATE admin_employees SET two_factor_enabled = TRUE WHERE id = @id'),
       parameters: {'id': employeeId},
     );
   }
@@ -9976,7 +10203,8 @@ class PhoenixDatabase {
     );
   }
 
-  Future<List<Map<String, Object?>>> databaseSizeHistory({int limit = 30}) async {
+  Future<List<Map<String, Object?>>> databaseSizeHistory(
+      {int limit = 30}) async {
     final db = await connection();
     final result = await db.execute(
       Sql.named('''
@@ -9987,7 +10215,9 @@ class PhoenixDatabase {
       '''),
       parameters: {'limit': limit.clamp(1, 200)},
     );
-    return result.map((row) => Map<String, Object?>.from(row.toColumnMap())).toList();
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
   }
 
   /// Section OVERVIEW: die drei Kennzahlen, die nicht bereits durch
@@ -10009,8 +10239,7 @@ class PhoenixDatabase {
       WHERE last_active_at IS NOT NULL
         AND last_active_at > NOW() - INTERVAL '24 hours'
     ''');
-    final activeUsers =
-        int.tryParse(usersRows.first[0]?.toString() ?? '') ?? 0;
+    final activeUsers = int.tryParse(usersRows.first[0]?.toString() ?? '') ?? 0;
 
     final liveRows = await db.execute('''
       SELECT COUNT(*) FROM football_matches
@@ -10118,7 +10347,11 @@ class PhoenixDatabase {
         ORDER BY u.created_at DESC
         LIMIT @limit OFFSET @offset
       '''),
-      parameters: {...parameters, 'limit': limit.clamp(1, 200), 'offset': offset.clamp(0, 1 << 30)},
+      parameters: {
+        ...parameters,
+        'limit': limit.clamp(1, 200),
+        'offset': offset.clamp(0, 1 << 30)
+      },
     );
 
     final countRows = await db.execute(
@@ -10131,7 +10364,8 @@ class PhoenixDatabase {
         0;
 
     return {
-      'users': rows.map((r) => Map<String, Object?>.from(r.toColumnMap())).toList(),
+      'users':
+          rows.map((r) => Map<String, Object?>.from(r.toColumnMap())).toList(),
       'total': total,
       'limit': limit,
       'offset': offset,
@@ -10202,7 +10436,8 @@ class PhoenixDatabase {
       parameters: {'id': userId},
     );
 
-    Map<String, Object?> row(dynamic r) => Map<String, Object?>.from(r.toColumnMap());
+    Map<String, Object?> row(dynamic r) =>
+        Map<String, Object?>.from(r.toColumnMap());
 
     return {
       'user': user,
