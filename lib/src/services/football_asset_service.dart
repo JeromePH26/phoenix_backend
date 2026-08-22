@@ -53,7 +53,18 @@ class FootballAssetService {
       final encoded = cached['content_base64']?.toString() ?? '';
       final mimeType = cached['mime_type']?.toString() ?? '';
       if (encoded.isNotEmpty && mimeType.startsWith('image/')) {
-        return _imageResponse(base64Decode(encoded), mimeType);
+        // PostgreSQLs encode(..., 'base64') trennt größere Werte nach 76
+        // Zeichen mit Zeilenumbrüchen. Darters Decoder akzeptiert diese
+        // Trennzeichen nicht zuverlässig; ohne Bereinigung schlug jedes
+        // zwischengespeicherte Wappen fehl und löste einen Fehlersturm aus.
+        final normalizedBase64 = encoded.replaceAll(RegExp(r'\s'), '');
+        try {
+          return _imageResponse(base64Decode(normalizedBase64), mimeType);
+        } on FormatException {
+          // Ein einzelner beschädigter Cache-Eintrag darf weder die Seite
+          // noch andere parallele Bildanfragen aufhalten. Falls eine Quelle
+          // mitgeliefert wurde, wird er unten sauber neu geladen.
+        }
       }
     }
 

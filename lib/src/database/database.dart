@@ -230,6 +230,14 @@ class PhoenixDatabase {
       CREATE INDEX IF NOT EXISTS idx_football_analysis_history_fixture
       ON football_analysis_history (fixture_id)
     ''');
+    // Die Admin-Tippübersicht holt pro Spiel den letzten Snapshot. Dieser
+    // zusammengesetzte Index liefert DISTINCT ON (fixture_id) bereits in der
+    // richtigen Reihenfolge und verhindert bei jeder Seitenansicht einen
+    // vollständigen Sort über die komplette Analysehistorie.
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_football_analysis_history_fixture_latest
+      ON football_analysis_history (fixture_id, created_at DESC)
+    ''');
     await db.execute('''
       CREATE INDEX IF NOT EXISTS idx_football_analysis_history_market
       ON football_analysis_history (market_key)
@@ -4887,7 +4895,8 @@ class PhoenixDatabase {
           m.home_team_id, m.home_team_name, m.home_logo,
           m.away_team_id, m.away_team_name, m.away_logo,
           m.status AS match_status,
-          fl.manual_status AS whitelist_status
+          fl.manual_status AS whitelist_status,
+          COUNT(*) OVER () AS total_count
         FROM latest l
         INNER JOIN football_matches m ON m.id = l.fixture_id
         LEFT JOIN football_leagues fl ON fl.league_id = m.league_id
@@ -4902,28 +4911,17 @@ class PhoenixDatabase {
       },
     );
 
-    final countRows = await db.execute(
-      Sql.named('''
-        WITH latest AS (
-          SELECT DISTINCT ON (fixture_id) *
-          FROM football_analysis_history
-          ORDER BY fixture_id, created_at DESC
-        )
-        SELECT COUNT(*) AS total
-        FROM latest l
-        INNER JOIN football_matches m ON m.id = l.fixture_id
-        LEFT JOIN football_leagues fl ON fl.league_id = m.league_id
-        $whereClause
-      '''),
-      parameters: parameters,
-    );
-    final total = int.tryParse(
-          countRows.first.toColumnMap()['total']?.toString() ?? '',
-        ) ??
-        0;
+    // COUNT(*) OVER() liefert die Gesamtzahl zusammen mit der Datenabfrage.
+    // Zuvor wurde die teure DISTINCT-ON-Abfrage ein zweites Mal nur für den
+    // Pagination-Count ausgeführt; das war die Hauptursache für Ladezeiten
+    // von mehr als einer Minute im Control Center.
+    final total = rows.isEmpty
+        ? 0
+        : int.tryParse(rows.first.toColumnMap()['total_count']?.toString() ?? '') ?? 0;
 
     final tips = rows.map((row) {
       final value = Map<String, Object?>.from(row.toColumnMap());
+      value.remove('total_count');
       for (final key in const [
         'prediction_date',
         'kickoff',
