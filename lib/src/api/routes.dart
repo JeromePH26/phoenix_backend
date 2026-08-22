@@ -1661,6 +1661,114 @@ class ApiRoutes {
       }
     });
 
+    // Zentrale Medienbibliothek. Sie inventarisiert gespeicherte eigene
+    // Bilder, den Provider-Wappen-Cache und externe Content-Referenzen an
+    // einer Stelle. Externe Pressebilder bleiben ausdrücklich Referenzen,
+    // bis eine eigene Nutzungslizenz bzw. ein eigener Upload vorliegt.
+    router.get('/api/admin/media/assets', (Request request) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+      try {
+        final assets = await database.mediaLibrary(
+          category: request.url.queryParameters['category'],
+          limit: int.tryParse(request.url.queryParameters['limit'] ?? '') ??
+              500,
+        );
+        return jsonResponse(_jsonSafe({'count': assets.length, 'assets': assets}));
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
+    router.get('/api/admin/media/assets/<id|[0-9]+>/image', (
+      Request request,
+      String id,
+    ) async {
+      if (!_isAdmin(request)) return Response.forbidden('Nicht autorisiert.');
+      final parsedId = int.tryParse(id);
+      if (parsedId == null) return Response.badRequest(body: 'Ungültige Bild-ID.');
+      try {
+        final image = await database.mediaAssetImage(parsedId);
+        if (image == null) return Response.notFound('Bild nicht gefunden.');
+        final mimeType = image['mime_type']?.toString() ?? 'image/png';
+        final bytes = base64Decode(
+          image['content_base64']?.toString().replaceAll(RegExp(r'\s'), '') ?? '',
+        );
+        return Response.ok(bytes, headers: {
+          'content-type': mimeType,
+          'cache-control': 'private, max-age=3600',
+        });
+      } catch (error) {
+        return Response.internalServerError(body: error.toString());
+      }
+    });
+
+    router.post('/api/admin/media/assets', (Request request) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+      Map<String, dynamic> body;
+      try {
+        final decoded = jsonDecode(await request.readAsString());
+        if (decoded is! Map<String, dynamic>) {
+          return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+        }
+        body = decoded;
+      } catch (_) {
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+      }
+
+      final category = body['category']?.toString().trim().toLowerCase() ?? '';
+      const categories = {'brand', 'editorial', 'advertising', 'ui', 'other'};
+      if (!categories.contains(category)) {
+        return jsonResponse({'error': 'Ungültige Medienkategorie.'}, statusCode: 400);
+      }
+      final sourceKind = body['sourceKind']?.toString().trim().toLowerCase() ?? 'upload';
+      if (!const {'upload', 'generated', 'provider'}.contains(sourceKind)) {
+        return jsonResponse({'error': 'Ungültige Bildherkunft.'}, statusCode: 400);
+      }
+      final mimeType = body['contentType']?.toString().trim().toLowerCase() ?? '';
+      List<int> bytes;
+      try {
+        bytes = base64Decode(body['imageBase64']?.toString() ?? '');
+      } catch (_) {
+        return jsonResponse({'error': 'imageBase64 ist ungültig.'}, statusCode: 400);
+      }
+      if (!mimeType.startsWith('image/') || bytes.isEmpty || bytes.length > FootballAssetService.maximumBytes) {
+        return jsonResponse({'error': 'Nur Bilddateien bis 3 MB sind zulässig.'}, statusCode: 400);
+      }
+
+      try {
+        final id = await database.saveMediaAsset(
+          category: category,
+          title: body['title']?.toString().trim() ?? '',
+          altText: body['altText']?.toString().trim() ?? '',
+          usageType: body['usageType']?.toString().trim() ?? 'library',
+          entityType: body['entityType']?.toString().trim(),
+          entityId: body['entityId']?.toString().trim(),
+          sourceKind: sourceKind,
+          sourceUrl: body['sourceUrl']?.toString().trim() ?? '',
+          mimeType: mimeType,
+          bytes: bytes,
+          metadata: {'fileName': body['fileName']?.toString().trim() ?? ''},
+        );
+        await database.insertAdminAuditLog(
+          employeeId: null,
+          employeeLogin: 'legacy_admin_token',
+          area: 'media',
+          objectType: 'media_asset',
+          objectId: id.toString(),
+          action: 'media.upload',
+          newValue: {'category': category, 'sourceKind': sourceKind, 'byteLength': bytes.length},
+          ip: _clientIp(request),
+        );
+        return jsonResponse({'status': 'created', 'id': id}, statusCode: 201);
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
     router.get('/api/admin/football/assets', (Request request) async {
       if (!_isAdmin(request)) {
         return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);

@@ -145,6 +145,43 @@ class PhoenixDatabase {
         archived_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     ''');
+
+    // Zentrale Medienbibliothek für alle eigenen Bilder außerhalb der
+    // Fußball-Wappen: redaktionelle Titelbilder, Kampagnen, Branding und
+    // UI-Grafiken. Provider-Wappen bleiben im bestehenden football_assets-
+    // Cache, werden in der Bibliothek aber gemeinsam inventarisiert.
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS media_assets (
+        id BIGSERIAL PRIMARY KEY,
+        category TEXT NOT NULL,
+        title TEXT NOT NULL DEFAULT '',
+        alt_text TEXT NOT NULL DEFAULT '',
+        usage_type TEXT NOT NULL DEFAULT 'library',
+        entity_type TEXT,
+        entity_id TEXT,
+        source_kind TEXT NOT NULL DEFAULT 'upload',
+        source_url TEXT NOT NULL DEFAULT '',
+        mime_type TEXT NOT NULL,
+        byte_size INTEGER NOT NULL,
+        content BYTEA NOT NULL,
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+        archived_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CHECK (category IN ('brand', 'editorial', 'advertising', 'ui', 'other')),
+        CHECK (source_kind IN ('upload', 'generated', 'provider')),
+        CHECK (byte_size > 0 AND byte_size <= 3145728)
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_media_assets_library
+      ON media_assets (category, archived_at, updated_at DESC)
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_media_assets_entity
+      ON media_assets (entity_type, entity_id)
+      WHERE entity_type IS NOT NULL AND entity_id IS NOT NULL
+    ''');
     await db.execute('''
       CREATE INDEX IF NOT EXISTS idx_football_assets_history_lookup
       ON football_assets_history (asset_type, asset_id, archived_at DESC)
@@ -2686,6 +2723,161 @@ class PhoenixDatabase {
       'mime_type': mimeType,
       'content_base64': base64Encode(bytes),
     });
+  }
+
+  Future<int> saveMediaAsset({
+    required String category,
+    required String title,
+    required String altText,
+    required String usageType,
+    String? entityType,
+    String? entityId,
+    required String sourceKind,
+    required String sourceUrl,
+    required String mimeType,
+    required List<int> bytes,
+    Map<String, Object?> metadata = const {},
+  }) async {
+    final db = await connection();
+    final rows = await db.execute(Sql.named('''
+      INSERT INTO media_assets (
+        category, title, alt_text, usage_type, entity_type, entity_id,
+        source_kind, source_url, mime_type, byte_size, content, metadata
+      ) VALUES (
+        @category, @title, @alt_text, @usage_type, @entity_type, @entity_id,
+        @source_kind, @source_url, @mime_type, @byte_size,
+        decode(@content_base64, 'base64'), CAST(@metadata AS JSONB)
+      )
+      RETURNING id
+    '''), parameters: {
+      'category': category,
+      'title': title,
+      'alt_text': altText,
+      'usage_type': usageType,
+      'entity_type': entityType,
+      'entity_id': entityId,
+      'source_kind': sourceKind,
+      'source_url': sourceUrl,
+      'mime_type': mimeType,
+      'byte_size': bytes.length,
+      'content_base64': base64Encode(bytes),
+      'metadata': jsonEncode(metadata),
+    });
+    return rows.first[0] as int;
+  }
+
+  Future<Map<String, Object?>?> mediaAssetImage(int id) async {
+    final db = await connection();
+    final rows = await db.execute(Sql.named('''
+      SELECT mime_type, encode(content, 'base64') AS content_base64
+      FROM media_assets
+      WHERE id = @id AND archived_at IS NULL
+    '''), parameters: {'id': id});
+    return rows.isEmpty
+        ? null
+        : Map<String, Object?>.from(rows.first.toColumnMap());
+  }
+
+  /// Ein zentraler, lesender Katalog: gespeicherte eigene Medien, bereits
+  /// gecachte Provider-Wappen und externe Bildreferenzen aus Content/Ads.
+  /// Externe Referenzen werden absichtlich nicht heruntergeladen, da das
+  /// keine Nutzungsrechte an Pressebildern erzeugt.
+  Future<List<Map<String, Object?>>> mediaLibrary({
+    String? category,
+    int limit = 500,
+  }) async {
+    final db = await connection();
+    final categoryFilter = category?.trim().toLowerCase() ?? '';
+    final rows = await db.execute(Sql.named('''
+      WITH catalog AS (
+        SELECT
+          'media:' || id::text AS asset_key,
+          'stored' AS storage_status,
+          category,
+          title,
+          alt_text,
+          usage_type,
+          entity_type,
+          entity_id,
+          source_kind,
+          source_url,
+          mime_type,
+          byte_size,
+          id AS media_id,
+          updated_at
+        FROM media_assets
+        WHERE archived_at IS NULL
+
+        UNION ALL
+
+        SELECT
+          'football:' || asset_type || ':' || asset_id AS asset_key,
+          'stored' AS storage_status,
+          CASE asset_type WHEN 'league' THEN 'league_badge' ELSE 'team_badge' END AS category,
+          asset_type || ' ' || asset_id AS title,
+          '' AS alt_text,
+          'football_identity' AS usage_type,
+          asset_type AS entity_type,
+          asset_id AS entity_id,
+          'provider' AS source_kind,
+          source_url,
+          mime_type,
+          octet_length(content)::INTEGER AS byte_size,
+          NULL::BIGINT AS media_id,
+          updated_at
+        FROM football_assets
+
+        UNION ALL
+
+        SELECT
+          'editorial:' || id::text AS asset_key,
+          'external_reference' AS storage_status,
+          'editorial_reference' AS category,
+          title,
+          '' AS alt_text,
+          'editorial_article' AS usage_type,
+          'editorial_article' AS entity_type,
+          id::text AS entity_id,
+          'external' AS source_kind,
+          image_url AS source_url,
+          NULL::TEXT AS mime_type,
+          NULL::INTEGER AS byte_size,
+          NULL::BIGINT AS media_id,
+          updated_at
+        FROM phoenix_editorial_articles
+        WHERE COALESCE(image_url, '') <> ''
+
+        UNION ALL
+
+        SELECT
+          'advertising:' || id::text AS asset_key,
+          'external_reference' AS storage_status,
+          'advertising_reference' AS category,
+          name AS title,
+          '' AS alt_text,
+          'ad_campaign' AS usage_type,
+          'ad_campaign' AS entity_type,
+          id::text AS entity_id,
+          'external' AS source_kind,
+          image_url AS source_url,
+          NULL::TEXT AS mime_type,
+          NULL::INTEGER AS byte_size,
+          NULL::BIGINT AS media_id,
+          updated_at
+        FROM ad_campaigns
+        WHERE COALESCE(image_url, '') <> ''
+      )
+      SELECT * FROM catalog
+      WHERE @category = '' OR category = @category
+      ORDER BY updated_at DESC
+      LIMIT @limit
+    '''), parameters: {
+      'category': categoryFilter,
+      'limit': limit.clamp(1, 1000),
+    });
+    return rows
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList(growable: false);
   }
 
   Future<void> registerPushDevice({
