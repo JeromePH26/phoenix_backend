@@ -66,7 +66,8 @@ class ModelLabRoutes {
           'activeChallengers': challengers.length,
           'shadowPredictions': shadowCount,
           'learningEligibleMatches': audit.eligible,
-          'lastLearningRun': lastRuns.isEmpty ? null : _jsonSafe(lastRuns.first),
+          'lastLearningRun':
+              lastRuns.isEmpty ? null : _jsonSafe(lastRuns.first),
           'nextLearningRunBerlin': ModelLabSchedule.nextLearningRun(
             berlinNow,
             modelLabConfig,
@@ -96,7 +97,8 @@ class ModelLabRoutes {
       try {
         final overview = await _leagueOverview(onlyLeagueId: leagueId);
         if (overview.isEmpty) {
-          return jsonResponse({'error': 'Liga nicht gefunden.'}, statusCode: 404);
+          return jsonResponse({'error': 'Liga nicht gefunden.'},
+              statusCode: 404);
         }
         return jsonResponse(overview.first);
       } catch (error) {
@@ -120,9 +122,10 @@ class ModelLabRoutes {
           config: modelLabConfig,
         );
         final champion = await registry.currentChampion(
-          leagueId: leagueId,
-          market: market,
-        ) ?? await database.globalBaselineModel(market);
+              leagueId: leagueId,
+              market: market,
+            ) ??
+            await database.globalBaselineModel(market);
         final challengers = await registry.currentChallengers(
           leagueId: leagueId,
           market: market,
@@ -215,10 +218,8 @@ class ModelLabRoutes {
           availability: availability,
           homeTeamId: homeTeamId,
           awayTeamId: awayTeamId,
-          leagueAvgHomeGoalsPerGame:
-              number(context['avgHomeGoalsPerGame']),
-          leagueAvgAwayGoalsPerGame:
-              number(context['avgAwayGoalsPerGame']),
+          leagueAvgHomeGoalsPerGame: number(context['avgHomeGoalsPerGame']),
+          leagueAvgAwayGoalsPerGame: number(context['avgAwayGoalsPerGame']),
         );
 
         return jsonResponse({
@@ -262,7 +263,8 @@ class ModelLabRoutes {
       try {
         final model = await database.modelVersion(modelId);
         if (model == null) {
-          return jsonResponse({'error': 'Model nicht gefunden.'}, statusCode: 404);
+          return jsonResponse({'error': 'Model nicht gefunden.'},
+              statusCode: 404);
         }
         final evaluations = await database.modelEvaluations(
           modelVersionId: modelId,
@@ -276,11 +278,53 @@ class ModelLabRoutes {
       }
     });
 
+    // Reparatur-/Initialisierungsweg für globale Champion-Baselines. Ein
+    // abgebrochener Learning-Run darf nicht verhindern, dass neue, bereits
+    // produktiv berechnete Markt-Familien im Model Lab sichtbar werden. Die
+    // Operation ist idempotent: vorhandene Champions bleiben unverändert;
+    // es werden weder Challenger noch Tipps oder Ergebnisse geschrieben.
+    router.post('/models/ensure-baselines', (Request request) async {
+      if (!_isAdmin(request)) return _unauthorized();
+      if (!await database.moduleEnabled('model_lab_learning')) {
+        return jsonResponse({
+          'error':
+              'Modul "Model Lab Learning" ist deaktiviert (App Control → Module).',
+        }, statusCode: 503);
+      }
+      try {
+        final registry = ModelRegistryService(
+          database: database,
+          config: modelLabConfig,
+        );
+        final results = <Map<String, Object?>>[];
+        var created = 0;
+        for (final market in LearningMarket.values) {
+          final existing = await database.globalBaselineModel(market.key);
+          final id = await registry.ensureGlobalBaseline(market.key);
+          if (existing == null) created++;
+          results.add({
+            'market': market.key,
+            'label': market.label,
+            'modelVersionId': id,
+            'created': existing == null,
+          });
+        }
+        return jsonResponse({
+          'status': 'completed',
+          'created': created,
+          'markets': results,
+        });
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
     router.get('/learning-runs', (Request request) async {
       if (!_isAdmin(request)) return _unauthorized();
       final limit = int.tryParse(
-        request.url.queryParameters['limit'] ?? '',
-      ) ?? 50;
+            request.url.queryParameters['limit'] ?? '',
+          ) ??
+          50;
       try {
         final runs = await database.listLearningRuns(limit: limit);
         return jsonResponse({
@@ -292,7 +336,8 @@ class ModelLabRoutes {
       }
     });
 
-    router.get('/learning-runs/<id|[0-9]+>', (Request request, String id) async {
+    router.get('/learning-runs/<id|[0-9]+>',
+        (Request request, String id) async {
       if (!_isAdmin(request)) return _unauthorized();
       final runId = int.tryParse(id);
       if (runId == null) {
@@ -301,7 +346,8 @@ class ModelLabRoutes {
       try {
         final run = await database.learningRun(runId);
         if (run == null) {
-          return jsonResponse({'error': 'Run nicht gefunden.'}, statusCode: 404);
+          return jsonResponse({'error': 'Run nicht gefunden.'},
+              statusCode: 404);
         }
         return jsonResponse(_jsonSafe(run));
       } catch (error) {
@@ -313,7 +359,8 @@ class ModelLabRoutes {
       if (!_isAdmin(request)) return _unauthorized();
       if (!await database.moduleEnabled('model_lab_learning')) {
         return jsonResponse({
-          'error': 'Modul "Model Lab Learning" ist deaktiviert (App Control → Module).',
+          'error':
+              'Modul "Model Lab Learning" ist deaktiviert (App Control → Module).',
         }, statusCode: 503);
       }
       try {
@@ -332,8 +379,9 @@ class ModelLabRoutes {
     router.get('/monthly-reviews', (Request request) async {
       if (!_isAdmin(request)) return _unauthorized();
       final limit = int.tryParse(
-        request.url.queryParameters['limit'] ?? '',
-      ) ?? 100;
+            request.url.queryParameters['limit'] ?? '',
+          ) ??
+          100;
       try {
         final reviews = await database.listMonthlyReviews(limit: limit);
         return jsonResponse({
@@ -547,8 +595,9 @@ class ModelLabRoutes {
     router.get('/audit-log', (Request request) async {
       if (!_isAdmin(request)) return _unauthorized();
       final limit = int.tryParse(
-        request.url.queryParameters['limit'] ?? '',
-      ) ?? 200;
+            request.url.queryParameters['limit'] ?? '',
+          ) ??
+          200;
       try {
         final log = await database.listModelLabAuditLog(limit: limit);
         return jsonResponse({
@@ -581,7 +630,8 @@ class ModelLabRoutes {
           },
         );
         return jsonResponse({
-          'error': 'Promotion ist deaktiviert (PHOENIX_MODEL_PROMOTION_ENABLED=false).',
+          'error':
+              'Promotion ist deaktiviert (PHOENIX_MODEL_PROMOTION_ENABLED=false).',
           'status': 'rejected',
         }, statusCode: 403);
       }
@@ -589,7 +639,8 @@ class ModelLabRoutes {
       try {
         final challenger = await database.modelVersion(modelId);
         if (challenger == null) {
-          return jsonResponse({'error': 'Model nicht gefunden.'}, statusCode: 404);
+          return jsonResponse({'error': 'Model nicht gefunden.'},
+              statusCode: 404);
         }
         final market = challenger['market']?.toString() ?? '';
         final leagueId = challenger['league_id']?.toString();
@@ -629,7 +680,8 @@ class ModelLabRoutes {
       }
       if (!modelLabConfig.promotionEnabled) {
         return jsonResponse({
-          'error': 'Rollback ist deaktiviert (PHOENIX_MODEL_PROMOTION_ENABLED=false).',
+          'error':
+              'Rollback ist deaktiviert (PHOENIX_MODEL_PROMOTION_ENABLED=false).',
           'status': 'rejected',
         }, statusCode: 403);
       }
@@ -637,7 +689,8 @@ class ModelLabRoutes {
       try {
         final rollbackTarget = await database.modelVersion(modelId);
         if (rollbackTarget == null) {
-          return jsonResponse({'error': 'Model nicht gefunden.'}, statusCode: 404);
+          return jsonResponse({'error': 'Model nicht gefunden.'},
+              statusCode: 404);
         }
         final market = rollbackTarget['market']?.toString() ?? '';
         final leagueId = rollbackTarget['league_id']?.toString();
@@ -647,7 +700,8 @@ class ModelLabRoutes {
         );
         if (currentChampion == null) {
           return jsonResponse({
-            'error': 'Kein aktueller Champion für diese Liga x Markt-Kombination.',
+            'error':
+                'Kein aktueller Champion für diese Liga x Markt-Kombination.',
           }, statusCode: 400);
         }
 
@@ -663,7 +717,8 @@ class ModelLabRoutes {
           market: market,
           details: {'rolledBackFrom': currentChampion['id']},
         );
-        return jsonResponse({'status': 'rolled_back', 'modelVersionId': modelId});
+        return jsonResponse(
+            {'status': 'rolled_back', 'modelVersionId': modelId});
       } catch (error) {
         return jsonResponse({'error': error.toString()}, statusCode: 500);
       }
@@ -679,7 +734,8 @@ class ModelLabRoutes {
       database: database,
       config: modelLabConfig,
     );
-    final registry = ModelRegistryService(database: database, config: modelLabConfig);
+    final registry =
+        ModelRegistryService(database: database, config: modelLabConfig);
     final audit = await datasetBuilder.auditEligibility();
     final leagues = await database.modelLabWhitelistedLeagues();
 
@@ -787,7 +843,8 @@ class ModelLabRoutes {
     }
     if (value is DateTime) return value.toUtc().toIso8601String();
     if (value is Map) {
-      return value.map((key, item) => MapEntry(key.toString(), _jsonSafe(item)));
+      return value
+          .map((key, item) => MapEntry(key.toString(), _jsonSafe(item)));
     }
     if (value is Iterable) return value.map(_jsonSafe).toList();
     return value.toString();
