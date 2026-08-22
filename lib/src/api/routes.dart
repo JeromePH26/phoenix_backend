@@ -1061,16 +1061,9 @@ class ApiRoutes {
           'error': 'value muss auto, whitelist oder blacklist sein.',
         }, statusCode: 400);
       }
-      // Section 8: "Statuswechsel nur mit Begründung, Bestätigung und
-      // Audit-Eintrag" - vorher gab es weder eine Pflicht-Begründung noch
-      // überhaupt einen Audit-Log-Eintrag für diese Aktion, obwohl sie
-      // direkt steuert, was für App-Nutzer sichtbar ist.
+      // Statuswechsel werden weiterhin auditiert. Die Begründung ist eine
+      // freiwillige Notiz und darf die Bedienung nicht blockieren.
       final reason = request.url.queryParameters['reason']?.trim() ?? '';
-      if (reason.isEmpty) {
-        return jsonResponse({
-          'error': 'reason ist erforderlich.',
-        }, statusCode: 400);
-      }
 
       try {
         final previousStatus = await database.setFootballLeagueManualStatus(
@@ -1484,10 +1477,6 @@ class ApiRoutes {
         return jsonResponse({'error': 'status ist erforderlich.'},
             statusCode: 400);
       }
-      if (reason.isEmpty) {
-        return jsonResponse({'error': 'reason ist erforderlich.'},
-            statusCode: 400);
-      }
 
       try {
         final updated = await database.setFootballMatchStatusOverride(
@@ -1672,10 +1661,11 @@ class ApiRoutes {
       try {
         final assets = await database.mediaLibrary(
           category: request.url.queryParameters['category'],
-          limit: int.tryParse(request.url.queryParameters['limit'] ?? '') ??
-              500,
+          limit:
+              int.tryParse(request.url.queryParameters['limit'] ?? '') ?? 500,
         );
-        return jsonResponse(_jsonSafe({'count': assets.length, 'assets': assets}));
+        return jsonResponse(
+            _jsonSafe({'count': assets.length, 'assets': assets}));
       } catch (error) {
         return jsonResponse({'error': error.toString()}, statusCode: 500);
       }
@@ -1687,13 +1677,15 @@ class ApiRoutes {
     ) async {
       if (!_isAdmin(request)) return Response.forbidden('Nicht autorisiert.');
       final parsedId = int.tryParse(id);
-      if (parsedId == null) return Response.badRequest(body: 'Ungültige Bild-ID.');
+      if (parsedId == null)
+        return Response.badRequest(body: 'Ungültige Bild-ID.');
       try {
         final image = await database.mediaAssetImage(parsedId);
         if (image == null) return Response.notFound('Bild nicht gefunden.');
         final mimeType = image['mime_type']?.toString() ?? 'image/png';
         final bytes = base64Decode(
-          image['content_base64']?.toString().replaceAll(RegExp(r'\s'), '') ?? '',
+          image['content_base64']?.toString().replaceAll(RegExp(r'\s'), '') ??
+              '',
         );
         return Response.ok(bytes, headers: {
           'content-type': mimeType,
@@ -1712,31 +1704,42 @@ class ApiRoutes {
       try {
         final decoded = jsonDecode(await request.readAsString());
         if (decoded is! Map<String, dynamic>) {
-          return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+          return jsonResponse({'error': 'Ungültiger JSON-Body.'},
+              statusCode: 400);
         }
         body = decoded;
       } catch (_) {
-        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'},
+            statusCode: 400);
       }
 
       final category = body['category']?.toString().trim().toLowerCase() ?? '';
       const categories = {'brand', 'editorial', 'advertising', 'ui', 'other'};
       if (!categories.contains(category)) {
-        return jsonResponse({'error': 'Ungültige Medienkategorie.'}, statusCode: 400);
+        return jsonResponse({'error': 'Ungültige Medienkategorie.'},
+            statusCode: 400);
       }
-      final sourceKind = body['sourceKind']?.toString().trim().toLowerCase() ?? 'upload';
+      final sourceKind =
+          body['sourceKind']?.toString().trim().toLowerCase() ?? 'upload';
       if (!const {'upload', 'generated', 'provider'}.contains(sourceKind)) {
-        return jsonResponse({'error': 'Ungültige Bildherkunft.'}, statusCode: 400);
+        return jsonResponse({'error': 'Ungültige Bildherkunft.'},
+            statusCode: 400);
       }
-      final mimeType = body['contentType']?.toString().trim().toLowerCase() ?? '';
+      final mimeType =
+          body['contentType']?.toString().trim().toLowerCase() ?? '';
       List<int> bytes;
       try {
         bytes = base64Decode(body['imageBase64']?.toString() ?? '');
       } catch (_) {
-        return jsonResponse({'error': 'imageBase64 ist ungültig.'}, statusCode: 400);
+        return jsonResponse({'error': 'imageBase64 ist ungültig.'},
+            statusCode: 400);
       }
-      if (!mimeType.startsWith('image/') || bytes.isEmpty || bytes.length > FootballAssetService.maximumBytes) {
-        return jsonResponse({'error': 'Nur Bilddateien bis 3 MB sind zulässig.'}, statusCode: 400);
+      if (!mimeType.startsWith('image/') ||
+          bytes.isEmpty ||
+          bytes.length > FootballAssetService.maximumBytes) {
+        return jsonResponse(
+            {'error': 'Nur Bilddateien bis 3 MB sind zulässig.'},
+            statusCode: 400);
       }
 
       try {
@@ -1760,7 +1763,11 @@ class ApiRoutes {
           objectType: 'media_asset',
           objectId: id.toString(),
           action: 'media.upload',
-          newValue: {'category': category, 'sourceKind': sourceKind, 'byteLength': bytes.length},
+          newValue: {
+            'category': category,
+            'sourceKind': sourceKind,
+            'byteLength': bytes.length
+          },
           ip: _clientIp(request),
         );
         return jsonResponse({'status': 'created', 'id': id}, statusCode: 201);
@@ -2101,10 +2108,6 @@ class ApiRoutes {
         }, statusCode: 400);
       }
       final reason = request.url.queryParameters['reason']?.trim() ?? '';
-      if (reason.isEmpty) {
-        return jsonResponse({'error': 'reason ist erforderlich.'},
-            statusCode: 400);
-      }
       try {
         final selected = tier.first;
         final previous = await database.setFootballLeagueTier(
@@ -2112,7 +2115,8 @@ class ApiRoutes {
           tier: selected,
         );
         if (previous == null) {
-          return jsonResponse({'error': 'Liga nicht gefunden.'}, statusCode: 404);
+          return jsonResponse({'error': 'Liga nicht gefunden.'},
+              statusCode: 404);
         }
         await database.insertAdminAuditLog(
           employeeId: null,

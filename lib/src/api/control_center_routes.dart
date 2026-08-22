@@ -132,7 +132,8 @@ class ControlCenterRoutes {
     try {
       final body = jsonDecode(await request.readAsString());
       if (body is! Map<String, dynamic>) {
-        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'},
+            statusCode: 400);
       }
       final login = body['login']?.toString().trim() ?? '';
       final password = body['password']?.toString() ?? '';
@@ -148,7 +149,8 @@ class ControlCenterRoutes {
       );
       if (recentFailures >= kLoginRateLimitMaxAttempts) {
         return jsonResponse({
-          'error': 'Zu viele fehlgeschlagene Login-Versuche. Bitte in ein paar Minuten erneut versuchen.',
+          'error':
+              'Zu viele fehlgeschlagene Login-Versuche. Bitte in ein paar Minuten erneut versuchen.',
         }, statusCode: 429);
       }
 
@@ -170,7 +172,8 @@ class ControlCenterRoutes {
       // Section 32 (AN2): 2FA - Passwort korrekt, aber noch kein Session-
       // Token. Der Client muss zuerst /auth/2fa/verify-login mit dem
       // pendingToken + TOTP-Code aufrufen.
-      final twoFactorStatus = await database.employeeTwoFactorStatus(employee.id);
+      final twoFactorStatus =
+          await database.employeeTwoFactorStatus(employee.id);
       if (twoFactorStatus?['two_factor_enabled'] == true) {
         final pendingToken = generateSessionToken();
         await database.createPendingTwoFactorLogin(
@@ -221,25 +224,33 @@ class ControlCenterRoutes {
     try {
       final body = jsonDecode(await request.readAsString());
       if (body is! Map<String, dynamic>) {
-        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'},
+            statusCode: 400);
       }
       final pendingToken = body['pendingToken']?.toString() ?? '';
       final code = body['code']?.toString() ?? '';
       if (pendingToken.isEmpty || code.isEmpty) {
-        return jsonResponse({'error': 'pendingToken und code sind erforderlich.'}, statusCode: 400);
+        return jsonResponse(
+            {'error': 'pendingToken und code sind erforderlich.'},
+            statusCode: 400);
       }
 
-      final employeeId = await database.consumePendingTwoFactorLogin(pendingToken);
+      final employeeId =
+          await database.consumePendingTwoFactorLogin(pendingToken);
       if (employeeId == null) {
         return jsonResponse({
-          'error': 'Ungültiger oder abgelaufener Vorgang. Bitte erneut einloggen.',
+          'error':
+              'Ungültiger oder abgelaufener Vorgang. Bitte erneut einloggen.',
         }, statusCode: 401);
       }
 
       final status = await database.employeeTwoFactorStatus(employeeId);
       final secret = status?['two_factor_secret']?.toString();
-      if (status?['two_factor_enabled'] != true || secret == null || secret.isEmpty) {
-        return jsonResponse({'error': '2FA ist für dieses Konto nicht aktiv.'}, statusCode: 400);
+      if (status?['two_factor_enabled'] != true ||
+          secret == null ||
+          secret.isEmpty) {
+        return jsonResponse({'error': '2FA ist für dieses Konto nicht aktiv.'},
+            statusCode: 400);
       }
       if (!verifyTotpCode(secret, code)) {
         return jsonResponse({'error': 'Falscher Code.'}, statusCode: 401);
@@ -247,11 +258,13 @@ class ControlCenterRoutes {
 
       final row = await database.adminEmployeeById(employeeId);
       if (row == null) {
-        return jsonResponse({'error': 'Mitarbeiter nicht gefunden.'}, statusCode: 404);
+        return jsonResponse({'error': 'Mitarbeiter nicht gefunden.'},
+            statusCode: 404);
       }
       final employee = Employee.fromRow(row);
       if (!employee.isActive) {
-        return jsonResponse({'error': 'Konto ist deaktiviert.'}, statusCode: 403);
+        return jsonResponse({'error': 'Konto ist deaktiviert.'},
+            statusCode: 403);
       }
 
       final token = generateSessionToken();
@@ -321,14 +334,16 @@ class ControlCenterRoutes {
     try {
       final body = jsonDecode(await request.readAsString());
       if (body is! Map<String, dynamic>) {
-        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'},
+            statusCode: 400);
       }
       final code = body['code']?.toString() ?? '';
       final status = await database.employeeTwoFactorStatus(actor.id);
       final secret = status?['two_factor_secret']?.toString();
       if (secret == null || secret.isEmpty) {
         return jsonResponse({
-          'error': 'Zuerst /auth/2fa/setup aufrufen, um ein Secret zu erzeugen.',
+          'error':
+              'Zuerst /auth/2fa/setup aufrufen, um ein Secret zu erzeugen.',
         }, statusCode: 400);
       }
       if (!verifyTotpCode(secret, code)) {
@@ -358,13 +373,17 @@ class ControlCenterRoutes {
     try {
       final body = jsonDecode(await request.readAsString());
       if (body is! Map<String, dynamic>) {
-        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'},
+            statusCode: 400);
       }
       final code = body['code']?.toString() ?? '';
       final status = await database.employeeTwoFactorStatus(actor.id);
       final secret = status?['two_factor_secret']?.toString();
-      if (status?['two_factor_enabled'] != true || secret == null || secret.isEmpty) {
-        return jsonResponse({'error': '2FA ist für dieses Konto nicht aktiv.'}, statusCode: 400);
+      if (status?['two_factor_enabled'] != true ||
+          secret == null ||
+          secret.isEmpty) {
+        return jsonResponse({'error': '2FA ist für dieses Konto nicht aktiv.'},
+            statusCode: 400);
       }
       if (!verifyTotpCode(secret, code)) {
         return jsonResponse({'error': 'Falscher Code.'}, statusCode: 400);
@@ -430,7 +449,8 @@ class ControlCenterRoutes {
     try {
       final body = jsonDecode(await request.readAsString());
       if (body is! Map<String, dynamic>) {
-        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'},
+            statusCode: 400);
       }
 
       final name = body['name']?.toString().trim() ?? '';
@@ -456,7 +476,8 @@ class ControlCenterRoutes {
         }, statusCode: 403);
       }
 
-      final overridesError = _extractPermissionOverrides(body['permissionOverrides']);
+      final overridesError =
+          _extractPermissionOverrides(body['permissionOverrides']);
       if (overridesError.error != null) {
         return jsonResponse({'error': overridesError.error}, statusCode: 400);
       }
@@ -484,12 +505,14 @@ class ControlCenterRoutes {
         ip: _clientIp(request),
       );
 
-      return jsonResponse({'employee': createdEmployee.toPublicJson()}, statusCode: 201);
+      return jsonResponse({'employee': createdEmployee.toPublicJson()},
+          statusCode: 201);
     } catch (error) {
       final message = error.toString();
       if (message.toLowerCase().contains('duplicate key') ||
           message.toLowerCase().contains('unique')) {
-        return jsonResponse({'error': 'Login oder E-Mail bereits vergeben.'}, statusCode: 409);
+        return jsonResponse({'error': 'Login oder E-Mail bereits vergeben.'},
+            statusCode: 409);
       }
       return jsonResponse({'error': message}, statusCode: 500);
     }
@@ -509,11 +532,13 @@ class ControlCenterRoutes {
     try {
       final existingRow = await database.adminEmployeeById(employeeId);
       if (existingRow == null) {
-        return jsonResponse({'error': 'Mitarbeiter nicht gefunden.'}, statusCode: 404);
+        return jsonResponse({'error': 'Mitarbeiter nicht gefunden.'},
+            statusCode: 404);
       }
       final existing = Employee.fromRow(existingRow);
 
-      if (!canModifyEmployeeRow(actorRole: actor.role, targetCurrentRole: existing.role)) {
+      if (!canModifyEmployeeRow(
+          actorRole: actor.role, targetCurrentRole: existing.role)) {
         return jsonResponse({
           'error': 'Nur OWNER darf einen OWNER-Mitarbeiter bearbeiten.',
         }, statusCode: 403);
@@ -521,7 +546,8 @@ class ControlCenterRoutes {
 
       final body = jsonDecode(await request.readAsString());
       if (body is! Map<String, dynamic>) {
-        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'},
+            statusCode: 400);
       }
 
       String? role;
@@ -545,16 +571,16 @@ class ControlCenterRoutes {
             activeOwnerCount: activeOwners,
           )) {
             return jsonResponse({
-              'error': 'Der letzte aktive OWNER kann nicht seine OWNER-Rolle verlieren.',
+              'error':
+                  'Der letzte aktive OWNER kann nicht seine OWNER-Rolle verlieren.',
             }, statusCode: 400);
           }
         }
       }
 
       final departmentProvided = body.containsKey('department');
-      final department = departmentProvided
-          ? body['department']?.toString().trim()
-          : null;
+      final department =
+          departmentProvided ? body['department']?.toString().trim() : null;
 
       final overridesRaw = body.containsKey('permissionOverrides')
           ? body['permissionOverrides']
@@ -563,7 +589,8 @@ class ControlCenterRoutes {
       if (body.containsKey('permissionOverrides')) {
         final overridesResult = _extractPermissionOverrides(overridesRaw);
         if (overridesResult.error != null) {
-          return jsonResponse({'error': overridesResult.error}, statusCode: 400);
+          return jsonResponse({'error': overridesResult.error},
+              statusCode: 400);
         }
         permissionOverrides = overridesResult.overrides;
       }
@@ -604,14 +631,17 @@ class ControlCenterRoutes {
       }
 
       if (status == 'disabled') {
-        updatedRow = await database.disableAdminEmployeeAndRevokeSessions(employeeId);
+        updatedRow =
+            await database.disableAdminEmployeeAndRevokeSessions(employeeId);
       } else if (status == 'active') {
-        updatedRow = await database.updateAdminEmployee(id: employeeId, status: 'active');
+        updatedRow = await database.updateAdminEmployee(
+            id: employeeId, status: 'active');
       }
 
       updatedRow ??= await database.adminEmployeeById(employeeId);
       if (updatedRow == null) {
-        return jsonResponse({'error': 'Mitarbeiter nicht gefunden.'}, statusCode: 404);
+        return jsonResponse({'error': 'Mitarbeiter nicht gefunden.'},
+            statusCode: 404);
       }
       final updated = Employee.fromRow(updatedRow);
 
@@ -651,11 +681,13 @@ class ControlCenterRoutes {
     try {
       final existingRow = await database.adminEmployeeById(employeeId);
       if (existingRow == null) {
-        return jsonResponse({'error': 'Mitarbeiter nicht gefunden.'}, statusCode: 404);
+        return jsonResponse({'error': 'Mitarbeiter nicht gefunden.'},
+            statusCode: 404);
       }
       final existing = Employee.fromRow(existingRow);
 
-      if (!canModifyEmployeeRow(actorRole: actor.role, targetCurrentRole: existing.role)) {
+      if (!canModifyEmployeeRow(
+          actorRole: actor.role, targetCurrentRole: existing.role)) {
         return jsonResponse({
           'error': 'Nur OWNER darf einen OWNER-Mitarbeiter deaktivieren.',
         }, statusCode: 403);
@@ -672,9 +704,11 @@ class ControlCenterRoutes {
         }, statusCode: 400);
       }
 
-      final updatedRow = await database.disableAdminEmployeeAndRevokeSessions(employeeId);
+      final updatedRow =
+          await database.disableAdminEmployeeAndRevokeSessions(employeeId);
       if (updatedRow == null) {
-        return jsonResponse({'error': 'Mitarbeiter nicht gefunden.'}, statusCode: 404);
+        return jsonResponse({'error': 'Mitarbeiter nicht gefunden.'},
+            statusCode: 404);
       }
       final updated = Employee.fromRow(updatedRow);
 
@@ -732,7 +766,8 @@ class ControlCenterRoutes {
     try {
       final detail = await database.userAdminDetail(userId);
       if (detail == null) {
-        return jsonResponse({'error': 'Nutzer nicht gefunden.'}, statusCode: 404);
+        return jsonResponse({'error': 'Nutzer nicht gefunden.'},
+            statusCode: 404);
       }
       return jsonResponse(_jsonSafe(detail));
     } catch (error) {
@@ -755,7 +790,8 @@ class ControlCenterRoutes {
     try {
       final decoded = jsonDecode(await request.readAsString());
       if (decoded is! Map<String, dynamic>) {
-        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'},
+            statusCode: 400);
       }
       body = decoded;
     } catch (_) {
@@ -763,7 +799,12 @@ class ControlCenterRoutes {
     }
 
     const allowedSources = {
-      'MANUAL', 'PROMOTION', 'STAFF', 'PARTNER', 'GOOGLE_PLAY', 'WEBSITE',
+      'MANUAL',
+      'PROMOTION',
+      'STAFF',
+      'PARTNER',
+      'GOOGLE_PLAY',
+      'WEBSITE',
     };
     final source = body['source']?.toString().trim().toUpperCase() ?? '';
     if (!allowedSources.contains(source)) {
@@ -772,16 +813,14 @@ class ControlCenterRoutes {
       }, statusCode: 400);
     }
     final reason = body['reason']?.toString().trim();
-    if (reason == null || reason.isEmpty) {
-      return jsonResponse({'error': 'reason ist erforderlich.'}, statusCode: 400);
-    }
     final tier = body['tier']?.toString();
     final expiresAtRaw = body['expiresAt']?.toString();
     final expiresAt = expiresAtRaw == null || expiresAtRaw.isEmpty
         ? null
         : DateTime.tryParse(expiresAtRaw);
     if (expiresAtRaw != null && expiresAtRaw.isNotEmpty && expiresAt == null) {
-      return jsonResponse({'error': 'expiresAt ist kein gültiges Datum.'}, statusCode: 400);
+      return jsonResponse({'error': 'expiresAt ist kein gültiges Datum.'},
+          statusCode: 400);
     }
 
     try {
@@ -806,7 +845,8 @@ class ControlCenterRoutes {
         ip: _clientIp(request),
       );
 
-      return jsonResponse(_jsonSafe({'entitlement': entitlement}), statusCode: 201);
+      return jsonResponse(_jsonSafe({'entitlement': entitlement}),
+          statusCode: 201);
     } catch (error) {
       return jsonResponse({'error': error.toString()}, statusCode: 500);
     }
@@ -824,7 +864,8 @@ class ControlCenterRoutes {
 
     final parsedEntitlementId = int.tryParse(entitlementId);
     if (parsedEntitlementId == null) {
-      return jsonResponse({'error': 'Ungültige Entitlement-ID.'}, statusCode: 400);
+      return jsonResponse({'error': 'Ungültige Entitlement-ID.'},
+          statusCode: 400);
     }
 
     String? reason;
@@ -842,7 +883,8 @@ class ControlCenterRoutes {
         entitlementId: parsedEntitlementId,
       );
       if (updated == null) {
-        return jsonResponse({'error': 'Entitlement nicht gefunden.'}, statusCode: 404);
+        return jsonResponse({'error': 'Entitlement nicht gefunden.'},
+            statusCode: 404);
       }
 
       await database.insertAdminAuditLog(
@@ -878,7 +920,8 @@ class ControlCenterRoutes {
     try {
       final decoded = jsonDecode(await request.readAsString());
       if (decoded is! Map<String, dynamic>) {
-        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'},
+            statusCode: 400);
       }
       body = decoded;
     } catch (_) {
@@ -887,19 +930,24 @@ class ControlCenterRoutes {
 
     final reason = body['reason']?.toString().trim();
     final internalReport = body['internalReport']?.toString().trim();
-    if (reason == null || reason.isEmpty) {
-      return jsonResponse({'error': 'reason ist erforderlich.'}, statusCode: 400);
-    }
     if (internalReport == null || internalReport.isEmpty) {
-      return jsonResponse({'error': 'internalReport ist erforderlich.'}, statusCode: 400);
+      return jsonResponse({'error': 'internalReport ist erforderlich.'},
+          statusCode: 400);
     }
     const allowedDurations = {
-      '1_HOUR', '24_HOURS', '7_DAYS', '30_DAYS', 'CUSTOM', 'PERMANENT',
+      '1_HOUR',
+      '24_HOURS',
+      '7_DAYS',
+      '30_DAYS',
+      'CUSTOM',
+      'PERMANENT',
     };
-    final durationType = body['durationType']?.toString().trim().toUpperCase() ?? '';
+    final durationType =
+        body['durationType']?.toString().trim().toUpperCase() ?? '';
     if (!allowedDurations.contains(durationType)) {
       return jsonResponse({
-        'error': 'durationType muss eine von ${allowedDurations.join(", ")} sein.',
+        'error':
+            'durationType muss eine von ${allowedDurations.join(", ")} sein.',
       }, statusCode: 400);
     }
     final expiresAtRaw = body['expiresAt']?.toString();
@@ -911,7 +959,8 @@ class ControlCenterRoutes {
         'error': 'expiresAt ist bei durationType=CUSTOM erforderlich.',
       }, statusCode: 400);
     }
-    final supportTicketId = int.tryParse(body['supportTicketId']?.toString() ?? '');
+    final supportTicketId =
+        int.tryParse(body['supportTicketId']?.toString() ?? '');
 
     try {
       final ban = await database.banUser(
@@ -931,7 +980,10 @@ class ControlCenterRoutes {
         objectType: 'user',
         objectId: id,
         action: 'user.ban',
-        newValue: {'durationType': durationType, 'caseNumber': ban['case_number']},
+        newValue: {
+          'durationType': durationType,
+          'caseNumber': ban['case_number']
+        },
         reason: reason,
         comment: internalReport,
         ip: _clientIp(request),
@@ -959,7 +1011,8 @@ class ControlCenterRoutes {
     }
   }
 
-  Future<Response> _liftUserBan(Request request, String id, String banId) async {
+  Future<Response> _liftUserBan(
+      Request request, String id, String banId) async {
     final auth = await guard.authenticate(request);
     if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
     final actor = auth.employee!;
@@ -1054,11 +1107,15 @@ class ControlCenterRoutes {
     final params = request.url.queryParameters;
     final area = params['area'];
     final employeeIdParam = params['employeeId'];
-    final employeeId = employeeIdParam == null ? null : int.tryParse(employeeIdParam);
+    final employeeId =
+        employeeIdParam == null ? null : int.tryParse(employeeIdParam);
     final action = params['action'];
     final objectId = params['objectId'];
-    final dateFrom = params['dateFrom'] == null ? null : DateTime.tryParse(params['dateFrom']!);
-    final dateTo = params['dateTo'] == null ? null : DateTime.tryParse(params['dateTo']!);
+    final dateFrom = params['dateFrom'] == null
+        ? null
+        : DateTime.tryParse(params['dateFrom']!);
+    final dateTo =
+        params['dateTo'] == null ? null : DateTime.tryParse(params['dateTo']!);
     final limit = int.tryParse(params['limit'] ?? '') ?? 100;
     final offset = int.tryParse(params['offset'] ?? '') ?? 0;
 
@@ -1110,14 +1167,17 @@ class ControlCenterRoutes {
       final lastRuns = await database.listLearningRuns(limit: 1);
 
       final jobStatus = await database.jobStatusBreakdown();
-      final missingLeagueLogos = await database.countWhitelistedLeaguesMissingLogo();
+      final missingLeagueLogos =
+          await database.countWhitelistedLeaguesMissingLogo();
       final footballToday = await database.footballDailyOverviewStats(
         day: _berlinNow(),
       );
       final todayStats = await database.controlCenterTodayStats();
 
       return jsonResponse({
-        'apiUsage': apiUsage.map((row) => _jsonSafe(_apiUsageRowWithLimit(row))).toList(),
+        'apiUsage': apiUsage
+            .map((row) => _jsonSafe(_apiUsageRowWithLimit(row)))
+            .toList(),
         'footballToday': footballToday,
         'today': todayStats,
         'whitelist': {
@@ -1131,7 +1191,8 @@ class ControlCenterRoutes {
           'activeChallengers': challengers.length,
           'shadowPredictions': shadowCount,
           'learningEligibleMatches': audit.eligible,
-          'lastLearningRun': lastRuns.isEmpty ? null : _jsonSafe(lastRuns.first),
+          'lastLearningRun':
+              lastRuns.isEmpty ? null : _jsonSafe(lastRuns.first),
         },
         'pendingJobs': _jsonSafe(jobStatus),
         'warnings': {
@@ -1158,8 +1219,11 @@ class ControlCenterRoutes {
       final today = await database.apiSportsDailyUsageToday();
       final history = await database.apiSportsDailyUsageHistory(days: 14);
       return jsonResponse({
-        'today': today.map((row) => _jsonSafe(_apiUsageRowWithLimit(row))).toList(),
-        'history': history.map((row) => _jsonSafe(_apiUsageRowWithLimit(row))).toList(),
+        'today':
+            today.map((row) => _jsonSafe(_apiUsageRowWithLimit(row))).toList(),
+        'history': history
+            .map((row) => _jsonSafe(_apiUsageRowWithLimit(row)))
+            .toList(),
       });
     } catch (error) {
       return jsonResponse({'error': error.toString()}, statusCode: 500);
@@ -1174,8 +1238,10 @@ class ControlCenterRoutes {
     if (!auth.employee!.hasPermission('jobs.view')) return _forbidden();
 
     try {
-      final dailyPipeline = await database.recentFootballDailyPipelineJobs(limit: 10);
-      final settlement = await database.recentFootballMatchSettlementJobs(limit: 10);
+      final dailyPipeline =
+          await database.recentFootballDailyPipelineJobs(limit: 10);
+      final settlement =
+          await database.recentFootballMatchSettlementJobs(limit: 10);
       final learningRuns = await database.listLearningRuns(limit: 10);
       return jsonResponse({
         'dailyPipeline': dailyPipeline.map(_jsonSafe).toList(),
@@ -1215,7 +1281,8 @@ class ControlCenterRoutes {
     try {
       final body = jsonDecode(await request.readAsString());
       if (body is! Map<String, dynamic>) {
-        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'},
+            statusCode: 400);
       }
 
       final status = body['status']?.toString().trim().toUpperCase() ?? '';
@@ -1230,14 +1297,15 @@ class ControlCenterRoutes {
           'error': 'status muss ACTIVE, MAINTENANCE oder DISABLED sein.',
         }, statusCode: 400);
       }
-      if (reason.isEmpty) {
-        return jsonResponse({'error': 'reason ist erforderlich.'}, statusCode: 400);
-      }
       DateTime? maintenanceUntil;
-      if (hasMaintenanceUntilKey && maintenanceUntilRaw != null && maintenanceUntilRaw.isNotEmpty) {
+      if (hasMaintenanceUntilKey &&
+          maintenanceUntilRaw != null &&
+          maintenanceUntilRaw.isNotEmpty) {
         maintenanceUntil = DateTime.tryParse(maintenanceUntilRaw);
         if (maintenanceUntil == null) {
-          return jsonResponse({'error': 'maintenanceUntil ist kein gültiges Datum.'}, statusCode: 400);
+          return jsonResponse(
+              {'error': 'maintenanceUntil ist kein gültiges Datum.'},
+              statusCode: 400);
         }
       }
 
@@ -1295,7 +1363,8 @@ class ControlCenterRoutes {
       final body = jsonDecode(await request.readAsString());
       final enabled = body is Map ? body['enabled'] as bool? : null;
       if (enabled == null) {
-        return jsonResponse({'error': 'enabled (bool) ist erforderlich.'}, statusCode: 400);
+        return jsonResponse({'error': 'enabled (bool) ist erforderlich.'},
+            statusCode: 400);
       }
       final updated = await database.updateModuleControl(
         moduleKey: moduleKey,
@@ -1303,7 +1372,8 @@ class ControlCenterRoutes {
         updatedBy: actor.login,
       );
       if (updated == null) {
-        return jsonResponse({'error': 'Modul nicht gefunden.'}, statusCode: 404);
+        return jsonResponse({'error': 'Modul nicht gefunden.'},
+            statusCode: 404);
       }
       await database.insertAdminAuditLog(
         employeeId: actor.id,
@@ -1344,9 +1414,11 @@ class ControlCenterRoutes {
     try {
       final device = await database.pushDeviceDetail(installationId);
       if (device == null) {
-        return jsonResponse({'error': 'Gerät nicht gefunden.'}, statusCode: 404);
+        return jsonResponse({'error': 'Gerät nicht gefunden.'},
+            statusCode: 404);
       }
-      final tickets = await database.supportTicketsForInstallation(installationId);
+      final tickets =
+          await database.supportTicketsForInstallation(installationId);
       return jsonResponse({
         'device': _jsonSafe(device),
         'tickets': tickets.map(_jsonSafe).toList(),
@@ -1398,7 +1470,8 @@ class ControlCenterRoutes {
     try {
       final ticket = await database.supportTicket(ticketId);
       if (ticket == null) {
-        return jsonResponse({'error': 'Ticket nicht gefunden.'}, statusCode: 404);
+        return jsonResponse({'error': 'Ticket nicht gefunden.'},
+            statusCode: 404);
       }
       final messages = await database.supportTicketMessages(ticketId);
       return jsonResponse({
@@ -1417,19 +1490,27 @@ class ControlCenterRoutes {
     if (!actor.hasPermission('support.manage')) return _forbidden();
 
     final ticketId = int.parse(id);
-    const validStatuses = {'NEU', 'IN_BEARBEITUNG', 'WARTET_AUF_NUTZER', 'GELOEST', 'GESCHLOSSEN'};
+    const validStatuses = {
+      'NEU',
+      'IN_BEARBEITUNG',
+      'WARTET_AUF_NUTZER',
+      'GELOEST',
+      'GESCHLOSSEN'
+    };
     const validPriorities = {'niedrig', 'normal', 'hoch', 'dringend'};
     const validCategories = {'frage', 'bug', 'premium', 'match', 'sonstiges'};
 
     try {
       final before = await database.supportTicket(ticketId);
       if (before == null) {
-        return jsonResponse({'error': 'Ticket nicht gefunden.'}, statusCode: 404);
+        return jsonResponse({'error': 'Ticket nicht gefunden.'},
+            statusCode: 404);
       }
 
       final body = jsonDecode(await request.readAsString());
       if (body is! Map<String, dynamic>) {
-        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'},
+            statusCode: 400);
       }
       final status = body['status']?.toString();
       final priority = body['priority']?.toString();
@@ -1455,7 +1536,8 @@ class ControlCenterRoutes {
         priority: priority,
         category: category,
         assignedEmployeeId: assignedEmployeeId,
-        clearAssignedEmployee: hasAssignedKey && body['assignedEmployeeId'] == null,
+        clearAssignedEmployee:
+            hasAssignedKey && body['assignedEmployeeId'] == null,
       );
 
       final diff = diffEmployeeFields(before: before, after: updated!);
@@ -1489,17 +1571,20 @@ class ControlCenterRoutes {
     try {
       final ticket = await database.supportTicket(ticketId);
       if (ticket == null) {
-        return jsonResponse({'error': 'Ticket nicht gefunden.'}, statusCode: 404);
+        return jsonResponse({'error': 'Ticket nicht gefunden.'},
+            statusCode: 404);
       }
 
       final body = jsonDecode(await request.readAsString());
       if (body is! Map<String, dynamic>) {
-        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'},
+            statusCode: 400);
       }
       final message = body['message']?.toString().trim() ?? '';
       final internalNote = body['internalNote'] == true;
       if (message.isEmpty) {
-        return jsonResponse({'error': 'message ist erforderlich.'}, statusCode: 400);
+        return jsonResponse({'error': 'message ist erforderlich.'},
+            statusCode: 400);
       }
 
       final saved = await database.addSupportTicketMessage(
@@ -1512,7 +1597,8 @@ class ControlCenterRoutes {
       // Eine sichtbare Mitarbeiterantwort setzt das Ticket auf "wartet auf
       // Nutzer" (Section 22/23), eine interne Notiz ändert den Status nicht.
       if (!internalNote) {
-        await database.updateSupportTicket(id: ticketId, status: 'WARTET_AUF_NUTZER');
+        await database.updateSupportTicket(
+            id: ticketId, status: 'WARTET_AUF_NUTZER');
       }
 
       await database.insertAdminAuditLog(
@@ -1559,11 +1645,13 @@ class ControlCenterRoutes {
     try {
       final body = jsonDecode(await request.readAsString());
       if (body is! Map<String, dynamic>) {
-        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'},
+            statusCode: 400);
       }
       final title = body['title']?.toString().trim() ?? '';
       if (title.isEmpty) {
-        return jsonResponse({'error': 'title ist erforderlich.'}, statusCode: 400);
+        return jsonResponse({'error': 'title ist erforderlich.'},
+            statusCode: 400);
       }
       final scheduledAt = body['scheduledAt'] == null
           ? null
@@ -1609,7 +1697,8 @@ class ControlCenterRoutes {
     try {
       final article = await database.editorialArticle(int.parse(id));
       if (article == null) {
-        return jsonResponse({'error': 'Artikel nicht gefunden.'}, statusCode: 404);
+        return jsonResponse({'error': 'Artikel nicht gefunden.'},
+            statusCode: 404);
       }
       return jsonResponse({'article': _jsonSafe(article)});
     } catch (error) {
@@ -1623,18 +1712,26 @@ class ControlCenterRoutes {
     final actor = auth.employee!;
     if (!actor.hasPermission('news.manage')) return _forbidden();
 
-    const validStatuses = {'DRAFT', 'SCHEDULED', 'PUBLISHED', 'HIDDEN', 'ARCHIVED'};
+    const validStatuses = {
+      'DRAFT',
+      'SCHEDULED',
+      'PUBLISHED',
+      'HIDDEN',
+      'ARCHIVED'
+    };
     final articleId = int.parse(id);
 
     try {
       final before = await database.editorialArticle(articleId);
       if (before == null) {
-        return jsonResponse({'error': 'Artikel nicht gefunden.'}, statusCode: 404);
+        return jsonResponse({'error': 'Artikel nicht gefunden.'},
+            statusCode: 404);
       }
 
       final body = jsonDecode(await request.readAsString());
       if (body is! Map<String, dynamic>) {
-        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'},
+            statusCode: 400);
       }
       final status = body['status']?.toString();
       if (status != null && !validStatuses.contains(status)) {
@@ -1645,7 +1742,8 @@ class ControlCenterRoutes {
       final hasScheduledKey = body.containsKey('scheduledAt');
       final sendPush = body['sendPush'] as bool?;
 
-      final willPublishNow = status == 'PUBLISHED' && before['published_at'] == null;
+      final willPublishNow =
+          status == 'PUBLISHED' && before['published_at'] == null;
       final shouldSendPush = willPublishNow &&
           (sendPush ?? before['send_push'] == true) &&
           before['push_sent_at'] == null;
@@ -1656,19 +1754,24 @@ class ControlCenterRoutes {
         summary: body['summary']?.toString(),
         body: body['body']?.toString(),
         category: body['category']?.toString(),
-        imageUrl: hasImageKey ? body['imageUrl']?.toString() : PhoenixDatabase.unsetSentinel,
+        imageUrl: hasImageKey
+            ? body['imageUrl']?.toString()
+            : PhoenixDatabase.unsetSentinel,
         status: status,
         homepageFeature: body['homepageFeature'] as bool?,
         breaking: body['breaking'] as bool?,
         sendPush: sendPush,
         scheduledAt: hasScheduledKey
-            ? (body['scheduledAt'] == null ? null : DateTime.tryParse(body['scheduledAt'].toString()))
+            ? (body['scheduledAt'] == null
+                ? null
+                : DateTime.tryParse(body['scheduledAt'].toString()))
             : PhoenixDatabase.unsetSentinel,
         publishedAt: willPublishNow ? DateTime.now().toUtc() : null,
         pushSent: shouldSendPush,
       );
       if (updated == null) {
-        return jsonResponse({'error': 'Artikel nicht gefunden.'}, statusCode: 404);
+        return jsonResponse({'error': 'Artikel nicht gefunden.'},
+            statusCode: 404);
       }
 
       if (shouldSendPush) {
@@ -1705,10 +1808,14 @@ class ControlCenterRoutes {
           title: 'PHÖNIX News',
           body: article['title'].toString(),
           androidChannelId: 'phoenix_news_v1',
-          data: {'type': 'phoenix_editorial', 'articleId': article['id'].toString()},
+          data: {
+            'type': 'phoenix_editorial',
+            'articleId': article['id'].toString()
+          },
         );
       } catch (error) {
-        stderr.writeln('[PHOENIX EDITORIAL PUSH] ${target['installationId']}: $error');
+        stderr.writeln(
+            '[PHOENIX EDITORIAL PUSH] ${target['installationId']}: $error');
       }
     }
   }
@@ -1741,11 +1848,13 @@ class ControlCenterRoutes {
     try {
       final body = jsonDecode(await request.readAsString());
       if (body is! Map<String, dynamic>) {
-        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'},
+            statusCode: 400);
       }
       final title = body['title']?.toString().trim() ?? '';
       if (title.isEmpty) {
-        return jsonResponse({'error': 'title ist erforderlich.'}, statusCode: 400);
+        return jsonResponse({'error': 'title ist erforderlich.'},
+            statusCode: 400);
       }
       final created = await database.createFaqArticle(
         title: title,
@@ -1784,11 +1893,13 @@ class ControlCenterRoutes {
     try {
       final before = await database.faqArticle(articleId);
       if (before == null) {
-        return jsonResponse({'error': 'Artikel nicht gefunden.'}, statusCode: 404);
+        return jsonResponse({'error': 'Artikel nicht gefunden.'},
+            statusCode: 404);
       }
       final body = jsonDecode(await request.readAsString());
       if (body is! Map<String, dynamic>) {
-        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'},
+            statusCode: 400);
       }
       final status = body['status']?.toString();
       if (status != null && !validStatuses.contains(status)) {
@@ -1804,7 +1915,8 @@ class ControlCenterRoutes {
         status: status,
       );
       if (updated == null) {
-        return jsonResponse({'error': 'Artikel nicht gefunden.'}, statusCode: 404);
+        return jsonResponse({'error': 'Artikel nicht gefunden.'},
+            statusCode: 404);
       }
 
       final diff = diffEmployeeFields(before: before, after: updated);
@@ -1858,7 +1970,8 @@ class ControlCenterRoutes {
     try {
       final body = jsonDecode(await request.readAsString());
       if (body is! Map<String, dynamic>) {
-        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'},
+            statusCode: 400);
       }
       final name = body['name']?.toString().trim() ?? '';
       final slot = body['slot']?.toString().trim() ?? '';
@@ -1874,7 +1987,8 @@ class ControlCenterRoutes {
       }
       final targetAudience = body['targetAudience']?.toString() ?? 'ALL';
       if (!validAudiences.contains(targetAudience)) {
-        return jsonResponse({'error': 'Ungültige targetAudience.'}, statusCode: 400);
+        return jsonResponse({'error': 'Ungültige targetAudience.'},
+            statusCode: 400);
       }
 
       final created = await database.createAdCampaign(
@@ -1883,13 +1997,21 @@ class ControlCenterRoutes {
         imageUrl: imageUrl,
         linkUrl: linkUrl,
         active: body['active'] == null ? true : body['active'] == true,
-        startDate: body['startDate'] == null ? null : DateTime.tryParse(body['startDate'].toString()),
-        endDate: body['endDate'] == null ? null : DateTime.tryParse(body['endDate'].toString()),
+        startDate: body['startDate'] == null
+            ? null
+            : DateTime.tryParse(body['startDate'].toString()),
+        endDate: body['endDate'] == null
+            ? null
+            : DateTime.tryParse(body['endDate'].toString()),
         targetCountry: body['targetCountry']?.toString(),
         targetAudience: targetAudience,
         createdByEmployeeId: actor.id,
-        budgetAmount: body['budgetAmount'] == null ? null : double.tryParse(body['budgetAmount'].toString()),
-        frequencyCapPerDay: body['frequencyCapPerDay'] == null ? null : int.tryParse(body['frequencyCapPerDay'].toString()),
+        budgetAmount: body['budgetAmount'] == null
+            ? null
+            : double.tryParse(body['budgetAmount'].toString()),
+        frequencyCapPerDay: body['frequencyCapPerDay'] == null
+            ? null
+            : int.tryParse(body['frequencyCapPerDay'].toString()),
       );
       await database.insertAdminAuditLog(
         employeeId: actor.id,
@@ -1915,7 +2037,8 @@ class ControlCenterRoutes {
     try {
       final campaign = await database.adCampaign(int.parse(id));
       if (campaign == null) {
-        return jsonResponse({'error': 'Kampagne nicht gefunden.'}, statusCode: 404);
+        return jsonResponse({'error': 'Kampagne nicht gefunden.'},
+            statusCode: 404);
       }
       return jsonResponse({'campaign': _jsonSafe(campaign)});
     } catch (error) {
@@ -1933,11 +2056,13 @@ class ControlCenterRoutes {
     try {
       final before = await database.adCampaign(campaignId);
       if (before == null) {
-        return jsonResponse({'error': 'Kampagne nicht gefunden.'}, statusCode: 404);
+        return jsonResponse({'error': 'Kampagne nicht gefunden.'},
+            statusCode: 404);
       }
       final body = jsonDecode(await request.readAsString());
       if (body is! Map<String, dynamic>) {
-        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'},
+            statusCode: 400);
       }
       final hasStartKey = body.containsKey('startDate');
       final hasEndKey = body.containsKey('endDate');
@@ -1952,22 +2077,33 @@ class ControlCenterRoutes {
         linkUrl: body['linkUrl']?.toString(),
         active: body['active'] as bool?,
         startDate: hasStartKey
-            ? (body['startDate'] == null ? null : DateTime.tryParse(body['startDate'].toString()))
+            ? (body['startDate'] == null
+                ? null
+                : DateTime.tryParse(body['startDate'].toString()))
             : PhoenixDatabase.unsetSentinel,
         endDate: hasEndKey
-            ? (body['endDate'] == null ? null : DateTime.tryParse(body['endDate'].toString()))
+            ? (body['endDate'] == null
+                ? null
+                : DateTime.tryParse(body['endDate'].toString()))
             : PhoenixDatabase.unsetSentinel,
-        targetCountry: hasCountryKey ? body['targetCountry']?.toString() : PhoenixDatabase.unsetSentinel,
+        targetCountry: hasCountryKey
+            ? body['targetCountry']?.toString()
+            : PhoenixDatabase.unsetSentinel,
         targetAudience: body['targetAudience']?.toString(),
         budgetAmount: hasBudgetKey
-            ? (body['budgetAmount'] == null ? null : double.tryParse(body['budgetAmount'].toString()))
+            ? (body['budgetAmount'] == null
+                ? null
+                : double.tryParse(body['budgetAmount'].toString()))
             : PhoenixDatabase.unsetSentinel,
         frequencyCapPerDay: hasFrequencyCapKey
-            ? (body['frequencyCapPerDay'] == null ? null : int.tryParse(body['frequencyCapPerDay'].toString()))
+            ? (body['frequencyCapPerDay'] == null
+                ? null
+                : int.tryParse(body['frequencyCapPerDay'].toString()))
             : PhoenixDatabase.unsetSentinel,
       );
       if (updated == null) {
-        return jsonResponse({'error': 'Kampagne nicht gefunden.'}, statusCode: 404);
+        return jsonResponse({'error': 'Kampagne nicht gefunden.'},
+            statusCode: 404);
       }
 
       final diff = diffEmployeeFields(before: before, after: updated);
@@ -2016,29 +2152,37 @@ class ControlCenterRoutes {
 
     if (!push.isConfigured) {
       return jsonResponse({
-        'error': 'Push ist serverseitig nicht konfiguriert (FIREBASE_PROJECT_ID/FIREBASE_SERVICE_ACCOUNT_JSON fehlen).',
+        'error':
+            'Push ist serverseitig nicht konfiguriert (FIREBASE_PROJECT_ID/FIREBASE_SERVICE_ACCOUNT_JSON fehlen).',
       }, statusCode: 503);
     }
 
     try {
       final body = jsonDecode(await request.readAsString());
       if (body is! Map<String, dynamic>) {
-        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'},
+            statusCode: 400);
       }
       final title = body['title']?.toString().trim() ?? '';
       final message = body['body']?.toString().trim() ?? '';
       final targetType = body['targetType']?.toString() ?? 'all';
       final targetValue = body['targetValue']?.toString();
       final deepLinkRaw = body['deepLink']?.toString().trim();
-      final deepLink = (deepLinkRaw == null || deepLinkRaw.isEmpty) ? null : deepLinkRaw;
+      final deepLink =
+          (deepLinkRaw == null || deepLinkRaw.isEmpty) ? null : deepLinkRaw;
       if (title.isEmpty || message.isEmpty) {
-        return jsonResponse({'error': 'title und body sind erforderlich.'}, statusCode: 400);
+        return jsonResponse({'error': 'title und body sind erforderlich.'},
+            statusCode: 400);
       }
       if (!const {'all', 'league'}.contains(targetType)) {
-        return jsonResponse({'error': 'targetType muss all oder league sein.'}, statusCode: 400);
+        return jsonResponse({'error': 'targetType muss all oder league sein.'},
+            statusCode: 400);
       }
-      if (targetType == 'league' && (targetValue == null || targetValue.isEmpty)) {
-        return jsonResponse({'error': 'targetValue (Liga-ID) ist erforderlich.'}, statusCode: 400);
+      if (targetType == 'league' &&
+          (targetValue == null || targetValue.isEmpty)) {
+        return jsonResponse(
+            {'error': 'targetValue (Liga-ID) ist erforderlich.'},
+            statusCode: 400);
       }
 
       // Section 19 (AN2): "Zeitplanung" - ein zukünftiger Zeitpunkt
@@ -2049,10 +2193,12 @@ class ControlCenterRoutes {
       if (scheduledAtRaw != null && scheduledAtRaw.isNotEmpty) {
         scheduledAt = DateTime.tryParse(scheduledAtRaw);
         if (scheduledAt == null) {
-          return jsonResponse({'error': 'scheduledAt ist kein gültiges Datum.'}, statusCode: 400);
+          return jsonResponse({'error': 'scheduledAt ist kein gültiges Datum.'},
+              statusCode: 400);
         }
       }
-      final isScheduled = scheduledAt != null && scheduledAt.isAfter(DateTime.now().toUtc());
+      final isScheduled =
+          scheduledAt != null && scheduledAt.isAfter(DateTime.now().toUtc());
 
       final broadcastId = await database.createPushBroadcast(
         title: title,
@@ -2109,10 +2255,12 @@ class ControlCenterRoutes {
           sent++;
         } catch (error) {
           failed++;
-          stderr.writeln('[PHOENIX PUSH BROADCAST] ${target['installationId']}: $error');
+          stderr.writeln(
+              '[PHOENIX PUSH BROADCAST] ${target['installationId']}: $error');
         }
       }
-      await database.updatePushBroadcastCounts(id: broadcastId, sentCount: sent, failedCount: failed);
+      await database.updatePushBroadcastCounts(
+          id: broadcastId, sentCount: sent, failedCount: failed);
 
       await database.insertAdminAuditLog(
         employeeId: actor.id,
@@ -2121,7 +2269,13 @@ class ControlCenterRoutes {
         objectType: 'broadcast',
         objectId: broadcastId.toString(),
         action: 'broadcast.send',
-        newValue: {'title': title, 'targetType': targetType, 'targetValue': targetValue, 'sent': sent, 'failed': failed},
+        newValue: {
+          'title': title,
+          'targetType': targetType,
+          'targetValue': targetValue,
+          'sent': sent,
+          'failed': failed
+        },
         ip: _clientIp(request),
       );
 
@@ -2146,10 +2300,13 @@ class ControlCenterRoutes {
     final targetType = request.url.queryParameters['targetType'] ?? 'all';
     final targetValue = request.url.queryParameters['targetValue'];
     if (!const {'all', 'league'}.contains(targetType)) {
-      return jsonResponse({'error': 'targetType muss all oder league sein.'}, statusCode: 400);
+      return jsonResponse({'error': 'targetType muss all oder league sein.'},
+          statusCode: 400);
     }
-    if (targetType == 'league' && (targetValue == null || targetValue.isEmpty)) {
-      return jsonResponse({'error': 'targetValue (Liga-ID) ist erforderlich.'}, statusCode: 400);
+    if (targetType == 'league' &&
+        (targetValue == null || targetValue.isEmpty)) {
+      return jsonResponse({'error': 'targetValue (Liga-ID) ist erforderlich.'},
+          statusCode: 400);
     }
     try {
       final targets = await database.broadcastPushTargets(
@@ -2173,14 +2330,16 @@ class ControlCenterRoutes {
 
     if (!push.isConfigured) {
       return jsonResponse({
-        'error': 'Push ist serverseitig nicht konfiguriert (FIREBASE_PROJECT_ID/FIREBASE_SERVICE_ACCOUNT_JSON fehlen).',
+        'error':
+            'Push ist serverseitig nicht konfiguriert (FIREBASE_PROJECT_ID/FIREBASE_SERVICE_ACCOUNT_JSON fehlen).',
       }, statusCode: 503);
     }
 
     try {
       final body = jsonDecode(await request.readAsString());
       if (body is! Map<String, dynamic>) {
-        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'},
+            statusCode: 400);
       }
       final installationId = body['installationId']?.toString().trim() ?? '';
       final title = body['title']?.toString().trim() ?? '';
@@ -2239,7 +2398,8 @@ class ControlCenterRoutes {
     }
   }
 
-  Future<Response> _updatePremiumFeature(Request request, String featureKey) async {
+  Future<Response> _updatePremiumFeature(
+      Request request, String featureKey) async {
     final auth = await guard.authenticate(request);
     if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
     final actor = auth.employee!;
@@ -2250,7 +2410,9 @@ class ControlCenterRoutes {
       final body = jsonDecode(await request.readAsString());
       final tier = body is Map ? body['tier']?.toString() ?? '' : '';
       if (!validTiers.contains(tier)) {
-        return jsonResponse({'error': 'tier muss FREE, PREMIUM oder DISABLED sein.'}, statusCode: 400);
+        return jsonResponse(
+            {'error': 'tier muss FREE, PREMIUM oder DISABLED sein.'},
+            statusCode: 400);
       }
       final updated = await database.updatePremiumFeatureTier(
         featureKey: featureKey,
@@ -2258,7 +2420,8 @@ class ControlCenterRoutes {
         updatedBy: actor.login,
       );
       if (updated == null) {
-        return jsonResponse({'error': 'Feature nicht gefunden.'}, statusCode: 404);
+        return jsonResponse({'error': 'Feature nicht gefunden.'},
+            statusCode: 404);
       }
       await database.insertAdminAuditLog(
         employeeId: actor.id,
@@ -2303,17 +2466,20 @@ class ControlCenterRoutes {
     try {
       final body = jsonDecode(await request.readAsString());
       if (body is! Map<String, dynamic>) {
-        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'},
+            statusCode: 400);
       }
       final flagKey = body['flagKey']?.toString().trim() ?? '';
       final label = body['label']?.toString().trim() ?? '';
       if (flagKey.isEmpty || label.isEmpty) {
-        return jsonResponse({'error': 'flagKey und label sind erforderlich.'}, statusCode: 400);
+        return jsonResponse({'error': 'flagKey und label sind erforderlich.'},
+            statusCode: 400);
       }
       final audience = body['audience']?.toString() ?? 'ALL';
       final stage = body['stage']?.toString() ?? 'STAGING';
       if (!validAudiences.contains(audience) || !validStages.contains(stage)) {
-        return jsonResponse({'error': 'Ungültige audience oder stage.'}, statusCode: 400);
+        return jsonResponse({'error': 'Ungültige audience oder stage.'},
+            statusCode: 400);
       }
 
       final created = await database.createFeatureFlag(
@@ -2321,7 +2487,8 @@ class ControlCenterRoutes {
         label: label,
         description: body['description']?.toString() ?? '',
         enabled: body['enabled'] == true,
-        rolloutPercentage: int.tryParse(body['rolloutPercentage']?.toString() ?? '') ?? 0,
+        rolloutPercentage:
+            int.tryParse(body['rolloutPercentage']?.toString() ?? '') ?? 0,
         audience: audience,
         stage: stage,
         updatedBy: actor.login,
@@ -2340,7 +2507,8 @@ class ControlCenterRoutes {
     } catch (error) {
       final message = error.toString();
       if (message.toLowerCase().contains('duplicate key')) {
-        return jsonResponse({'error': 'flagKey bereits vergeben.'}, statusCode: 409);
+        return jsonResponse({'error': 'flagKey bereits vergeben.'},
+            statusCode: 409);
       }
       return jsonResponse({'error': message}, statusCode: 400);
     }
@@ -2355,7 +2523,8 @@ class ControlCenterRoutes {
     try {
       final body = jsonDecode(await request.readAsString());
       if (body is! Map<String, dynamic>) {
-        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'},
+            statusCode: 400);
       }
       final updated = await database.updateFeatureFlag(
         flagKey: flagKey,
@@ -2368,7 +2537,8 @@ class ControlCenterRoutes {
         updatedBy: actor.login,
       );
       if (updated == null) {
-        return jsonResponse({'error': 'Feature Flag nicht gefunden.'}, statusCode: 404);
+        return jsonResponse({'error': 'Feature Flag nicht gefunden.'},
+            statusCode: 404);
       }
       await database.insertAdminAuditLog(
         employeeId: actor.id,
@@ -2410,7 +2580,8 @@ class ControlCenterRoutes {
     try {
       final body = jsonDecode(await request.readAsString());
       if (body is! Map<String, dynamic>) {
-        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'},
+            statusCode: 400);
       }
       final updated = await database.updateAppReleaseConfig(
         currentVersion: body['currentVersion']?.toString(),
@@ -2445,7 +2616,8 @@ class ControlCenterRoutes {
     if (!auth.employee!.hasPermission('incidents.view')) return _forbidden();
 
     try {
-      final incidents = await database.listIncidents(status: request.url.queryParameters['status']);
+      final incidents = await database.listIncidents(
+          status: request.url.queryParameters['status']);
       return jsonResponse({'incidents': incidents.map(_jsonSafe).toList()});
     } catch (error) {
       return jsonResponse({'error': error.toString()}, statusCode: 500);
@@ -2462,11 +2634,13 @@ class ControlCenterRoutes {
     try {
       final body = jsonDecode(await request.readAsString());
       if (body is! Map<String, dynamic>) {
-        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'},
+            statusCode: 400);
       }
       final title = body['title']?.toString().trim() ?? '';
       if (title.isEmpty) {
-        return jsonResponse({'error': 'title ist erforderlich.'}, statusCode: 400);
+        return jsonResponse({'error': 'title ist erforderlich.'},
+            statusCode: 400);
       }
       final severity = body['severity']?.toString() ?? 'minor';
       if (!validSeverities.contains(severity)) {
@@ -2476,7 +2650,8 @@ class ControlCenterRoutes {
         title: title,
         severity: severity,
         affectedSystems: body['affectedSystems']?.toString() ?? '',
-        responsibleEmployeeId: int.tryParse(body['responsibleEmployeeId']?.toString() ?? ''),
+        responsibleEmployeeId:
+            int.tryParse(body['responsibleEmployeeId']?.toString() ?? ''),
         impactDescription: body['impactDescription']?.toString() ?? '',
         relatedJobsNote: body['relatedJobsNote']?.toString() ?? '',
         communicationNote: body['communicationNote']?.toString() ?? '',
@@ -2505,7 +2680,8 @@ class ControlCenterRoutes {
     try {
       final incident = await database.incident(int.parse(id));
       if (incident == null) {
-        return jsonResponse({'error': 'Incident nicht gefunden.'}, statusCode: 404);
+        return jsonResponse({'error': 'Incident nicht gefunden.'},
+            statusCode: 404);
       }
       return jsonResponse({'incident': _jsonSafe(incident)});
     } catch (error) {
@@ -2524,7 +2700,8 @@ class ControlCenterRoutes {
     try {
       final body = jsonDecode(await request.readAsString());
       if (body is! Map<String, dynamic>) {
-        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'},
+            statusCode: 400);
       }
       final status = body['status']?.toString();
       if (status != null && !validStatuses.contains(status)) {
@@ -2536,14 +2713,16 @@ class ControlCenterRoutes {
         severity: body['severity']?.toString(),
         actionsTaken: body['actionsTaken']?.toString(),
         postmortem: body['postmortem']?.toString(),
-        responsibleEmployeeId: int.tryParse(body['responsibleEmployeeId']?.toString() ?? ''),
+        responsibleEmployeeId:
+            int.tryParse(body['responsibleEmployeeId']?.toString() ?? ''),
         impactDescription: body['impactDescription']?.toString(),
         relatedJobsNote: body['relatedJobsNote']?.toString(),
         communicationNote: body['communicationNote']?.toString(),
         closeNow: status == 'RESOLVED',
       );
       if (updated == null) {
-        return jsonResponse({'error': 'Incident nicht gefunden.'}, statusCode: 404);
+        return jsonResponse({'error': 'Incident nicht gefunden.'},
+            statusCode: 404);
       }
       await database.insertAdminAuditLog(
         employeeId: actor.id,
@@ -2585,17 +2764,21 @@ class ControlCenterRoutes {
     try {
       final body = jsonDecode(await request.readAsString());
       if (body is! Map<String, dynamic>) {
-        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'},
+            statusCode: 400);
       }
       final note = body['note']?.toString().trim() ?? '';
       if (note.isEmpty) {
-        return jsonResponse({'error': 'note ist erforderlich.'}, statusCode: 400);
+        return jsonResponse({'error': 'note ist erforderlich.'},
+            statusCode: 400);
       }
       final occurredAtRaw = body['occurredAt']?.toString();
       final event = await database.addIncidentTimelineEvent(
         incidentId: int.parse(id),
         note: note,
-        occurredAt: (occurredAtRaw == null || occurredAtRaw.isEmpty) ? null : DateTime.tryParse(occurredAtRaw),
+        occurredAt: (occurredAtRaw == null || occurredAtRaw.isEmpty)
+            ? null
+            : DateTime.tryParse(occurredAtRaw),
         createdByEmployeeId: actor.id,
       );
       await database.insertAdminAuditLog(
@@ -2653,7 +2836,9 @@ class ControlCenterRoutes {
     try {
       final revoked = await database.revokeAdminSessionByToken(token);
       if (!revoked) {
-        return jsonResponse({'error': 'Session nicht gefunden oder bereits beendet.'}, statusCode: 404);
+        return jsonResponse(
+            {'error': 'Session nicht gefunden oder bereits beendet.'},
+            statusCode: 404);
       }
       await database.insertAdminAuditLog(
         employeeId: actor.id,
@@ -2692,8 +2877,10 @@ class ControlCenterRoutes {
 
     try {
       final apiUsage = await database.apiSportsDailyUsageToday();
-      final pendingPipelineJobs = await database.countPendingFootballDailyPipelineJobs();
-      final pendingSettlementJobs = await database.countPendingFootballMatchSettlementJobs();
+      final pendingPipelineJobs =
+          await database.countPendingFootballDailyPipelineJobs();
+      final pendingSettlementJobs =
+          await database.countPendingFootballMatchSettlementJobs();
       final appStatus = await database.appControlStatus();
       final dbStats = await database.databaseStats();
       final openTickets = await database.listSupportTickets(status: 'NEU');
@@ -2724,7 +2911,8 @@ class ControlCenterRoutes {
         escalate('red', '${openIncidents.length} offene(r) Incident(s)');
       }
       if (appStatus['status'] != 'ACTIVE') {
-        escalate('gold', 'App-Status ist "${appStatus['status']}", nicht ACTIVE');
+        escalate(
+            'gold', 'App-Status ist "${appStatus['status']}", nicht ACTIVE');
       }
       if (pendingPipelineJobs > 0) {
         escalate('gold', '$pendingPipelineJobs offene Daily-Pipeline-Läufe');
@@ -2739,9 +2927,11 @@ class ControlCenterRoutes {
         if (limit == null || limit <= 0) continue;
         final percent = (requests / limit) * 100;
         if (percent >= 95) {
-          escalate('red', '$apiName: API-Budget bei ${percent.toStringAsFixed(0)}%');
+          escalate(
+              'red', '$apiName: API-Budget bei ${percent.toStringAsFixed(0)}%');
         } else if (percent >= 85) {
-          escalate('gold', '$apiName: API-Budget bei ${percent.toStringAsFixed(0)}%');
+          escalate('gold',
+              '$apiName: API-Budget bei ${percent.toStringAsFixed(0)}%');
         }
       }
       final dbLimit = config.databaseSizeLimitMb;
@@ -2749,9 +2939,11 @@ class ControlCenterRoutes {
         final sizeMb = ((dbStats['sizeBytes'] as num?) ?? 0) / (1024 * 1024);
         final dbPercent = (sizeMb / dbLimit) * 100;
         if (dbPercent >= 95) {
-          escalate('red', 'Datenbankgröße bei ${dbPercent.toStringAsFixed(0)}% des konfigurierten Limits');
+          escalate('red',
+              'Datenbankgröße bei ${dbPercent.toStringAsFixed(0)}% des konfigurierten Limits');
         } else if (dbPercent >= 85) {
-          escalate('gold', 'Datenbankgröße bei ${dbPercent.toStringAsFixed(0)}% des konfigurierten Limits');
+          escalate('gold',
+              'Datenbankgröße bei ${dbPercent.toStringAsFixed(0)}% des konfigurierten Limits');
         }
       }
 
@@ -2761,7 +2953,9 @@ class ControlCenterRoutes {
           'reasons': ampelReasons,
           'checkedAt': DateTime.now().toUtc().toIso8601String(),
         },
-        'apiUsage': apiUsage.map((row) => _jsonSafe(_apiUsageRowWithLimit(row))).toList(),
+        'apiUsage': apiUsage
+            .map((row) => _jsonSafe(_apiUsageRowWithLimit(row)))
+            .toList(),
         'pendingJobs': {
           'footballDailyPipeline': pendingPipelineJobs,
           'footballMatchSettlement': pendingSettlementJobs,
@@ -2813,8 +3007,10 @@ class ControlCenterRoutes {
       final whitelistCounts = await database.footballLeagueManualStatusCounts();
       final champions = await database.allModelVersions(status: 'champion');
       final challengers = await database.allModelVersions(status: 'challenger');
-      final pendingPipelineJobs = await database.countPendingFootballDailyPipelineJobs();
-      final pendingSettlementJobs = await database.countPendingFootballMatchSettlementJobs();
+      final pendingPipelineJobs =
+          await database.countPendingFootballDailyPipelineJobs();
+      final pendingSettlementJobs =
+          await database.countPendingFootballMatchSettlementJobs();
       final openTickets = await database.listSupportTickets(status: 'NEU');
       final openIncidents = await database.listIncidents(status: 'OPEN');
       final appStatus = await database.appControlStatus();
@@ -2834,15 +3030,22 @@ class ControlCenterRoutes {
         if (limit == null || limit <= 0) continue;
         final percent = (requests / limit) * 100;
         if (percent >= 95) {
-          critical.add('$apiName: API-Budget bei ${percent.toStringAsFixed(0)}% ($requests von $limit).');
+          critical.add(
+              '$apiName: API-Budget bei ${percent.toStringAsFixed(0)}% ($requests von $limit).');
         } else if (percent >= 85) {
-          warnings.add('$apiName: API-Budget bei ${percent.toStringAsFixed(0)}% ($requests von $limit).');
+          warnings.add(
+              '$apiName: API-Budget bei ${percent.toStringAsFixed(0)}% ($requests von $limit).');
         }
       }
-      if (pendingPipelineJobs > 0) warnings.add('$pendingPipelineJobs offene Daily-Pipeline-Läufe.');
-      if (pendingSettlementJobs > 0) warnings.add('$pendingSettlementJobs offene Settlement-Läufe.');
-      if (openTickets.isNotEmpty) warnings.add('${openTickets.length} neue, unbearbeitete Support-Tickets.');
-      if (openIncidents.isNotEmpty) critical.add('${openIncidents.length} offene(r) Incident(s).');
+      if (pendingPipelineJobs > 0)
+        warnings.add('$pendingPipelineJobs offene Daily-Pipeline-Läufe.');
+      if (pendingSettlementJobs > 0)
+        warnings.add('$pendingSettlementJobs offene Settlement-Läufe.');
+      if (openTickets.isNotEmpty)
+        warnings
+            .add('${openTickets.length} neue, unbearbeitete Support-Tickets.');
+      if (openIncidents.isNotEmpty)
+        critical.add('${openIncidents.length} offene(r) Incident(s).');
       if (appStatus['status'] != 'ACTIVE') {
         warnings.add('App-Status ist "${appStatus['status']}", nicht ACTIVE.');
       }
@@ -2858,7 +3061,10 @@ class ControlCenterRoutes {
           'Model Promotion aktiviert: ${modelLabConfig.promotionEnabled}',
           'Generative AI Runtime: OFF (Section 56/97, hartkodiert deaktiviert)',
         ],
-        'API': [for (final row in apiUsage) '${row['api_name']}: ${row['requests']} Requests heute'],
+        'API': [
+          for (final row in apiUsage)
+            '${row['api_name']}: ${row['requests']} Requests heute'
+        ],
         'WHITELIST': [
           'Auto: ${whitelistCounts['auto'] ?? 0}',
           'Whitelist: ${whitelistCounts['whitelist'] ?? 0}',
@@ -2950,7 +3156,8 @@ class ControlCenterRoutes {
     try {
       final results = <Map<String, Object?>>[];
 
-      for (final row in await database.searchFootballLeaguesByText(query, limit: 8)) {
+      for (final row
+          in await database.searchFootballLeaguesByText(query, limit: 8)) {
         results.add({
           'type': 'footballLeague',
           'id': row['league_id'],
@@ -2958,7 +3165,8 @@ class ControlCenterRoutes {
           'url': '/football/leagues/${row['league_id']}',
         });
       }
-      for (final row in await database.searchFootballTeamsByText(query, limit: 8)) {
+      for (final row
+          in await database.searchFootballTeamsByText(query, limit: 8)) {
         results.add({
           'type': 'footballTeam',
           'id': row['team_id'],
@@ -2966,31 +3174,38 @@ class ControlCenterRoutes {
           'url': '/football/teams/${row['team_id']}',
         });
       }
-      for (final row in await database.searchFootballMatchesByText(query, limit: 8)) {
+      for (final row
+          in await database.searchFootballMatchesByText(query, limit: 8)) {
         results.add({
           'type': 'footballMatch',
           'id': row['id'],
-          'label': '${row['home_team_name']} – ${row['away_team_name']} · ${row['league_name']}',
+          'label':
+              '${row['home_team_name']} – ${row['away_team_name']} · ${row['league_name']}',
           'url': '/football/matches/${row['id']}',
         });
       }
-      for (final row in await database.searchModelVersionsByText(query, limit: 8)) {
+      for (final row
+          in await database.searchModelVersionsByText(query, limit: 8)) {
         results.add({
           'type': 'modelVersion',
           'id': row['id'],
-          'label': '${row['readable_version']} (${_modelStatusLabel(row['status'])})',
+          'label':
+              '${row['readable_version']} (${_modelStatusLabel(row['status'])})',
           'url': '/model-lab/models/${row['id']}',
         });
       }
-      for (final row in await database.searchLearningRunsByText(query, limit: 8)) {
+      for (final row
+          in await database.searchLearningRunsByText(query, limit: 8)) {
         results.add({
           'type': 'learningRun',
           'id': row['id'],
-          'label': 'Learning-Lauf #${row['id']} (${_runStatusLabel(row['status'])})',
+          'label':
+              'Learning-Lauf #${row['id']} (${_runStatusLabel(row['status'])})',
           'url': '/model-lab/learning-runs/${row['id']}',
         });
       }
-      for (final row in await database.searchNewsArticlesByText(query, limit: 8)) {
+      for (final row
+          in await database.searchNewsArticlesByText(query, limit: 8)) {
         results.add({
           'type': 'newsArticle',
           'id': row['id'],
@@ -2999,7 +3214,8 @@ class ControlCenterRoutes {
         });
       }
       if (employee.hasPermission('employees.view')) {
-        for (final row in await database.searchAdminEmployeesByText(query, limit: 8)) {
+        for (final row
+            in await database.searchAdminEmployeesByText(query, limit: 8)) {
           results.add({
             'type': 'employee',
             'id': row['id'],
@@ -3009,7 +3225,8 @@ class ControlCenterRoutes {
         }
       }
 
-      return jsonResponse({'query': query, 'count': results.length, 'results': results});
+      return jsonResponse(
+          {'query': query, 'count': results.length, 'results': results});
     } catch (error) {
       return jsonResponse({'error': error.toString()}, statusCode: 500);
     }
@@ -3018,7 +3235,8 @@ class ControlCenterRoutes {
   // -- Helpers ------------------------------------------------------------
 
   Response _forbidden() =>
-      jsonResponse({'error': 'Keine Berechtigung für diese Aktion.'}, statusCode: 403);
+      jsonResponse({'error': 'Keine Berechtigung für diese Aktion.'},
+          statusCode: 403);
 
   Response _invalidCredentials() => jsonResponse(
         {'error': 'Login oder Passwort ist ungültig.'},
@@ -3077,7 +3295,10 @@ class ControlCenterRoutes {
   ) {
     if (raw == null) return (overrides: <String, Object?>{}, error: null);
     if (raw is! Map) {
-      return (overrides: <String, Object?>{}, error: 'permissionOverrides muss ein Objekt sein.');
+      return (
+        overrides: <String, Object?>{},
+        error: 'permissionOverrides muss ein Objekt sein.'
+      );
     }
     final overrides = <String, Object?>{};
     for (final entry in raw.entries) {
@@ -3105,7 +3326,8 @@ class ControlCenterRoutes {
     }
     if (value is DateTime) return value.toUtc().toIso8601String();
     if (value is Map) {
-      return value.map((key, item) => MapEntry(key.toString(), _jsonSafe(item)));
+      return value
+          .map((key, item) => MapEntry(key.toString(), _jsonSafe(item)));
     }
     if (value is Iterable) return value.map(_jsonSafe).toList();
     return value.toString();
