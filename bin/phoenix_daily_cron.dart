@@ -378,7 +378,9 @@ class _CronConfig {
     return _CronConfig(
       backendUrl: backendUrl,
       adminToken: adminToken,
-      limit: integer('PHOENIX_CRON_LIMIT', 20).clamp(1, 20),
+      // 1000 ist der technische Schutz, kein fachliches 20er-Limit. Die
+      // Fokus-Ligen eines Spieltags werden dadurch vollständig verarbeitet.
+      limit: integer('PHOENIX_CRON_LIMIT', 1000).clamp(1, 1000),
       // 0 statt vorher 50: Jede Analyse soll gespeichert werden, egal wie
       // niedrig die Datenqualität ist. Die App filtert beim Abruf
       // (minimumQuality) weiterhin selbst, welche Tipps sie anzeigt -

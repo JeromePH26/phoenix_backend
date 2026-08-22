@@ -1297,7 +1297,7 @@ class ApiRoutes {
         return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
       }
       final limit =
-          int.tryParse(request.url.queryParameters['limit'] ?? '') ?? 20;
+          int.tryParse(request.url.queryParameters['limit'] ?? '') ?? 1000;
       try {
         final jobs = await database.recentFootballMatchSettlementJobs(
           limit: limit,
@@ -1939,9 +1939,9 @@ class ApiRoutes {
           'error': 'Datum muss YYYY-MM-DD sein.',
         }, statusCode: 400);
       }
-      if (limit < 1 || limit > 20) {
+      if (limit < 1 || limit > 1000) {
         return jsonResponse({
-          'error': 'limit muss zwischen 1 und 20 liegen.',
+          'error': 'limit muss zwischen 1 und 1000 liegen.',
         }, statusCode: 400);
       }
 
