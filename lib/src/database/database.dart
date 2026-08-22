@@ -8689,6 +8689,62 @@ class PhoenixDatabase {
         .toList();
   }
 
+  Future<List<Map<String, Object?>>> searchFootballTeamsByText(
+    String query, {
+    int limit = 20,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        WITH teams AS (
+          SELECT home_team_id AS team_id, home_team_name AS team_name,
+                 home_logo AS logo, kickoff_utc
+          FROM football_matches
+          UNION ALL
+          SELECT away_team_id AS team_id, away_team_name AS team_name,
+                 away_logo AS logo, kickoff_utc
+          FROM football_matches
+        ), latest AS (
+          SELECT DISTINCT ON (team_id) team_id, team_name, logo
+          FROM teams
+          WHERE team_name ILIKE @pattern OR team_id ILIKE @pattern
+          ORDER BY team_id, kickoff_utc DESC
+        )
+        SELECT team_id, team_name, logo
+        FROM latest
+        ORDER BY team_name ASC
+        LIMIT @limit
+      '''),
+      parameters: {'pattern': '%$query%', 'limit': limit},
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  Future<List<Map<String, Object?>>> searchFootballMatchesByText(
+    String query, {
+    int limit = 20,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT id, home_team_name, away_team_name, league_name, kickoff_utc
+        FROM football_matches
+        WHERE id ILIKE @pattern
+           OR home_team_name ILIKE @pattern
+           OR away_team_name ILIKE @pattern
+           OR league_name ILIKE @pattern
+        ORDER BY kickoff_utc DESC
+        LIMIT @limit
+      '''),
+      parameters: {'pattern': '%$query%', 'limit': limit},
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
   Future<List<Map<String, Object?>>> searchModelVersionsByText(
     String query, {
     int limit = 20,

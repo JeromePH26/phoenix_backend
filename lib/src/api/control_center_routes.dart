@@ -2950,7 +2950,7 @@ class ControlCenterRoutes {
     try {
       final results = <Map<String, Object?>>[];
 
-      for (final row in await database.searchFootballLeaguesByText(query)) {
+      for (final row in await database.searchFootballLeaguesByText(query, limit: 8)) {
         results.add({
           'type': 'footballLeague',
           'id': row['league_id'],
@@ -2958,23 +2958,39 @@ class ControlCenterRoutes {
           'url': '/football/leagues/${row['league_id']}',
         });
       }
-      for (final row in await database.searchModelVersionsByText(query)) {
+      for (final row in await database.searchFootballTeamsByText(query, limit: 8)) {
+        results.add({
+          'type': 'footballTeam',
+          'id': row['team_id'],
+          'label': row['team_name'],
+          'url': '/football/teams/${row['team_id']}',
+        });
+      }
+      for (final row in await database.searchFootballMatchesByText(query, limit: 8)) {
+        results.add({
+          'type': 'footballMatch',
+          'id': row['id'],
+          'label': '${row['home_team_name']} – ${row['away_team_name']} · ${row['league_name']}',
+          'url': '/football/matches/${row['id']}',
+        });
+      }
+      for (final row in await database.searchModelVersionsByText(query, limit: 8)) {
         results.add({
           'type': 'modelVersion',
           'id': row['id'],
-          'label': '${row['readable_version']} (${row['status']})',
+          'label': '${row['readable_version']} (${_modelStatusLabel(row['status'])})',
           'url': '/model-lab/models/${row['id']}',
         });
       }
-      for (final row in await database.searchLearningRunsByText(query)) {
+      for (final row in await database.searchLearningRunsByText(query, limit: 8)) {
         results.add({
           'type': 'learningRun',
           'id': row['id'],
-          'label': 'Learning Run #${row['id']} (${row['status']})',
+          'label': 'Learning-Lauf #${row['id']} (${_runStatusLabel(row['status'])})',
           'url': '/model-lab/learning-runs/${row['id']}',
         });
       }
-      for (final row in await database.searchNewsArticlesByText(query)) {
+      for (final row in await database.searchNewsArticlesByText(query, limit: 8)) {
         results.add({
           'type': 'newsArticle',
           'id': row['id'],
@@ -2983,7 +2999,7 @@ class ControlCenterRoutes {
         });
       }
       if (employee.hasPermission('employees.view')) {
-        for (final row in await database.searchAdminEmployeesByText(query)) {
+        for (final row in await database.searchAdminEmployeesByText(query, limit: 8)) {
           results.add({
             'type': 'employee',
             'id': row['id'],
@@ -3008,6 +3024,34 @@ class ControlCenterRoutes {
         {'error': 'Login oder Passwort ist ungültig.'},
         statusCode: 401,
       );
+
+  String _modelStatusLabel(Object? value) {
+    switch (value?.toString()) {
+      case 'champion':
+        return 'Aktives Champion-Modell';
+      case 'challenger':
+        return 'Herausforderer-Modell';
+      case 'retired':
+        return 'Archiviert';
+      default:
+        return value?.toString() ?? 'Unbekannt';
+    }
+  }
+
+  String _runStatusLabel(Object? value) {
+    switch (value?.toString()) {
+      case 'completed':
+        return 'Fertig';
+      case 'running':
+        return 'Läuft';
+      case 'failed':
+        return 'Fehlgeschlagen';
+      case 'pending':
+        return 'Wartet';
+      default:
+        return value?.toString() ?? 'Unbekannt';
+    }
+  }
 
   String? _bearerToken(Request request) {
     final header = request.headers['authorization'] ?? '';
