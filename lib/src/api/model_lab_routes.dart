@@ -10,6 +10,7 @@ import '../model_lab/learning_dataset_builder.dart';
 import '../model_lab/learning_market.dart';
 import '../model_lab/learning_run_service.dart';
 import '../model_lab/league_market_status.dart';
+import '../model_lab/metrics.dart';
 import '../model_lab/model_lab_schedule.dart';
 import '../model_lab/model_registry_service.dart';
 import '../model_lab/monthly_review_service.dart';
@@ -29,6 +30,13 @@ class ModelLabRoutes {
   final AppConfig config;
   final ModelLabConfig modelLabConfig;
   final PhoenixDatabase database;
+
+  // Section 15 (AN2): "Aktionen 'generieren' und 'abrechnen' gegen
+  // Doppelstart sperren" - generate/settle are synchronous request/response
+  // calls (no background job table like Settlement's), so an in-memory
+  // guard on this single long-lived route instance is enough to reject a
+  // second concurrent request while one is still running.
+  String? _shadowActionInProgress;
 
   Router get router {
     final router = Router();
@@ -354,6 +362,23 @@ class ModelLabRoutes {
       }
     });
 
+    // Section 15 (AN2): "ausstehend" - Vorschau-Zahlen vor dem Start einer
+    // Aktion, analog zum Settlement-Kandidatenvorschau-Muster (Section 11).
+    router.get('/shadow-status', (Request request) async {
+      if (!_isAdmin(request)) return _unauthorized();
+      try {
+        final pending = await database.pendingShadowPredictions();
+        final total = await database.countShadowPredictions();
+        return jsonResponse({
+          'pendingSettle': pending.length,
+          'totalShadowPredictions': total,
+          'actionInProgress': _shadowActionInProgress,
+        });
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
     router.get('/shadow-performance', (Request request) async {
       if (!_isAdmin(request)) return _unauthorized();
       final modelIdParam = request.url.queryParameters['modelVersionId'];
@@ -374,10 +399,87 @@ class ModelLabRoutes {
                     .map((r) => (r['brier_score'] as num?)?.toDouble() ?? 0)
                     .reduce((a, b) => a + b) /
                 total;
+
+        // Trefferquote: Anteil der Fälle, in denen die höchste vorhergesagte
+        // Wahrscheinlichkeit dem tatsächlichen Ausgang entsprach.
+        var correct = 0;
+        for (final row in settled) {
+          final outcomeIndex = row['outcome_index'] as int?;
+          final probsRaw = row['class_probabilities'];
+          if (outcomeIndex == null || probsRaw is! List) continue;
+          final probs = probsRaw.map((v) => (v as num).toDouble()).toList();
+          var maxIndex = 0;
+          for (var i = 1; i < probs.length; i++) {
+            if (probs[i] > probs[maxIndex]) maxIndex = i;
+          }
+          if (maxIndex == outcomeIndex) correct += 1;
+        }
+        final accuracy = total == 0 ? null : correct / total;
+
+        // Signifikanz: gepaarter Brier-Vergleich gegen den aktuellen
+        // Champion derselben Liga x Markt-Kombination - dieselbe Methode wie
+        // im monatlichen Review (Section 43), hier aber jederzeit live
+        // abrufbar statt nur einmal im Monat. Kein ROI: Shadow Predictions
+        // haben keine Marktquote, ein ROI wäre erfunden.
+        Map<String, Object?>? comparisonToChampion;
+        final model = await database.modelVersion(modelId);
+        if (model != null && model['status'] != 'champion') {
+          final leagueId = model['league_id']?.toString();
+          final market = model['market']?.toString();
+          if (market != null) {
+            final registry = ModelRegistryService(
+              database: database,
+              config: modelLabConfig,
+            );
+            final champion = await registry.currentChampion(
+              leagueId: leagueId,
+              market: market,
+            );
+            if (champion != null) {
+              final championId = champion['id'] as int;
+              final championSettled = await database.settledShadowPredictions(
+                modelVersionId: championId,
+              );
+              final championByFixture = {
+                for (final row in championSettled)
+                  row['fixture_id']?.toString(): row,
+              };
+              final differences = <double>[];
+              for (final row in settled) {
+                final fixtureId = row['fixture_id']?.toString();
+                final championRow = championByFixture[fixtureId];
+                if (championRow == null) continue;
+                final challengerBrier =
+                    (row['brier_score'] as num?)?.toDouble();
+                final championBrier =
+                    (championRow['brier_score'] as num?)?.toDouble();
+                if (challengerBrier == null || championBrier == null) {
+                  continue;
+                }
+                differences.add(challengerBrier - championBrier);
+              }
+              final uncertainty = Metrics.pairedBootstrap(
+                lossDifferences: differences,
+                resamples: modelLabConfig.bootstrapResamples,
+                confidenceLevel: modelLabConfig.bootstrapConfidenceLevel,
+                minSampleSize: 1,
+              );
+              comparisonToChampion = {
+                'championModelId': championId,
+                'championReadableVersion': champion['readable_version'],
+                'minPromotionSample': modelLabConfig.minPromotionSample,
+                ...uncertainty.toJson(),
+              };
+            }
+          }
+        }
+
         return jsonResponse({
           'modelVersionId': modelId,
           'settledShadowPredictions': total,
           'averageBrierScore': avgBrier,
+          'accuracy': accuracy,
+          'comparisonToChampion': comparisonToChampion,
           'predictions': settled.map(_jsonSafe).toList(),
         });
       } catch (error) {
@@ -387,6 +489,13 @@ class ModelLabRoutes {
 
     router.post('/shadow-predictions/generate', (Request request) async {
       if (!_isAdmin(request)) return _unauthorized();
+      if (_shadowActionInProgress != null) {
+        return jsonResponse({
+          'error':
+              'Bereits eine Shadow-Aktion aktiv ("$_shadowActionInProgress"). Bitte warten, bis diese fertig ist.',
+        }, statusCode: 409);
+      }
+      _shadowActionInProgress = 'generate';
       try {
         final created = await ShadowPredictionService(
           database: database,
@@ -395,11 +504,20 @@ class ModelLabRoutes {
         return jsonResponse({'status': 'completed', 'created': created});
       } catch (error) {
         return jsonResponse({'error': error.toString()}, statusCode: 500);
+      } finally {
+        _shadowActionInProgress = null;
       }
     });
 
     router.post('/shadow-predictions/settle', (Request request) async {
       if (!_isAdmin(request)) return _unauthorized();
+      if (_shadowActionInProgress != null) {
+        return jsonResponse({
+          'error':
+              'Bereits eine Shadow-Aktion aktiv ("$_shadowActionInProgress"). Bitte warten, bis diese fertig ist.',
+        }, statusCode: 409);
+      }
+      _shadowActionInProgress = 'settle';
       try {
         final settled = await ShadowPredictionService(
           database: database,
@@ -408,6 +526,8 @@ class ModelLabRoutes {
         return jsonResponse({'status': 'completed', 'settled': settled});
       } catch (error) {
         return jsonResponse({'error': error.toString()}, statusCode: 500);
+      } finally {
+        _shadowActionInProgress = null;
       }
     });
 
