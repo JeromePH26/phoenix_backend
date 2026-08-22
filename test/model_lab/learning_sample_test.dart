@@ -4,35 +4,35 @@ import 'package:phoenix_backend/src/model_lab/learning_sample.dart';
 import 'package:test/test.dart';
 
 ModelLabConfig _config() => ModelLabConfig(
-  promotionEnabled: false,
-  minDataQuality: 50,
-  minLearningEligibleSamples: 50,
-  leagueAdaptationSampleThreshold: 100,
-  strongerAdaptationSampleThreshold: 300,
-  fullLeagueEngineSampleThreshold: 600,
-  shrinkageK: 150,
-  attackWeightMin: 0.30,
-  attackWeightMax: 0.70,
-  attackWeightGrid: const [0.40, 0.45, 0.55, 0.60],
-  holdoutFraction: 0.20,
-  walkForwardMinTrainingWindow: 60,
-  walkForwardStepSize: 20,
-  minHoldoutSample: 40,
-  minValidationSample: 40,
-  minShadowSample: 30,
-  minPromotionSample: 120,
-  bootstrapResamples: 500,
-  bootstrapConfidenceLevel: 0.95,
-  calibrationMinBucketSample: 20,
-  redCardEarlyMinute: 30,
-  redCardLateMinute: 75,
-  learningRunWeekday: DateTime.tuesday,
-  learningRunHourBerlin: 4,
-  monthlyReviewWeekday: DateTime.wednesday,
-  monthlyReviewMaxDayOfMonth: 7,
-  maxChallengersPerLeagueMarket: 4,
-  staleLockMinutes: 180,
-);
+      promotionEnabled: false,
+      minDataQuality: 50,
+      minLearningEligibleSamples: 50,
+      leagueAdaptationSampleThreshold: 100,
+      strongerAdaptationSampleThreshold: 300,
+      fullLeagueEngineSampleThreshold: 600,
+      shrinkageK: 150,
+      attackWeightMin: 0.30,
+      attackWeightMax: 0.70,
+      attackWeightGrid: const [0.40, 0.45, 0.55, 0.60],
+      holdoutFraction: 0.20,
+      walkForwardMinTrainingWindow: 60,
+      walkForwardStepSize: 20,
+      minHoldoutSample: 40,
+      minValidationSample: 40,
+      minShadowSample: 30,
+      minPromotionSample: 120,
+      bootstrapResamples: 500,
+      bootstrapConfidenceLevel: 0.95,
+      calibrationMinBucketSample: 20,
+      redCardEarlyMinute: 30,
+      redCardLateMinute: 75,
+      learningRunWeekday: DateTime.tuesday,
+      learningRunHourBerlin: 4,
+      monthlyReviewWeekday: DateTime.wednesday,
+      monthlyReviewMaxDayOfMonth: 7,
+      maxChallengersPerLeagueMarket: 4,
+      staleLockMinutes: 180,
+    );
 
 LearningSample _sample({
   required DateTime kickoff,
@@ -40,17 +40,18 @@ LearningSample _sample({
   int homeGoals = 2,
   int awayGoals = 1,
   int? earliestRedCardMinute,
-}) => LearningSample(
-  fixtureId: 'f1',
-  leagueId: '78',
-  kickoff: kickoff,
-  snapshotCreatedAt: snapshotCreatedAt,
-  dataQuality: 80,
-  features: const {'raw.homeGoalsForAverageHome': 1.4},
-  homeGoals: homeGoals,
-  awayGoals: awayGoals,
-  earliestRedCardMinute: earliestRedCardMinute,
-);
+}) =>
+    LearningSample(
+      fixtureId: 'f1',
+      leagueId: '78',
+      kickoff: kickoff,
+      snapshotCreatedAt: snapshotCreatedAt,
+      dataQuality: 80,
+      features: const {'raw.homeGoalsForAverageHome': 1.4},
+      homeGoals: homeGoals,
+      awayGoals: awayGoals,
+      earliestRedCardMinute: earliestRedCardMinute,
+    );
 
 void main() {
   group('LearningSample.hasValidSnapshotTiming', () {
@@ -84,7 +85,8 @@ void main() {
     // Test 4 (Section 86): Pre-Match Leakage Test - das Ergebnis fließt
     // NIEMALS in `features` ein, sondern ausschließlich über die getrennten
     // homeGoals/awayGoals-Felder in die Outcome-Berechnung.
-    test('outcome is derived from separate result fields, never from features', () {
+    test('outcome is derived from separate result fields, never from features',
+        () {
       final sample = _sample(
         kickoff: DateTime.utc(2026, 3, 1),
         snapshotCreatedAt: DateTime.utc(2026, 2, 28),
@@ -155,6 +157,30 @@ void main() {
       expect(bttsYes.outcomeIndexFor(LearningMarket.btts), 0);
       expect(bttsNo.outcomeIndexFor(LearningMarket.btts), 1);
     });
+
+    test('new market families map results without treating DNB draws as losses',
+        () {
+      final homeTwo = _sample(
+        kickoff: DateTime.utc(2026, 1, 1),
+        snapshotCreatedAt: DateTime.utc(2025, 12, 31),
+        homeGoals: 2,
+        awayGoals: 1,
+      );
+      final draw = _sample(
+        kickoff: DateTime.utc(2026, 1, 1),
+        snapshotCreatedAt: DateTime.utc(2025, 12, 31),
+        homeGoals: 1,
+        awayGoals: 1,
+      );
+
+      expect(homeTwo.outcomeIndexFor(LearningMarket.overUnder15), 0);
+      expect(homeTwo.outcomeIndexFor(LearningMarket.overUnder35), 1);
+      expect(homeTwo.outcomeIndexFor(LearningMarket.homeTeamOver15), 0);
+      expect(homeTwo.outcomeIndexFor(LearningMarket.doubleChance1x), 0);
+      expect(homeTwo.outcomeIndexFor(LearningMarket.doubleChanceX2), 1);
+      expect(draw.outcomeIndexFor(LearningMarket.drawNoBetHome), 1);
+      expect(draw.outcomeIndexFor(LearningMarket.drawNoBetAway), 1);
+    });
   });
 
   group('LearningSample distortion diagnostics', () {
@@ -177,7 +203,8 @@ void main() {
       expect(sample.isClean(_config()), isFalse);
     });
 
-    test('a very late red card is low distortion and still counts as clean', () {
+    test('a very late red card is low distortion and still counts as clean',
+        () {
       final sample = _sample(
         kickoff: DateTime.utc(2026, 1, 1),
         snapshotCreatedAt: DateTime.utc(2025, 12, 31),
@@ -196,7 +223,8 @@ void main() {
         earliestRedCardMinute: 5,
       );
       expect(sample.hasValidSnapshotTiming, isTrue);
-      expect(() => sample.outcomeIndexFor(LearningMarket.oneXTwo), returnsNormally);
+      expect(() => sample.outcomeIndexFor(LearningMarket.oneXTwo),
+          returnsNormally);
     });
   });
 }

@@ -27,15 +27,11 @@ void main() {
     };
   }
 
-  group('selectForFixture - primary tip market restriction', () {
+  group('selectForFixture - balanced primary markets', () {
     test(
-      'never selects Doppelte Chance (dc1x/dcX2) as the phoenixTip even '
-      'when it has the highest raw probability',
+      'selects Doppelte Chance X2 when it is the highest useful individual '
+      'market, instead of artificially forcing a weaker core market',
       () {
-        // Regression test for the live production bug: NY Red Bulls vs.
-        // Nashville stored dcX2 (Doppelte Chance X2, 70.4 %) as phoenixTip
-        // even though the product rule only allows 1X2/BTTS/Over-Under 2.5
-        // as the main recommendation.
         final selection = service.selectForFixture(
           fixtureId: '1490394',
           simulation: simulationWith(
@@ -43,7 +39,7 @@ void main() {
               'homeWin': 0.30,
               'draw': 0.26,
               'awayWin': 0.44,
-              'dcX2': 0.70, // higher than any allowed core market
+              'dcX2': 0.80,
               'dc1x': 0.56,
               'over25': 0.60,
               'under25': 0.40,
@@ -67,28 +63,12 @@ void main() {
 
         expect(selection, isNotNull);
         final phoenixTip = selection!['phoenixTip'] as Map;
-        expect(
-          phoenixTip['marketKey'],
-          isNot(anyOf('dcX2', 'dc1x', 'dnbHome', 'dnbAway')),
-        );
-        expect(
-          phoenixTip['marketKey'],
-          anyOf(
-            'homeWin',
-            'draw',
-            'awayWin',
-            'over25',
-            'under25',
-            'bttsYes',
-            'bttsNo',
-          ),
-        );
+        expect(phoenixTip['marketKey'], 'dcX2');
       },
     );
 
     test(
-      'still shows Doppelte Chance / DNB informationally in topMarkets and '
-      'allMarkets (Marktcheck), just never as the phoenixTip',
+      'includes the requested diverse markets in the public market check',
       () {
         final selection = service.selectForFixture(
           fixtureId: '1490394',
@@ -98,6 +78,11 @@ void main() {
               'draw': 0.26,
               'awayWin': 0.44,
               'dcX2': 0.70,
+              'over15': 0.72,
+              'over35': 0.44,
+              'under35': 0.56,
+              'homeOver15': 0.55,
+              'awayOver15': 0.45,
               'over25': 0.60,
               'under25': 0.40,
               'bttsYes': 0.58,
@@ -108,6 +93,11 @@ void main() {
               'draw': 3.8,
               'awayWin': 2.3,
               'dcX2': 1.43,
+              'over15': 1.39,
+              'over35': 2.3,
+              'under35': 1.8,
+              'homeOver15': 1.82,
+              'awayOver15': 2.22,
               'over25': 1.67,
               'under25': 2.5,
               'bttsYes': 1.72,
@@ -118,19 +108,21 @@ void main() {
         );
 
         expect(selection, isNotNull);
-        final allMarkets = (selection!['allMarkets'] as List)
-            .cast<Map<String, Object?>>();
+        final allMarkets =
+            (selection!['allMarkets'] as List).cast<Map<String, Object?>>();
         expect(
           allMarkets.any((m) => m['key'] == 'dcX2'),
           isTrue,
-          reason: 'DC must remain visible informationally in allMarkets',
+          reason: 'DC must be visible in allMarkets',
         );
+        expect(allMarkets.any((m) => m['key'] == 'over15'), isTrue);
+        expect(allMarkets.any((m) => m['key'] == 'under35'), isTrue);
+        expect(allMarkets.any((m) => m['key'] == 'homeOver15'), isTrue);
       },
     );
 
     test(
-      'never falls back to over35/under35 or DC as an emergency tip when '
-      'no core market qualifies - returns null instead (Publish Gate)',
+      'returns null instead of recommending a trivial low-odds market',
       () {
         final selection = service.selectForFixture(
           fixtureId: '999',
@@ -153,6 +145,74 @@ void main() {
         expect(selection, isNull);
       },
     );
+
+    test('can select Unter 3,5 Tore as a specific, fairly priced market', () {
+      final selection = service.selectForFixture(
+        fixtureId: 'under35-fixture',
+        simulation: simulationWith(
+          probabilities: {
+            'homeWin': 0.42,
+            'draw': 0.25,
+            'awayWin': 0.33,
+            'over15': 0.71,
+            'over25': 0.48,
+            'under25': 0.52,
+            'over35': 0.26,
+            'under35': 0.74,
+            'bttsYes': 0.49,
+            'bttsNo': 0.51,
+          },
+          fairOdds: {
+            'over15': 1.41,
+            'under35': 1.36,
+          },
+        ),
+        minimumProbabilityDecimal: 0.68,
+      );
+
+      expect(selection, isNotNull);
+      expect((selection!['phoenixTip'] as Map)['marketKey'], 'under35');
+    });
+
+    test('allows team goals and DNB only when their pricing gates are met', () {
+      final teamGoals = service.selectForFixture(
+        fixtureId: 'team-goals-fixture',
+        simulation: simulationWith(
+          probabilities: {
+            'homeWin': 0.45,
+            'draw': 0.22,
+            'awayWin': 0.33,
+            'over25': 0.52,
+            'under25': 0.48,
+            'bttsYes': 0.56,
+            'bttsNo': 0.44,
+            'homeOver15': 0.70,
+          },
+          fairOdds: {'homeOver15': 1.45},
+        ),
+        minimumProbabilityDecimal: 0.68,
+      );
+      expect((teamGoals!['phoenixTip'] as Map)['marketKey'], 'homeOver15');
+
+      final dnb = service.selectForFixture(
+        fixtureId: 'dnb-fixture',
+        simulation: simulationWith(
+          probabilities: {
+            'homeWin': 0.50,
+            'draw': 0.25,
+            'awayWin': 0.25,
+            'dnbHome': 0.68,
+            'over25': 0.40,
+            'under25': 0.60,
+            'bttsYes': 0.45,
+            'bttsNo': 0.55,
+          },
+          fairOdds: {'homeWin': 2.0, 'dnbHome': 1.47},
+        ),
+        minimumProbabilityDecimal: 0.68,
+      );
+      expect((dnb!['phoenixTip'] as Map)['marketKey'], 'dnbHome');
+    });
 
     test(
       'qualifiesForTip is false when simulations are 0, even if a core '
@@ -230,7 +290,7 @@ void main() {
               'bttsYes': 0.80,
               'bttsNo': 0.20,
             },
-            fairOdds: {'bttsYes': 1.30},
+            fairOdds: {'bttsYes': 1.40},
           ),
           minimumProbabilityDecimal: 0.30,
         );

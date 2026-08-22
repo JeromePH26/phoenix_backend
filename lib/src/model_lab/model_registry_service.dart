@@ -43,7 +43,13 @@ class ModelRegistryService {
       leagueId: null,
       market: market,
       modelType: 'global_baseline',
-      featureConfig: const {'features': 'attackWeightBlend'},
+      featureConfig: {
+        'features': 'attackWeightBlend',
+        'market': market,
+        'engineFamily': 'poisson_monte_carlo_derived',
+        'note':
+            'Marktspezifischer Champion; lernt getrennt auf identischen, zeitlich sauberen Pre-Match-Snapshots.',
+      },
       weights: weights.toJson(),
       trainingCount: 0,
       validationCount: 0,
@@ -81,12 +87,14 @@ class ModelRegistryService {
   Future<Map<String, Object?>?> currentChampion({
     String? leagueId,
     required String market,
-  }) => database.championModel(leagueId: leagueId, market: market);
+  }) =>
+      database.championModel(leagueId: leagueId, market: market);
 
   Future<List<Map<String, Object?>>> currentChallengers({
     String? leagueId,
     required String market,
-  }) => database.challengerModels(leagueId: leagueId, market: market);
+  }) =>
+      database.challengerModels(leagueId: leagueId, market: market);
 
   /// Batch-Variante von [currentChampion]/[currentChallengers] für den
   /// Model-Lab-Übersichts-Endpoint: ein einziger DB-Roundtrip für ALLE

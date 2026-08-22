@@ -118,6 +118,30 @@ class EngineReplica {
           classLabels: const ['over25', 'under25'],
           usedFallbackBaseline: goals.usedFallback,
         );
+      case LearningMarket.overUnder15:
+        final probabilities = PoissonMath.overUnderProbabilities(
+          goals.home,
+          goals.away,
+          1.5,
+        );
+        return EngineReplicaOutput(
+          market: market,
+          classProbabilities: [probabilities.over, probabilities.under],
+          classLabels: const ['over15', 'under15'],
+          usedFallbackBaseline: goals.usedFallback,
+        );
+      case LearningMarket.overUnder35:
+        final probabilities = PoissonMath.overUnderProbabilities(
+          goals.home,
+          goals.away,
+          3.5,
+        );
+        return EngineReplicaOutput(
+          market: market,
+          classProbabilities: [probabilities.over, probabilities.under],
+          classLabels: const ['over35', 'under35'],
+          usedFallbackBaseline: goals.usedFallback,
+        );
       case LearningMarket.btts:
         final probabilities = PoissonMath.bttsProbabilities(
           goals.home,
@@ -127,6 +151,82 @@ class EngineReplica {
           market: market,
           classProbabilities: [probabilities.yes, probabilities.no],
           classLabels: const ['bttsYes', 'bttsNo'],
+          usedFallbackBaseline: goals.usedFallback,
+        );
+      case LearningMarket.homeTeamOver15:
+        final probabilities = PoissonMath.teamOverUnderProbabilities(
+          goals.home,
+          1.5,
+        );
+        return EngineReplicaOutput(
+          market: market,
+          classProbabilities: [probabilities.over, probabilities.under],
+          classLabels: const ['homeOver15', 'homeUnder15'],
+          usedFallbackBaseline: goals.usedFallback,
+        );
+      case LearningMarket.awayTeamOver15:
+        final probabilities = PoissonMath.teamOverUnderProbabilities(
+          goals.away,
+          1.5,
+        );
+        return EngineReplicaOutput(
+          market: market,
+          classProbabilities: [probabilities.over, probabilities.under],
+          classLabels: const ['awayOver15', 'awayUnder15'],
+          usedFallbackBaseline: goals.usedFallback,
+        );
+      case LearningMarket.doubleChance1x:
+        final probabilities = PoissonMath.matchResultProbabilities(
+          goals.home,
+          goals.away,
+        );
+        final yes = probabilities.home + probabilities.draw;
+        return EngineReplicaOutput(
+          market: market,
+          classProbabilities: [yes, 1 - yes],
+          classLabels: const ['dc1x', 'dc1xNo'],
+          usedFallbackBaseline: goals.usedFallback,
+        );
+      case LearningMarket.doubleChanceX2:
+        final probabilities = PoissonMath.matchResultProbabilities(
+          goals.home,
+          goals.away,
+        );
+        final yes = probabilities.draw + probabilities.away;
+        return EngineReplicaOutput(
+          market: market,
+          classProbabilities: [yes, 1 - yes],
+          classLabels: const ['dcX2', 'dcX2No'],
+          usedFallbackBaseline: goals.usedFallback,
+        );
+      case LearningMarket.drawNoBetHome:
+        final probabilities = PoissonMath.matchResultProbabilities(
+          goals.home,
+          goals.away,
+        );
+        return EngineReplicaOutput(
+          market: market,
+          classProbabilities: [
+            probabilities.home,
+            probabilities.draw,
+            probabilities.away,
+          ],
+          classLabels: const ['won', 'push', 'lost'],
+          usedFallbackBaseline: goals.usedFallback,
+        );
+      case LearningMarket.drawNoBetAway:
+        final probabilities = PoissonMath.matchResultProbabilities(
+          goals.home,
+          goals.away,
+        );
+        return EngineReplicaOutput(
+          market: market,
+          classProbabilities: [
+            probabilities.away,
+            probabilities.draw,
+            probabilities.home,
+          ],
+          classLabels: const ['won', 'push', 'lost'],
           usedFallbackBaseline: goals.usedFallback,
         );
     }

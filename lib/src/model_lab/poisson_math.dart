@@ -93,4 +93,26 @@ class PoissonMath {
     final yes = (homeScores * awayScores).clamp(0.0, 1.0).toDouble();
     return (yes: yes, no: 1 - yes);
   }
+
+  /// P(Team erzielt mehr als [line] Tore) und Gegenwahrscheinlichkeit.
+  /// Die Berechnung nutzt dieselbe unabhängige Poisson-Annahme wie die
+  /// produktive Monte-Carlo-Simulation, nur deterministisch für Learning.
+  static ({double over, double under}) teamOverUnderProbabilities(
+    double lambda,
+    double line,
+  ) {
+    var over = 0.0;
+    var under = 0.0;
+    for (var goals = 0; goals <= maxGoalsPerSide; goals++) {
+      final probability = pmf(lambda, goals);
+      if (goals > line) {
+        over += probability;
+      } else {
+        under += probability;
+      }
+    }
+    final total = over + under;
+    if (total <= 0) return (over: 0.0, under: 0.0);
+    return (over: over / total, under: under / total);
+  }
 }

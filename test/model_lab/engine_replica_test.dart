@@ -24,7 +24,8 @@ void main() {
     });
 
     // Test 16 (Section 86): Missing Feature Test.
-    test('falls back to the neutral baseline instead of treating missing as 0', () {
+    test('falls back to the neutral baseline instead of treating missing as 0',
+        () {
       final goals = EngineReplica.expectedGoals(
         features: const {},
         weights: EngineWeightConfig.global,
@@ -57,7 +58,8 @@ void main() {
       expect(goals.away, lessThanOrEqualTo(3.80));
     });
 
-    test('a higher attackWeight shifts the lambda toward the own scoring rate', () {
+    test('a higher attackWeight shifts the lambda toward the own scoring rate',
+        () {
       const features = {
         'raw.homeGoalsForAverageHome': 2.0,
         'raw.homeGoalsAgainstAverageHome': 1.0,
@@ -106,7 +108,8 @@ void main() {
         weights: EngineWeightConfig.global,
       );
       // home = avg(3.0, 3.0) = 3.0, away = avg(0.3, 1.0) = 0.65
-      expect(output.classProbabilities[0], greaterThan(output.classProbabilities[2]));
+      expect(output.classProbabilities[0],
+          greaterThan(output.classProbabilities[2]));
     });
 
     test('BTTS yes/no probabilities always sum to ~1', () {
@@ -133,6 +136,29 @@ void main() {
       );
       final sum = output.classProbabilities.reduce((a, b) => a + b);
       expect(sum, closeTo(1.0, 1e-6));
+    });
+
+    test('every public market family has a normalized Champion baseline', () {
+      const features = {
+        'raw.homeGoalsForAverageHome': 1.6,
+        'raw.homeGoalsAgainstAverageHome': 1.0,
+        'raw.awayGoalsForAverageAway': 1.1,
+        'raw.awayGoalsAgainstAverageAway': 1.4,
+      };
+
+      for (final market in LearningMarket.values) {
+        final output = EngineReplica.evaluate(
+          market: market,
+          features: features,
+          weights: EngineWeightConfig.global,
+        );
+        expect(output.classProbabilities, isNotEmpty, reason: market.key);
+        expect(
+          output.classProbabilities.reduce((a, b) => a + b),
+          closeTo(1.0, 1e-6),
+          reason: market.key,
+        );
+      }
     });
   });
 }

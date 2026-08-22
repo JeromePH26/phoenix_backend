@@ -44,8 +44,28 @@ class LearningSample {
         return 2;
       case LearningMarket.overUnder25:
         return (homeGoals + awayGoals) > 2.5 ? 0 : 1;
+      case LearningMarket.overUnder15:
+        return (homeGoals + awayGoals) > 1.5 ? 0 : 1;
+      case LearningMarket.overUnder35:
+        return (homeGoals + awayGoals) > 3.5 ? 0 : 1;
       case LearningMarket.btts:
         return (homeGoals >= 1 && awayGoals >= 1) ? 0 : 1;
+      case LearningMarket.homeTeamOver15:
+        return homeGoals > 1.5 ? 0 : 1;
+      case LearningMarket.awayTeamOver15:
+        return awayGoals > 1.5 ? 0 : 1;
+      case LearningMarket.doubleChance1x:
+        return homeGoals >= awayGoals ? 0 : 1;
+      case LearningMarket.doubleChanceX2:
+        return awayGoals >= homeGoals ? 0 : 1;
+      case LearningMarket.drawNoBetHome:
+        if (homeGoals > awayGoals) return 0;
+        if (homeGoals == awayGoals) return 1;
+        return 2;
+      case LearningMarket.drawNoBetAway:
+        if (awayGoals > homeGoals) return 0;
+        if (homeGoals == awayGoals) return 1;
+        return 2;
     }
   }
 

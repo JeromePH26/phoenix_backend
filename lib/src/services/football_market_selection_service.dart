@@ -5,7 +5,7 @@ class FootballMarketSelectionService {
 
   final PhoenixDatabase database;
 
-  static const modelVersion = 'market_selection_v10_no_dc12';
+  static const modelVersion = 'market_selection_v11_balanced_markets';
 
   Future<Map<String, Object?>> select({
     required int phaseTwoScanRunId,
@@ -96,6 +96,12 @@ class FootballMarketSelectionService {
           label: 'Doppelte Chance X2',
           probability: probabilities['dcX2'],
           fairOdds: fairOdds['dcX2'],
+        ),
+        _candidate(
+          key: 'over15',
+          label: 'Über 1,5 Tore',
+          probability: probabilities['over15'],
+          fairOdds: fairOdds['over15'],
         ),
         _candidate(
           key: 'over25',
@@ -191,22 +197,30 @@ class FootballMarketSelectionService {
         return pB.compareTo(pA);
       });
 
-      // Produktregel (verbindlich): Die PHÖNIX-Hauptempfehlung (phoenixTip)
-      // darf AUSSCHLIESSLICH aus 1X2, BTTS oder Über/Unter 2,5 stammen.
-      // Doppelte Chance, Draw No Bet, Team-Torlinien, erweiterte Linien
-      // (3,5 Tore) und Kombimärkte dürfen niemals der veröffentlichte Tipp
-      // sein - sie bleiben ausschließlich informativ im Marktcheck
-      // (topMarkets/allMarkets) sichtbar. displayTipKeys steuert nur diese
-      // informative Ansicht, mainTipKeys steuert ausschließlich, was
-      // überhaupt als phoenixTip infrage kommt.
+      // PHÖNIX bewertet mehrere sinnvolle, einzeln abrechenbare
+      // Markt-Familien. Kombis, DC 12, 0,5-Linien und Handicaps bleiben
+      // ausdrücklich ausgeschlossen: Sie erzeugen entweder künstlich hohe
+      // Wahrscheinlichkeiten oder waren bei Providerquoten nicht verlässlich.
+      // Die Mindestquote je Markt verhindert zusätzlich, dass triviale
+      // Absicherungen (z. B. Ü0,5 oder ein extrem niedriges U3,5) den Tipp
+      // nur wegen ihrer hohen Wahrscheinlichkeit verdrängen.
       const mainTipKeys = <String>{
         'homeWin',
         'draw',
         'awayWin',
+        'dc1x',
+        'dcX2',
+        'over15',
         'over25',
         'under25',
+        'over35',
+        'under35',
         'bttsYes',
         'bttsNo',
+        'homeOver15',
+        'awayOver15',
+        'dnbHome',
+        'dnbAway',
       };
       const displayTipKeys = <String>{
         'homeWin',
@@ -214,8 +228,11 @@ class FootballMarketSelectionService {
         'awayWin',
         'dc1x',
         'dcX2',
+        'over15',
         'over25',
         'under25',
+        'over35',
+        'under35',
         'bttsYes',
         'bttsNo',
         'homeOver15',
@@ -242,11 +259,16 @@ class FootballMarketSelectionService {
         return mainTipKeys.contains(key) &&
             !isContradictoryDraw(candidate) &&
             probability >= minimumProbabilityDecimal.clamp(0.0, 1.0) &&
-            fair >= 1.20;
+            fair >= _minimumFairOddsFor(key);
       }).toList(growable: false);
       final fallbackCoreMain = candidates.where((candidate) {
         final key = _string(candidate['key']);
-        return mainTipKeys.contains(key) && !isContradictoryDraw(candidate);
+        final probability = _asProbability(candidate['probability']);
+        final fair = _number(candidate['fairOdds']) ?? 0;
+        return mainTipKeys.contains(key) &&
+            !isContradictoryDraw(candidate) &&
+            probability >= 0.50 &&
+            fair >= _minimumFairOddsFor(key);
       }).toList(growable: false);
 
       int byScoreThenProbability(
@@ -260,10 +282,8 @@ class FootballMarketSelectionService {
             .compareTo(_number(a['probability']) ?? 0);
       }
 
-      // rankedMain bestimmt AUSSCHLIESSLICH den phoenixTip. Bleibt sie leer
-      // (kein Kernmarkt mit verwertbarer Wahrscheinlichkeit), gibt es
-      // absichtlich keine Empfehlung für dieses Fixture - keine DC/Kombi-
-      // Notlösung mehr.
+      // rankedMain bestimmt den einen PHÖNIX-Tipp. Die Auswahl ist breiter
+      // als früher, aber nie eine Notlösung mit Kombi, DC 12 oder 0,5-Linie.
       final rankedMain = List<Map<String, Object?>>.from(
         selectableMain.isNotEmpty ? selectableMain : fallbackCoreMain,
       )..sort(byScoreThenProbability);
@@ -277,8 +297,8 @@ class FootballMarketSelectionService {
       )..sort(byScoreThenProbability);
 
       if (rankedMain.isEmpty) {
-        // Kein Kernmarkt (1X2/BTTS/O-U 2,5) mit verwertbarer Wahrscheinlichkeit:
-        // keine künstliche Empfehlung erzeugen und den Scan robust fortsetzen.
+        // Kein sinnvoller, einzeln abrechenbarer Markt: lieber keine
+        // künstliche Empfehlung als eine Niedrigquoten-Absicherung.
         return null;
       }
 
@@ -407,9 +427,9 @@ class FootballMarketSelectionService {
   }
 
   /// Balanciert Sicherheit und Aussagekraft. Ohne diese Gewichtung gewinnt
-  /// fast immer die mathematisch breiteste Absicherung (1X/X2 oder Over 1.5),
-  /// obwohl ein spezifischerer Markt nur wenige Prozentpunkte dahinterliegt.
-  /// Die Modellwahrscheinlichkeit selbst bleibt dabei vollständig unverändert.
+  /// fast immer die mathematisch breiteste Absicherung (1X/X2 oder Ü1,5),
+  /// obwohl ein konkreter Markt nur wenige Prozentpunkte dahinterliegt. Die
+  /// Modellwahrscheinlichkeit selbst bleibt dabei vollständig unverändert.
   double _selectionScore(Map<String, Object?> candidate) {
     final key = _string(candidate['key']);
     final probability = _asProbability(candidate['probability']);
@@ -419,12 +439,8 @@ class FootballMarketSelectionService {
     var specificityAdjustment = 0.0;
     if (const {'over05', 'under55'}.contains(key)) {
       specificityAdjustment = -0.20;
-    } else if (const {
-      'over15',
-      'dc1x',
-      'dcX2',
-    }.contains(key)) {
-      specificityAdjustment = -0.075;
+    } else if (const {'over15', 'dc1x', 'dcX2'}.contains(key)) {
+      specificityAdjustment = -0.09;
     } else if (key == 'dc12' || key == 'under45') {
       specificityAdjustment = -0.04;
     } else if (key.startsWith('combo')) {
@@ -433,6 +449,8 @@ class FootballMarketSelectionService {
       'homeWin',
       'draw',
       'awayWin',
+      'over35',
+      'under35',
       'over25',
       'under25',
       'bttsYes',
@@ -453,6 +471,17 @@ class FootballMarketSelectionService {
             ? -0.04
             : 0.0;
     return probability + specificityAdjustment + oddsAdjustment;
+  }
+
+  /// Marktbezogene Mindestquoten sind ein Qualitätsfilter, keine implizite
+  /// Value-Berechnung. Sie halten nur Märkte fern, deren Informationsgehalt
+  /// für einen öffentlich sichtbaren Tipp zu niedrig wäre.
+  double _minimumFairOddsFor(String key) {
+    if (const {'dnbHome', 'dnbAway'}.contains(key)) return 1.30;
+    if (const {'over15', 'dc1x', 'dcX2', 'under35'}.contains(key)) {
+      return 1.35;
+    }
+    return 1.40;
   }
 
   int _trustScore({
