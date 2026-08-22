@@ -31,12 +31,16 @@ Future<void> main() async {
     ..idleTimeout = const Duration(seconds: 30);
 
   try {
-    // Shadow Predictions täglich aktualisieren (Section 33-36): neue
-    // Fixtures mit Snapshot vor Kickoff erhalten Shadow Predictions, bereits
-    // beendete Matches werden abgerechnet. Läuft unabhängig vom Wochentag,
-    // da neue Matches jeden Tag gescannt werden.
-    await _post(client, config, '/api/admin/model-lab/shadow-predictions/generate');
-    await _post(client, config, '/api/admin/model-lab/shadow-predictions/settle');
+    // Der Tageszyklus rechnet zuerst beendete Spiele ab und erzeugt danach
+    // neue, strikt Pre-Match-basierte Shadows. Ein einzelner serverseitiger
+    // Ablauf verhindert, dass ein manueller Start und der Cron sich
+    // gegenseitig überholen.
+    final autopilot = await _post(
+      client,
+      config,
+      '/api/admin/model-lab/autopilot/run',
+    );
+    stdout.writeln('[PHOENIX MODEL LAB CRON] Tageszyklus: $autopilot');
 
     final weekday = nowUtc.weekday; // Grobe UTC-Schätzung; die Server-Routen
     // selbst prüfen zusätzlich in Europe/Berlin (siehe ModelLabSchedule).
@@ -92,7 +96,9 @@ Future<Map<String, dynamic>> _post(
   try {
     decoded = jsonDecode(body);
   } catch (_) {
-    throw HttpException('Ungültige Serverantwort (${response.statusCode}): $body', uri: uri);
+    throw HttpException(
+        'Ungültige Serverantwort (${response.statusCode}): $body',
+        uri: uri);
   }
 
   if (response.statusCode >= 500) {
@@ -103,7 +109,8 @@ Future<Map<String, dynamic>> _post(
 }
 
 class _ModelLabCronConfig {
-  const _ModelLabCronConfig({required this.backendUrl, required this.adminToken});
+  const _ModelLabCronConfig(
+      {required this.backendUrl, required this.adminToken});
 
   final String backendUrl;
   final String adminToken;

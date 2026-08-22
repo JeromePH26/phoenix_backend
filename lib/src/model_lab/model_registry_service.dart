@@ -90,6 +90,22 @@ class ModelRegistryService {
   }) =>
       database.championModel(leagueId: leagueId, market: market);
 
+  /// Liefert die tatsächlich verfügbare Produktionsbasis für eine Liga. Eine
+  /// Liga bekommt erst nach ausreichend vielen sauber abgerechneten Spielen
+  /// einen eigenen Champion. Bis dahin ist der globale Champion bewusst die
+  /// Rückfallbasis – auch für Shadow Predictions. Ohne diesen Fallback würden
+  /// neue Ligen zwar einen Snapshot haben, aber gar keine Messwerte sammeln.
+  Future<Map<String, Object?>?> productionChampion({
+    required String leagueId,
+    required String market,
+  }) async {
+    final leagueChampion = await currentChampion(
+      leagueId: leagueId,
+      market: market,
+    );
+    return leagueChampion ?? await database.globalBaselineModel(market);
+  }
+
   Future<List<Map<String, Object?>>> currentChallengers({
     String? leagueId,
     required String market,

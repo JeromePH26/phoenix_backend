@@ -12,6 +12,7 @@ import '../model_lab/learning_run_service.dart';
 import '../model_lab/league_market_status.dart';
 import '../model_lab/metrics.dart';
 import '../model_lab/model_lab_schedule.dart';
+import '../model_lab/model_lab_autopilot_service.dart';
 import '../model_lab/model_registry_service.dart';
 import '../model_lab/monthly_review_service.dart';
 import '../model_lab/shadow_prediction_service.dart';
@@ -550,6 +551,37 @@ class ModelLabRoutes {
           config: modelLabConfig,
         ).generatePendingShadowPredictions();
         return jsonResponse({'status': 'completed', 'created': created});
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      } finally {
+        _shadowActionInProgress = null;
+      }
+    });
+
+    // Der produktionssichere Tageszyklus: Outcomes abrechnen, danach neue
+    // Shadows einfrieren. Keine Promotion, keine sichtbaren Tipps und keine
+    // zusätzlichen Provider-Aufrufe.
+    router.post('/autopilot/run', (Request request) async {
+      if (!_isAdmin(request)) return _unauthorized();
+      if (!await database.moduleEnabled('model_lab_learning')) {
+        return jsonResponse({
+          'error':
+              'Modul "Model Lab Learning" ist deaktiviert (App Control → Module).',
+        }, statusCode: 503);
+      }
+      if (_shadowActionInProgress != null) {
+        return jsonResponse({
+          'error':
+              'Bereits eine Shadow-Aktion aktiv ("$_shadowActionInProgress"). Bitte warten.',
+        }, statusCode: 409);
+      }
+      _shadowActionInProgress = 'autopilot';
+      try {
+        final result = await ModelLabAutopilotService(
+          database: database,
+          config: modelLabConfig,
+        ).run(triggerType: 'manual');
+        return jsonResponse(result, statusCode: 202);
       } catch (error) {
         return jsonResponse({'error': error.toString()}, statusCode: 500);
       } finally {

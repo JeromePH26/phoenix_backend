@@ -10,7 +10,9 @@ import 'model_registry_service.dart';
 /// (und optional den vorherigen Champion, Section 36) eine Vorhersage auf
 /// Basis DESSELBEN bereits gespeicherten Pre-Match-Snapshots wie die
 /// produktive Engine - ohne zusätzliche API-Football-/KI-Aufrufe
-/// (Section 34/84).
+/// (Section 34/84). Hat eine Liga noch keinen eigenen Champion, wird der
+/// globale Champion als feste Rückfallbasis verwendet. So beginnt die
+/// Datensammlung sofort, ohne einen unreifen Liga-Champion zu erfinden.
 class ShadowPredictionService {
   ShadowPredictionService({required this.database, required this.config});
 
@@ -46,11 +48,11 @@ class ShadowPredictionService {
       );
 
       for (final market in LearningMarket.values) {
-        final champion = await registry.currentChampion(
+        final champion = await registry.productionChampion(
           leagueId: leagueId,
           market: market.key,
         );
-        final models = <Map<String, Object?>>[
+        final candidates = <Map<String, Object?>>[
           if (champion != null) champion,
           ...await registry.currentChallengers(
             leagueId: leagueId,
@@ -70,7 +72,16 @@ class ShadowPredictionService {
               ),
         ];
 
-        for (final model in models) {
+        // Ein Modell kann durch einen späteren Liga-Champion und die
+        // Rückfallbasis theoretisch doppelt in der Liste landen. Pro
+        // fixture×market darf es exakt eine Shadow Prediction geben.
+        final modelsById = <int, Map<String, Object?>>{};
+        for (final model in candidates) {
+          final modelId = model['id'];
+          if (modelId is int) modelsById[modelId] = model;
+        }
+
+        for (final model in modelsById.values) {
           final modelId = model['id'] as int;
           final weights = registry.weightsFromModel(model);
           final output = EngineReplica.evaluate(
@@ -79,7 +90,7 @@ class ShadowPredictionService {
             weights: weights,
           );
 
-          await database.upsertShadowPrediction(
+          final inserted = await database.upsertShadowPrediction(
             modelVersionId: modelId,
             fixtureId: fixtureId,
             leagueId: leagueId,
@@ -89,7 +100,7 @@ class ShadowPredictionService {
             classLabels: output.classLabels,
             classProbabilities: output.classProbabilities,
           );
-          created += 1;
+          if (inserted) created += 1;
         }
       }
     }

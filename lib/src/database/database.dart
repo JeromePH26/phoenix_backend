@@ -4917,7 +4917,9 @@ class PhoenixDatabase {
     // von mehr als einer Minute im Control Center.
     final total = rows.isEmpty
         ? 0
-        : int.tryParse(rows.first.toColumnMap()['total_count']?.toString() ?? '') ?? 0;
+        : int.tryParse(
+                rows.first.toColumnMap()['total_count']?.toString() ?? '') ??
+            0;
 
     final tips = rows.map((row) {
       final value = Map<String, Object?>.from(row.toColumnMap());
@@ -6780,7 +6782,10 @@ class PhoenixDatabase {
         .toList();
   }
 
-  Future<void> upsertShadowPrediction({
+  /// Speichert eine Shadow Prediction idempotent und meldet zurück, ob dabei
+  /// wirklich eine neue Zeile entstanden ist. Damit sind Cron-Protokoll und
+  /// Monitoring nach Wiederholungen/Deploys korrekt statt künstlich erhöht.
+  Future<bool> upsertShadowPrediction({
     required int modelVersionId,
     required String fixtureId,
     required String leagueId,
@@ -6791,7 +6796,7 @@ class PhoenixDatabase {
     required List<double> classProbabilities,
   }) async {
     final db = await connection();
-    await db.execute(
+    final result = await db.execute(
       Sql.named('''
         INSERT INTO phoenix_shadow_predictions (
           model_version_id, fixture_id, league_id, market,
@@ -6802,6 +6807,7 @@ class PhoenixDatabase {
           CAST(@class_labels AS JSONB), CAST(@class_probabilities AS JSONB)
         )
         ON CONFLICT (model_version_id, fixture_id, market) DO NOTHING
+        RETURNING id
       '''),
       parameters: {
         'model_version_id': modelVersionId,
@@ -6814,6 +6820,7 @@ class PhoenixDatabase {
         'class_probabilities': jsonEncode(classProbabilities),
       },
     );
+    return result.isNotEmpty;
   }
 
   /// Fixtures, für die bereits mind. ein aktiver Champion/Challenger eine
