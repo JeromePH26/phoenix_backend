@@ -576,6 +576,7 @@ class ApiRoutes {
         return jsonResponse({
           'status': status['status'],
           'message': status['message'],
+          'maintenanceUntil': status['maintenance_until'],
         });
       } catch (error) {
         return jsonResponse({'error': error.toString()}, statusCode: 500);

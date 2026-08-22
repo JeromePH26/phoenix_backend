@@ -1008,6 +1008,8 @@ class ControlCenterRoutes {
       final status = body['status']?.toString().trim().toUpperCase() ?? '';
       final reason = body['reason']?.toString().trim() ?? '';
       final message = body['message']?.toString().trim();
+      final hasMaintenanceUntilKey = body.containsKey('maintenanceUntil');
+      final maintenanceUntilRaw = body['maintenanceUntil']?.toString().trim();
 
       const validStatuses = {'ACTIVE', 'MAINTENANCE', 'DISABLED'};
       if (!validStatuses.contains(status)) {
@@ -1018,12 +1020,22 @@ class ControlCenterRoutes {
       if (reason.isEmpty) {
         return jsonResponse({'error': 'reason ist erforderlich.'}, statusCode: 400);
       }
+      DateTime? maintenanceUntil;
+      if (hasMaintenanceUntilKey && maintenanceUntilRaw != null && maintenanceUntilRaw.isNotEmpty) {
+        maintenanceUntil = DateTime.tryParse(maintenanceUntilRaw);
+        if (maintenanceUntil == null) {
+          return jsonResponse({'error': 'maintenanceUntil ist kein gültiges Datum.'}, statusCode: 400);
+        }
+      }
 
       final previous = await database.appControlStatus();
       final updated = await database.setAppControlStatus(
         status: status,
         message: (message?.isEmpty ?? true) ? null : message,
         updatedBy: actor.login,
+        maintenanceUntil: hasMaintenanceUntilKey
+            ? maintenanceUntil
+            : PhoenixDatabase.unsetSentinel,
       );
 
       await database.insertAdminAuditLog(

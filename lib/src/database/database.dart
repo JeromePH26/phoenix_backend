@@ -1747,10 +1747,12 @@ class PhoenixDatabase {
       ON admin_audit_log (employee_id, created_at DESC)
     ''');
 
-    // Single-row App-Status (Section 39/81: ACTIVE/MAINTENANCE/DISABLED),
-    // von der Flutter-App noch nicht gelesen - Control Center kann den
-    // Status bereits setzen/anzeigen, die Anbindung der App selbst ist ein
-    // separater, noch nicht umgesetzter Schritt.
+    // Single-row App-Status (Section 39/81: ACTIVE/MAINTENANCE/DISABLED).
+    // Wird inzwischen von phoenixflt gelesen (fetchRemoteStatus(), Stand
+    // 2026-08-19) - betrifft aber ausschließlich, was in der App angezeigt
+    // wird. Kein Backend-Job (Daily Pipeline, Settlement, Live-Monitor)
+    // prüft diesen Status; Backend-Arbeit läuft unabhängig weiter
+    // (Section 22 AN2: "klar unterscheiden").
     await db.execute('''
       CREATE TABLE IF NOT EXISTS app_control_state (
         id INTEGER PRIMARY KEY DEFAULT 1,
@@ -1766,6 +1768,12 @@ class PhoenixDatabase {
       INSERT INTO app_control_state (id, status)
       VALUES (1, 'ACTIVE')
       ON CONFLICT (id) DO NOTHING
+    ''');
+    // Section 22 (AN2): "Wartungsmodus mit ... geplantem Ende" - rein
+    // informativ, kein automatischer Rückschalter dahinter.
+    await db.execute('''
+      ALTER TABLE app_control_state
+      ADD COLUMN IF NOT EXISTS maintenance_until TIMESTAMPTZ
     ''');
   }
 
@@ -8204,12 +8212,19 @@ class PhoenixDatabase {
   Future<Map<String, Object?>> appControlStatus() async {
     final db = await connection();
     final result = await db.execute('''
-      SELECT status, message, updated_at::text AS updated_at, updated_by
+      SELECT status, message, updated_at::text AS updated_at, updated_by,
+        maintenance_until::text AS maintenance_until
       FROM app_control_state
       WHERE id = 1
     ''');
     if (result.isEmpty) {
-      return {'status': 'ACTIVE', 'message': null, 'updatedAt': null, 'updatedBy': null};
+      return {
+        'status': 'ACTIVE',
+        'message': null,
+        'updatedAt': null,
+        'updatedBy': null,
+        'maintenance_until': null,
+      };
     }
     return Map<String, Object?>.from(result.first.toColumnMap());
   }
@@ -8218,6 +8233,7 @@ class PhoenixDatabase {
     required String status,
     String? message,
     required String updatedBy,
+    Object? maintenanceUntil = unsetSentinel,
   }) async {
     final db = await connection();
     final result = await db.execute(
@@ -8226,14 +8242,18 @@ class PhoenixDatabase {
           status = @status,
           message = @message,
           updated_at = NOW(),
-          updated_by = @updated_by
+          updated_by = @updated_by,
+          maintenance_until = CASE WHEN @maintenance_until_set THEN @maintenance_until ELSE maintenance_until END
         WHERE id = 1
-        RETURNING status, message, updated_at::text AS updated_at, updated_by
+        RETURNING status, message, updated_at::text AS updated_at, updated_by,
+          maintenance_until::text AS maintenance_until
       '''),
       parameters: {
         'status': status,
         'message': message,
         'updated_by': updatedBy,
+        'maintenance_until_set': !identical(maintenanceUntil, unsetSentinel),
+        'maintenance_until': identical(maintenanceUntil, unsetSentinel) ? null : maintenanceUntil,
       },
     );
     return Map<String, Object?>.from(result.first.toColumnMap());
