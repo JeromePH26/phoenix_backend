@@ -5,7 +5,7 @@ class FootballMarketSelectionService {
 
   final PhoenixDatabase database;
 
-  static const modelVersion = 'market_selection_v11_balanced_markets';
+  static const modelVersion = 'market_selection_v12_team_goal_lines';
 
   Future<Map<String, Object?>> select({
     required int phaseTwoScanRunId,
@@ -134,10 +134,46 @@ class FootballMarketSelectionService {
           fairOdds: fairOdds['homeOver15'],
         ),
         _candidate(
+          key: 'homeUnder15',
+          label: 'Heimteam unter 1,5 Tore',
+          probability: probabilities['homeUnder15'],
+          fairOdds: fairOdds['homeUnder15'],
+        ),
+        _candidate(
           key: 'awayOver15',
           label: 'Auswärtsteam über 1,5 Tore',
           probability: probabilities['awayOver15'],
           fairOdds: fairOdds['awayOver15'],
+        ),
+        _candidate(
+          key: 'awayUnder15',
+          label: 'Auswärtsteam unter 1,5 Tore',
+          probability: probabilities['awayUnder15'],
+          fairOdds: fairOdds['awayUnder15'],
+        ),
+        _candidate(
+          key: 'homeOver25',
+          label: 'Heimteam über 2,5 Tore',
+          probability: probabilities['homeOver25'],
+          fairOdds: fairOdds['homeOver25'],
+        ),
+        _candidate(
+          key: 'homeUnder25',
+          label: 'Heimteam unter 2,5 Tore',
+          probability: probabilities['homeUnder25'],
+          fairOdds: fairOdds['homeUnder25'],
+        ),
+        _candidate(
+          key: 'awayOver25',
+          label: 'Auswärtsteam über 2,5 Tore',
+          probability: probabilities['awayOver25'],
+          fairOdds: fairOdds['awayOver25'],
+        ),
+        _candidate(
+          key: 'awayUnder25',
+          label: 'Auswärtsteam unter 2,5 Tore',
+          probability: probabilities['awayUnder25'],
+          fairOdds: fairOdds['awayUnder25'],
         ),
       ];
 
@@ -218,7 +254,13 @@ class FootballMarketSelectionService {
         'bttsYes',
         'bttsNo',
         'homeOver15',
+        'homeUnder15',
         'awayOver15',
+        'awayUnder15',
+        'homeOver25',
+        'homeUnder25',
+        'awayOver25',
+        'awayUnder25',
         'dnbHome',
         'dnbAway',
       };
@@ -236,7 +278,13 @@ class FootballMarketSelectionService {
         'bttsYes',
         'bttsNo',
         'homeOver15',
+        'homeUnder15',
         'awayOver15',
+        'awayUnder15',
+        'homeOver25',
+        'homeUnder25',
+        'awayOver25',
+        'awayUnder25',
         'dnbHome',
         'dnbAway',
       };
@@ -456,7 +504,13 @@ class FootballMarketSelectionService {
       'bttsYes',
       'bttsNo',
       'homeOver15',
+      'homeUnder15',
       'awayOver15',
+      'awayUnder15',
+      'homeOver25',
+      'homeUnder25',
+      'awayOver25',
+      'awayUnder25',
       'dnbHome',
       'dnbAway',
     }.contains(key)) {

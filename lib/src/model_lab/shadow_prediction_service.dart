@@ -169,8 +169,20 @@ class ShadowPredictionService {
         return (homeGoals >= 1 && awayGoals >= 1) ? 0 : 1;
       case LearningMarket.homeTeamOver15:
         return homeGoals > 1.5 ? 0 : 1;
+      case LearningMarket.homeTeamUnder15:
+        return homeGoals <= 1.5 ? 0 : 1;
       case LearningMarket.awayTeamOver15:
         return awayGoals > 1.5 ? 0 : 1;
+      case LearningMarket.awayTeamUnder15:
+        return awayGoals <= 1.5 ? 0 : 1;
+      case LearningMarket.homeTeamOver25:
+        return homeGoals > 2.5 ? 0 : 1;
+      case LearningMarket.homeTeamUnder25:
+        return homeGoals <= 2.5 ? 0 : 1;
+      case LearningMarket.awayTeamOver25:
+        return awayGoals > 2.5 ? 0 : 1;
+      case LearningMarket.awayTeamUnder25:
+        return awayGoals <= 2.5 ? 0 : 1;
       case LearningMarket.doubleChance1x:
         return homeGoals >= awayGoals ? 0 : 1;
       case LearningMarket.doubleChanceX2:

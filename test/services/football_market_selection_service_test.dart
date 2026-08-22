@@ -82,7 +82,13 @@ void main() {
               'over35': 0.44,
               'under35': 0.56,
               'homeOver15': 0.55,
+              'homeUnder15': 0.45,
               'awayOver15': 0.45,
+              'awayUnder15': 0.55,
+              'homeOver25': 0.24,
+              'homeUnder25': 0.76,
+              'awayOver25': 0.18,
+              'awayUnder25': 0.82,
               'over25': 0.60,
               'under25': 0.40,
               'bttsYes': 0.58,
@@ -97,7 +103,13 @@ void main() {
               'over35': 2.3,
               'under35': 1.8,
               'homeOver15': 1.82,
+              'homeUnder15': 2.22,
               'awayOver15': 2.22,
+              'awayUnder15': 1.82,
+              'homeOver25': 4.17,
+              'homeUnder25': 1.32,
+              'awayOver25': 5.56,
+              'awayUnder25': 1.22,
               'over25': 1.67,
               'under25': 2.5,
               'bttsYes': 1.72,
@@ -118,6 +130,12 @@ void main() {
         expect(allMarkets.any((m) => m['key'] == 'over15'), isTrue);
         expect(allMarkets.any((m) => m['key'] == 'under35'), isTrue);
         expect(allMarkets.any((m) => m['key'] == 'homeOver15'), isTrue);
+        expect(allMarkets.any((m) => m['key'] == 'homeUnder15'), isTrue);
+        expect(allMarkets.any((m) => m['key'] == 'awayUnder15'), isTrue);
+        expect(allMarkets.any((m) => m['key'] == 'homeOver25'), isTrue);
+        expect(allMarkets.any((m) => m['key'] == 'homeUnder25'), isTrue);
+        expect(allMarkets.any((m) => m['key'] == 'awayOver25'), isTrue);
+        expect(allMarkets.any((m) => m['key'] == 'awayUnder25'), isTrue);
       },
     );
 

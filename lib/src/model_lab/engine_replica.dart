@@ -164,6 +164,17 @@ class EngineReplica {
           classLabels: const ['homeOver15', 'homeUnder15'],
           usedFallbackBaseline: goals.usedFallback,
         );
+      case LearningMarket.homeTeamUnder15:
+        final probabilities = PoissonMath.teamOverUnderProbabilities(
+          goals.home,
+          1.5,
+        );
+        return EngineReplicaOutput(
+          market: market,
+          classProbabilities: [probabilities.under, probabilities.over],
+          classLabels: const ['homeUnder15', 'homeOver15'],
+          usedFallbackBaseline: goals.usedFallback,
+        );
       case LearningMarket.awayTeamOver15:
         final probabilities = PoissonMath.teamOverUnderProbabilities(
           goals.away,
@@ -173,6 +184,61 @@ class EngineReplica {
           market: market,
           classProbabilities: [probabilities.over, probabilities.under],
           classLabels: const ['awayOver15', 'awayUnder15'],
+          usedFallbackBaseline: goals.usedFallback,
+        );
+      case LearningMarket.awayTeamUnder15:
+        final probabilities = PoissonMath.teamOverUnderProbabilities(
+          goals.away,
+          1.5,
+        );
+        return EngineReplicaOutput(
+          market: market,
+          classProbabilities: [probabilities.under, probabilities.over],
+          classLabels: const ['awayUnder15', 'awayOver15'],
+          usedFallbackBaseline: goals.usedFallback,
+        );
+      case LearningMarket.homeTeamOver25:
+        final probabilities = PoissonMath.teamOverUnderProbabilities(
+          goals.home,
+          2.5,
+        );
+        return EngineReplicaOutput(
+          market: market,
+          classProbabilities: [probabilities.over, probabilities.under],
+          classLabels: const ['homeOver25', 'homeUnder25'],
+          usedFallbackBaseline: goals.usedFallback,
+        );
+      case LearningMarket.homeTeamUnder25:
+        final probabilities = PoissonMath.teamOverUnderProbabilities(
+          goals.home,
+          2.5,
+        );
+        return EngineReplicaOutput(
+          market: market,
+          classProbabilities: [probabilities.under, probabilities.over],
+          classLabels: const ['homeUnder25', 'homeOver25'],
+          usedFallbackBaseline: goals.usedFallback,
+        );
+      case LearningMarket.awayTeamOver25:
+        final probabilities = PoissonMath.teamOverUnderProbabilities(
+          goals.away,
+          2.5,
+        );
+        return EngineReplicaOutput(
+          market: market,
+          classProbabilities: [probabilities.over, probabilities.under],
+          classLabels: const ['awayOver25', 'awayUnder25'],
+          usedFallbackBaseline: goals.usedFallback,
+        );
+      case LearningMarket.awayTeamUnder25:
+        final probabilities = PoissonMath.teamOverUnderProbabilities(
+          goals.away,
+          2.5,
+        );
+        return EngineReplicaOutput(
+          market: market,
+          classProbabilities: [probabilities.under, probabilities.over],
+          classLabels: const ['awayUnder25', 'awayOver25'],
           usedFallbackBaseline: goals.usedFallback,
         );
       case LearningMarket.doubleChance1x:

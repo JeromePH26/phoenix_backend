@@ -7,7 +7,7 @@ class FootballSimulationService {
 
   final PhoenixDatabase database;
 
-  static const modelVersion = 'poisson_monte_carlo_v6_extended_markets';
+  static const modelVersion = 'poisson_monte_carlo_v7_team_goal_lines';
 
   Future<Map<String, Object?>> run({
     required int phaseTwoScanRunId,
@@ -135,11 +135,17 @@ class FootballSimulationService {
       hit('dcX2', draw || awayWin);
       hit('dnbHome', homeWin);
       hit('dnbAway', awayWin);
-      // Teamtore sind eine brauchbare, konkrete Alternative zu sehr breiten
-      // Absicherungen. Nur die 1,5-Linie wird als Empfehlungsmarkt erzeugt;
-      // 0,5 wäre fast immer eine nichtssagende Niedrigquote.
+      // Teamtore sind eine konkrete Alternative zu pauschalen Gesamtmärkten.
+      // 0,5-Linien bleiben bewusst ausgeschlossen, weil sie fast immer nur
+      // nichtssagende Niedrigquoten erzeugen.
       hit('homeOver15', homeGoals >= 2);
+      hit('homeUnder15', homeGoals <= 1);
       hit('awayOver15', awayGoals >= 2);
+      hit('awayUnder15', awayGoals <= 1);
+      hit('homeOver25', homeGoals >= 3);
+      hit('homeUnder25', homeGoals <= 2);
+      hit('awayOver25', awayGoals >= 3);
+      hit('awayUnder25', awayGoals <= 2);
       final goalDifference = homeGoals - awayGoals;
       // Europäisches Handicap ist ein Dreiweg-Markt. Für jede Linie sind
       // Heimsieg, Handicap-Remis und Auswärtssieg getrennte Quotenausgänge.

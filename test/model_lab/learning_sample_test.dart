@@ -176,6 +176,12 @@ void main() {
       expect(homeTwo.outcomeIndexFor(LearningMarket.overUnder15), 0);
       expect(homeTwo.outcomeIndexFor(LearningMarket.overUnder35), 1);
       expect(homeTwo.outcomeIndexFor(LearningMarket.homeTeamOver15), 0);
+      expect(homeTwo.outcomeIndexFor(LearningMarket.homeTeamUnder15), 1);
+      expect(homeTwo.outcomeIndexFor(LearningMarket.awayTeamUnder15), 0);
+      expect(homeTwo.outcomeIndexFor(LearningMarket.homeTeamOver25), 1);
+      expect(homeTwo.outcomeIndexFor(LearningMarket.homeTeamUnder25), 0);
+      expect(homeTwo.outcomeIndexFor(LearningMarket.awayTeamOver25), 1);
+      expect(homeTwo.outcomeIndexFor(LearningMarket.awayTeamUnder25), 0);
       expect(homeTwo.outcomeIndexFor(LearningMarket.doubleChance1x), 0);
       expect(homeTwo.outcomeIndexFor(LearningMarket.doubleChanceX2), 1);
       expect(draw.outcomeIndexFor(LearningMarket.drawNoBetHome), 1);

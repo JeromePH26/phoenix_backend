@@ -13,7 +13,13 @@ enum LearningMarket {
   overUnder35('over_under_3_5', 'Über/Unter 3,5 Tore'),
   btts('btts', 'Beide Teams treffen'),
   homeTeamOver15('home_team_over_1_5', 'Heimteam über 1,5 Tore'),
+  homeTeamUnder15('home_team_under_1_5', 'Heimteam unter 1,5 Tore'),
   awayTeamOver15('away_team_over_1_5', 'Auswärtsteam über 1,5 Tore'),
+  awayTeamUnder15('away_team_under_1_5', 'Auswärtsteam unter 1,5 Tore'),
+  homeTeamOver25('home_team_over_2_5', 'Heimteam über 2,5 Tore'),
+  homeTeamUnder25('home_team_under_2_5', 'Heimteam unter 2,5 Tore'),
+  awayTeamOver25('away_team_over_2_5', 'Auswärtsteam über 2,5 Tore'),
+  awayTeamUnder25('away_team_under_2_5', 'Auswärtsteam unter 2,5 Tore'),
   doubleChance1x('double_chance_1x', 'Doppelte Chance 1X'),
   doubleChanceX2('double_chance_x2', 'Doppelte Chance X2'),
   drawNoBetHome('draw_no_bet_home', 'Draw No Bet Heim'),
@@ -60,8 +66,20 @@ enum LearningMarket {
         return LearningMarket.btts;
       case 'homeOver15':
         return LearningMarket.homeTeamOver15;
+      case 'homeUnder15':
+        return LearningMarket.homeTeamUnder15;
       case 'awayOver15':
         return LearningMarket.awayTeamOver15;
+      case 'awayUnder15':
+        return LearningMarket.awayTeamUnder15;
+      case 'homeOver25':
+        return LearningMarket.homeTeamOver25;
+      case 'homeUnder25':
+        return LearningMarket.homeTeamUnder25;
+      case 'awayOver25':
+        return LearningMarket.awayTeamOver25;
+      case 'awayUnder25':
+        return LearningMarket.awayTeamUnder25;
       case 'dc1x':
         return LearningMarket.doubleChance1x;
       case 'dcX2':
