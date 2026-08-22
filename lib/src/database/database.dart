@@ -2045,6 +2045,35 @@ class PhoenixDatabase {
       CREATE INDEX IF NOT EXISTS idx_incidents_status
       ON incidents (status, started_at DESC)
     ''');
+    // Section 27 (AN2): "Auswirkungen" (impact_description, getrennt von
+    // affected_systems - dort steht WAS kaputt war, hier WIE es Nutzer
+    // getroffen hat) sowie freitextige Verknüpfung zu Jobs/API-Ausfällen
+    // und zu bereits verschickter Nutzerkommunikation. Freitext bewusst
+    // statt einer festen Fremdschlüssel-Beziehung: Jobs verteilen sich auf
+    // drei unterschiedliche Tabellen ohne gemeinsames ID-Schema, und ein
+    // API-Ausfall ist kein eigenständig erfasstes Ereignis.
+    await db.execute('''
+      ALTER TABLE incidents
+      ADD COLUMN IF NOT EXISTS impact_description TEXT NOT NULL DEFAULT '',
+      ADD COLUMN IF NOT EXISTS related_jobs_note TEXT NOT NULL DEFAULT '',
+      ADD COLUMN IF NOT EXISTS communication_note TEXT NOT NULL DEFAULT ''
+    ''');
+    // Section 27 (AN2): "Timeline" - chronologische Einzeleinträge während
+    // eines Incidents, zusätzlich zu Beginn/Ende.
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS incident_timeline_events (
+        id BIGSERIAL PRIMARY KEY,
+        incident_id BIGINT NOT NULL REFERENCES incidents(id),
+        occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        note TEXT NOT NULL,
+        created_by_employee_id BIGINT REFERENCES admin_employees(id),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_incident_timeline_events_incident
+      ON incident_timeline_events (incident_id, occurred_at)
+    ''');
 
     // Section 13: Sicherheits-Vorbereitung. Noch kein 2FA/Login-Historie-UI,
     // aber fehlgeschlagene Login-Versuche werden ab jetzt festgehalten, damit
@@ -9527,12 +9556,21 @@ class PhoenixDatabase {
     String severity = 'minor',
     String affectedSystems = '',
     int? responsibleEmployeeId,
+    String impactDescription = '',
+    String relatedJobsNote = '',
+    String communicationNote = '',
   }) async {
     final db = await connection();
     final result = await db.execute(
       Sql.named('''
-        INSERT INTO incidents (title, severity, affected_systems, responsible_employee_id)
-        VALUES (@title, @severity, @affected_systems, @responsible_employee_id)
+        INSERT INTO incidents (
+          title, severity, affected_systems, responsible_employee_id,
+          impact_description, related_jobs_note, communication_note
+        )
+        VALUES (
+          @title, @severity, @affected_systems, @responsible_employee_id,
+          @impact_description, @related_jobs_note, @communication_note
+        )
         RETURNING *
       '''),
       parameters: {
@@ -9540,6 +9578,9 @@ class PhoenixDatabase {
         'severity': severity,
         'affected_systems': affectedSystems,
         'responsible_employee_id': responsibleEmployeeId,
+        'impact_description': impactDescription,
+        'related_jobs_note': relatedJobsNote,
+        'communication_note': communicationNote,
       },
     );
     return _dateSafeRow(result.first.toColumnMap());
@@ -9552,6 +9593,9 @@ class PhoenixDatabase {
     String? actionsTaken,
     String? postmortem,
     int? responsibleEmployeeId,
+    String? impactDescription,
+    String? relatedJobsNote,
+    String? communicationNote,
     bool closeNow = false,
   }) async {
     final db = await connection();
@@ -9563,6 +9607,9 @@ class PhoenixDatabase {
           actions_taken = COALESCE(@actions_taken, actions_taken),
           postmortem = COALESCE(@postmortem, postmortem),
           responsible_employee_id = COALESCE(@responsible_employee_id, responsible_employee_id),
+          impact_description = COALESCE(@impact_description, impact_description),
+          related_jobs_note = COALESCE(@related_jobs_note, related_jobs_note),
+          communication_note = COALESCE(@communication_note, communication_note),
           ended_at = CASE WHEN @close_now THEN NOW() ELSE ended_at END,
           updated_at = NOW()
         WHERE id = @id
@@ -9575,11 +9622,56 @@ class PhoenixDatabase {
         'actions_taken': actionsTaken,
         'postmortem': postmortem,
         'responsible_employee_id': responsibleEmployeeId,
+        'impact_description': impactDescription,
+        'related_jobs_note': relatedJobsNote,
+        'communication_note': communicationNote,
         'close_now': closeNow,
       },
     );
     if (result.isEmpty) return null;
     return _dateSafeRow(result.first.toColumnMap());
+  }
+
+  // Section 27 (AN2): "Timeline" - chronologische Einzeleinträge.
+  Future<List<Map<String, Object?>>> listIncidentTimelineEvents(int incidentId) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT t.id, t.incident_id, t.occurred_at::text AS occurred_at, t.note,
+          t.created_by_employee_id, e.name AS created_by_employee_name,
+          t.created_at::text AS created_at
+        FROM incident_timeline_events t
+        LEFT JOIN admin_employees e ON e.id = t.created_by_employee_id
+        WHERE t.incident_id = @incident_id
+        ORDER BY t.occurred_at ASC
+      '''),
+      parameters: {'incident_id': incidentId},
+    );
+    return result.map((row) => Map<String, Object?>.from(row.toColumnMap())).toList();
+  }
+
+  Future<Map<String, Object?>> addIncidentTimelineEvent({
+    required int incidentId,
+    required String note,
+    DateTime? occurredAt,
+    int? createdByEmployeeId,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        INSERT INTO incident_timeline_events (incident_id, note, occurred_at, created_by_employee_id)
+        VALUES (@incident_id, @note, COALESCE(@occurred_at, NOW()), @created_by_employee_id)
+        RETURNING id, incident_id, occurred_at::text AS occurred_at, note,
+          created_by_employee_id, created_at::text AS created_at
+      '''),
+      parameters: {
+        'incident_id': incidentId,
+        'note': note,
+        'occurred_at': occurredAt,
+        'created_by_employee_id': createdByEmployeeId,
+      },
+    );
+    return Map<String, Object?>.from(result.first.toColumnMap());
   }
 
   // -- Control Center Security (Phase 6) -------------------------------------

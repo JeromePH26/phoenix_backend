@@ -93,6 +93,8 @@ class ControlCenterRoutes {
     router.post('/incidents', _createIncident);
     router.get('/incidents/<id|[0-9]+>', _incidentDetail);
     router.patch('/incidents/<id|[0-9]+>', _updateIncident);
+    router.get('/incidents/<id|[0-9]+>/timeline', _listIncidentTimeline);
+    router.post('/incidents/<id|[0-9]+>/timeline', _addIncidentTimelineEvent);
     router.get('/security/sessions', _listSessions);
     router.post('/security/sessions/<token>/revoke', _revokeSession);
     router.get('/security/failed-logins', _listFailedLogins);
@@ -2264,6 +2266,9 @@ class ControlCenterRoutes {
         severity: severity,
         affectedSystems: body['affectedSystems']?.toString() ?? '',
         responsibleEmployeeId: int.tryParse(body['responsibleEmployeeId']?.toString() ?? ''),
+        impactDescription: body['impactDescription']?.toString() ?? '',
+        relatedJobsNote: body['relatedJobsNote']?.toString() ?? '',
+        communicationNote: body['communicationNote']?.toString() ?? '',
       );
       await database.insertAdminAuditLog(
         employeeId: actor.id,
@@ -2321,6 +2326,9 @@ class ControlCenterRoutes {
         actionsTaken: body['actionsTaken']?.toString(),
         postmortem: body['postmortem']?.toString(),
         responsibleEmployeeId: int.tryParse(body['responsibleEmployeeId']?.toString() ?? ''),
+        impactDescription: body['impactDescription']?.toString(),
+        relatedJobsNote: body['relatedJobsNote']?.toString(),
+        communicationNote: body['communicationNote']?.toString(),
         closeNow: status == 'RESOLVED',
       );
       if (updated == null) {
@@ -2339,6 +2347,59 @@ class ControlCenterRoutes {
       return jsonResponse({'incident': _jsonSafe(updated)});
     } catch (error) {
       return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  // Section 27 (AN2): "Timeline" - chronologische Einzeleinträge zu einem
+  // Incident, zusätzlich zu Beginn/Ende/Maßnahmen/Postmortem.
+  Future<Response> _listIncidentTimeline(Request request, String id) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    if (!auth.employee!.hasPermission('incidents.view')) return _forbidden();
+
+    try {
+      final events = await database.listIncidentTimelineEvents(int.parse(id));
+      return jsonResponse({'events': events.map(_jsonSafe).toList()});
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 500);
+    }
+  }
+
+  Future<Response> _addIncidentTimelineEvent(Request request, String id) async {
+    final auth = await guard.authenticate(request);
+    if (!auth.isAuthenticated) return auth.unauthorizedResponse!;
+    final actor = auth.employee!;
+    if (!actor.hasPermission('incidents.manage')) return _forbidden();
+
+    try {
+      final body = jsonDecode(await request.readAsString());
+      if (body is! Map<String, dynamic>) {
+        return jsonResponse({'error': 'Ungültiger JSON-Body.'}, statusCode: 400);
+      }
+      final note = body['note']?.toString().trim() ?? '';
+      if (note.isEmpty) {
+        return jsonResponse({'error': 'note ist erforderlich.'}, statusCode: 400);
+      }
+      final occurredAtRaw = body['occurredAt']?.toString();
+      final event = await database.addIncidentTimelineEvent(
+        incidentId: int.parse(id),
+        note: note,
+        occurredAt: (occurredAtRaw == null || occurredAtRaw.isEmpty) ? null : DateTime.tryParse(occurredAtRaw),
+        createdByEmployeeId: actor.id,
+      );
+      await database.insertAdminAuditLog(
+        employeeId: actor.id,
+        employeeLogin: actor.login,
+        area: 'incidents',
+        objectType: 'incident',
+        objectId: id,
+        action: 'incident.timeline_event',
+        newValue: event,
+        ip: _clientIp(request),
+      );
+      return jsonResponse({'event': _jsonSafe(event)}, statusCode: 201);
+    } catch (error) {
+      return jsonResponse({'error': error.toString()}, statusCode: 400);
     }
   }
 
