@@ -1595,6 +1595,24 @@ class ApiRoutes {
       }
     });
 
+    // Sammlungsauswertung für Fokusligen, Beobachtungsliste und Datenpool.
+    // Dies ist absichtlich ein eigener Endpunkt: öffentliche Tipps/ROI und
+    // Shadow-Analysen werden nicht vermischt.
+    router.get('/api/admin/football/performance/collection-tiers', (
+      Request request,
+    ) async {
+      if (!_isAdmin(request)) {
+        return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+      try {
+        return jsonResponse(_jsonSafe({
+          'tiers': await database.footballCollectionTierPerformance(),
+        }));
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
     // Serverseitige Performance-Aggregation (Ligen-/Team-Analytics-Profile,
     // Punkt 23): rechnet immer über den vollständigen gefilterten
     // Datensatz, nie nur über eine Seite Tabellenzeilen.

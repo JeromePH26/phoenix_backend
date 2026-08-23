@@ -5564,6 +5564,102 @@ class PhoenixDatabase {
     };
   }
 
+  /// Vergleichbare Auswertung der drei Liga-Sammlungen für das Control Center.
+  /// Öffentliche Tipps bleiben bewusst von Shadow-Analysen getrennt: Nur
+  /// Einträge aus [football_analysis_history] haben eingefrorene Quoten,
+  /// Einsätze und ein settlementfähiges Ergebnis. Die Hintergrundlisten
+  /// liefern dagegen Daten/Analysen für Learning, ohne die öffentliche ROI
+  /// künstlich zu verfälschen.
+  Future<List<Map<String, Object?>>> footballCollectionTierPerformance() async {
+    final db = await connection();
+    final rows = await db.execute('''
+      WITH latest_analysis AS (
+        SELECT DISTINCT ON (match_id)
+          match_id, data_quality
+        FROM analyses
+        WHERE sport = 'football'
+        ORDER BY match_id, analyzed_at DESC
+      ), first_tips AS (
+        SELECT DISTINCT ON (fixture_id)
+          fixture_id, market_key, result_status, assigned_units, profit_units
+        FROM football_analysis_history
+        ORDER BY fixture_id, created_at ASC
+      )
+      SELECT
+        l.collection_tier AS tier,
+        COUNT(DISTINCT m.id) AS match_count,
+        COUNT(DISTINCT a.match_id) AS analysis_count,
+        COUNT(DISTINCT a.match_id) FILTER (
+          WHERE m.home_goals IS NOT NULL AND m.away_goals IS NOT NULL
+        ) AS analysed_finished_count,
+        AVG(a.data_quality) AS average_data_quality,
+        COUNT(DISTINCT t.fixture_id) FILTER (WHERE t.market_key <> '') AS tip_count,
+        COUNT(DISTINCT t.fixture_id) FILTER (
+          WHERE t.market_key <> '' AND t.result_status IN ('won', 'lost', 'push')
+        ) AS settled_tip_count,
+        COUNT(DISTINCT t.fixture_id) FILTER (
+          WHERE t.market_key <> '' AND t.result_status = 'pending'
+        ) AS pending_tip_count,
+        COUNT(DISTINCT t.fixture_id) FILTER (
+          WHERE t.market_key <> '' AND t.result_status = 'won' AND t.assigned_units > 0
+        ) AS won,
+        COUNT(DISTINCT t.fixture_id) FILTER (
+          WHERE t.market_key <> '' AND t.result_status = 'lost' AND t.assigned_units > 0
+        ) AS lost,
+        COUNT(DISTINCT t.fixture_id) FILTER (
+          WHERE t.market_key <> '' AND t.result_status = 'push' AND t.assigned_units > 0
+        ) AS push,
+        COALESCE(SUM(t.assigned_units) FILTER (
+          WHERE t.market_key <> ''
+            AND t.result_status IN ('won', 'lost', 'push')
+            AND t.assigned_units > 0
+        ), 0) AS staked_units,
+        COALESCE(SUM(t.profit_units) FILTER (
+          WHERE t.market_key <> ''
+            AND t.result_status IN ('won', 'lost', 'push')
+            AND t.assigned_units > 0
+        ), 0) AS profit_units
+      FROM football_leagues l
+      LEFT JOIN football_matches m ON m.league_id = l.league_id
+      LEFT JOIN latest_analysis a ON a.match_id = m.id
+      LEFT JOIN first_tips t ON t.fixture_id = m.id
+      WHERE l.collection_tier IN ('focus', 'watchlist', 'data_pool')
+      GROUP BY l.collection_tier
+    ''');
+
+    int integer(Map<String, Object?> row, String key) =>
+        int.tryParse(row[key]?.toString() ?? '') ?? 0;
+    double number(Map<String, Object?> row, String key) =>
+        double.tryParse(row[key]?.toString() ?? '') ?? 0;
+
+    return rows.map((raw) {
+      final row = Map<String, Object?>.from(raw.toColumnMap());
+      final won = integer(row, 'won');
+      final lost = integer(row, 'lost');
+      final staked = number(row, 'staked_units');
+      final profit = number(row, 'profit_units');
+      return <String, Object?>{
+        'tier': row['tier']?.toString() ?? 'data_pool',
+        'matchCount': integer(row, 'match_count'),
+        'analysisCount': integer(row, 'analysis_count'),
+        'analysedFinishedCount': integer(row, 'analysed_finished_count'),
+        'averageDataQuality': row['average_data_quality'] == null
+            ? null
+            : number(row, 'average_data_quality'),
+        'tipCount': integer(row, 'tip_count'),
+        'settledTipCount': integer(row, 'settled_tip_count'),
+        'pendingTipCount': integer(row, 'pending_tip_count'),
+        'won': won,
+        'lost': lost,
+        'push': integer(row, 'push'),
+        'stakedUnits': staked,
+        'profitUnits': profit,
+        'hitRatePercent': won + lost == 0 ? null : won / (won + lost) * 100,
+        'roiPercent': staked == 0 ? null : profit / staked * 100,
+      };
+    }).toList(growable: false);
+  }
+
   /// Vollständige Analyse-Historie (alle Läufe, nicht nur der letzte) für ein
   /// einzelnes Fixture - Section 17 "Analyse-Historie" im Control Center.
   Future<List<Map<String, Object?>>> footballAnalysisHistoryForFixture(
