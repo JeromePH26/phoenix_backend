@@ -16,6 +16,8 @@ class LearningSample {
     required this.homeGoals,
     required this.awayGoals,
     this.earliestRedCardMinute,
+    this.globalGoalsV1ExpectedHome,
+    this.globalGoalsV1ExpectedAway,
   });
 
   final String fixtureId;
@@ -27,6 +29,17 @@ class LearningSample {
   final int homeGoals;
   final int awayGoals;
   final int? earliestRedCardMinute;
+
+  /// Vorab (bei Sample-Erstellung) berechnete Torerwartung des
+  /// GLOBAL_GOALS_V1-Engines (siehe `GlobalGoalsV1Engine`), aus einem
+  /// leakage-sicheren Phase-2-Snapshot vor dem Kickoff. `null`, wenn für
+  /// dieses Fixture kein solcher Snapshot existiert - Phase-2-Scans laufen
+  /// erst seit Kurzem und nicht für jede Liga/jedes historische Spiel.
+  final double? globalGoalsV1ExpectedHome;
+  final double? globalGoalsV1ExpectedAway;
+
+  bool get hasGlobalGoalsV1Data =>
+      globalGoalsV1ExpectedHome != null && globalGoalsV1ExpectedAway != null;
 
   /// Section 18/19: Snapshot Integrity - muss vor jeder Verwendung als
   /// Learning-Sample geprüft sein. Wird hier zusätzlich zur SQL-Filterung

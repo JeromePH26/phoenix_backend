@@ -5,7 +5,6 @@ import 'engine_replica.dart';
 import 'learning_market.dart';
 import 'learning_sample.dart';
 import 'metrics.dart';
-import 'weight_config.dart';
 
 /// Section 30-32: chronologische Walk-Forward-Aufteilung. Da V0-Challenger
 /// feste, vorab begrenzte Gewichtskandidaten sind (kein gradientenbasiertes
@@ -122,7 +121,7 @@ class MarketEvaluationResult {
   static MarketEvaluationResult compute({
     required List<LearningSample> samples,
     required LearningMarket market,
-    required EngineWeightConfig weights,
+    required ModelEngine engine,
     required ModelLabConfig config,
   }) {
     if (samples.isEmpty) {
@@ -144,11 +143,12 @@ class MarketEvaluationResult {
     final calibrationSamples = <({double predicted, bool actual})>[];
 
     for (final sample in samples) {
-      final output = EngineReplica.evaluate(
-        market: market,
-        features: sample.features,
-        weights: weights,
-      );
+      // Nur bei GLOBAL_GOALS_V1 ohne passenden Phase-2-Snapshot möglich -
+      // `ChampionChallengerComparison.compare` filtert `samples` vorher
+      // bereits auf das, was BEIDE verglichenen Engines auswerten können,
+      // dieser Check ist die defensive zweite Absicherung.
+      final output = engine.evaluate(market: market, sample: sample);
+      if (output == null) continue;
       final outcomeIndex = sample.outcomeIndexFor(market);
 
       final brier = market.isMultiClass
@@ -188,7 +188,18 @@ class MarketEvaluationResult {
       ));
     }
 
-    final n = samples.length;
+    final n = brierValues.length;
+    if (n == 0) {
+      return const MarketEvaluationResult(
+        sampleSize: 0,
+        meanBrier: 0,
+        meanLogLoss: 0,
+        accuracy: 0,
+        avgTopProbability: 0,
+        calibration: [],
+        perSampleBrier: [],
+      );
+    }
     return MarketEvaluationResult(
       sampleSize: n,
       meanBrier: brierValues.reduce((a, b) => a + b) / n,
@@ -238,41 +249,56 @@ class ChampionChallengerComparison {
     required LearningMarket market,
     String? leagueId,
     required List<LearningSample> scopeSamples,
-    required EngineWeightConfig championWeights,
-    required EngineWeightConfig challengerWeights,
+    required ModelEngine championEngine,
+    required ModelEngine challengerEngine,
     required ModelLabConfig config,
   }) {
-    final cleanSamples = scopeSamples
+    // Beide Seiten MÜSSEN auf exakt derselben, gleich sortierten Sample-Menge
+    // ausgewertet werden (Section 42/43: "immer paired") - `diffs` unten
+    // indiziert `perSampleBrier` beider Seiten positionsgleich. Die
+    // attackWeight-Formel hat immer einen Fallback und liefert nie `null`;
+    // GLOBAL_GOALS_V1 dagegen nur, wenn ein passender Phase-2-Snapshot
+    // existiert (siehe `ModelEngine.evaluate`). Ein Sample, das eine der
+    // beiden Seiten nicht auswerten kann, fliegt für BEIDE Seiten raus,
+    // statt eine der beiden auf einer längeren Liste laufen zu lassen.
+    final comparableSamples = scopeSamples
+        .where(
+          (s) =>
+              championEngine.evaluate(market: market, sample: s) != null &&
+              challengerEngine.evaluate(market: market, sample: s) != null,
+        )
+        .toList(growable: false);
+    final cleanSamples = comparableSamples
         .where((s) => s.isClean(config))
         .toList(growable: false);
 
     final championAll = MarketEvaluationResult.compute(
-      samples: scopeSamples,
+      samples: comparableSamples,
       market: market,
-      weights: championWeights,
+      engine: championEngine,
       config: config,
     );
     final challengerAll = MarketEvaluationResult.compute(
-      samples: scopeSamples,
+      samples: comparableSamples,
       market: market,
-      weights: challengerWeights,
+      engine: challengerEngine,
       config: config,
     );
     final championClean = MarketEvaluationResult.compute(
       samples: cleanSamples,
       market: market,
-      weights: championWeights,
+      engine: championEngine,
       config: config,
     );
     final challengerClean = MarketEvaluationResult.compute(
       samples: cleanSamples,
       market: market,
-      weights: challengerWeights,
+      engine: challengerEngine,
       config: config,
     );
 
     final diffs = <double>[
-      for (var i = 0; i < scopeSamples.length; i++)
+      for (var i = 0; i < comparableSamples.length; i++)
         challengerAll.perSampleBrier[i] - championAll.perSampleBrier[i],
     ];
 

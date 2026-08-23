@@ -1,5 +1,7 @@
 import '../config/model_lab_config.dart';
 import '../database/database.dart';
+import 'engine_replica.dart';
+import 'global_goals_v1_engine.dart';
 import 'weight_config.dart';
 
 /// Section 12/59/60: Model Registry. Verwaltet unveränderliche
@@ -251,5 +253,83 @@ class ModelRegistryService {
       return EngineWeightConfig.fromJson(Map<String, Object?>.from(weights));
     }
     return EngineWeightConfig.global;
+  }
+
+  /// Wie [weightsFromModel], aber engine-übergreifend: erkennt an
+  /// `weights.engineVersion`, ob ein Model die attackWeight-Formel oder
+  /// GLOBAL_GOALS_V1 verwendet. Champions sind aktuell immer attackWeight-
+  /// basiert (Promotion ist V0 serverseitig blockiert und die produktive
+  /// Simulation liest ausschließlich [weightsFromModel]) - diese Methode
+  /// wird für Vergleiche gebraucht, bei denen ein Challenger auch
+  /// GLOBAL_GOALS_V1 sein kann.
+  ModelEngine modelEngine(Map<String, Object?> model) {
+    final weights = model['weights'];
+    if (weights is Map && weights['engineVersion'] == GlobalGoalsV1Engine.version) {
+      return const ModelEngine.globalGoalsV1();
+    }
+    return ModelEngine.attackWeightBlend(weightsFromModel(model));
+  }
+
+  /// Erzeugt (oder findet die bereits existierende) GLOBAL_GOALS_V1-
+  /// Challenger-Version für eine Liga x Markt-Kombination. Anders als
+  /// [createOrReuseChallenger] gibt es hier keinen Gewichts-Suchraum und
+  /// keine Sample-Size-Shrinkage: GLOBAL_GOALS_V1 hat keinen einzelnen
+  /// freien Parameter, den man Richtung Global-Gewicht "einziehen" könnte -
+  /// fehlende Eingaben werden bereits pro Spiel durch die eigene
+  /// Renormalisierung abgefedert (siehe `feature_renormalization.dart`).
+  /// Pro Liga x Markt kann es deshalb konzeptionell nur GENAU einen solchen
+  /// Challenger geben (der konstante `configHash` erzwingt das über den
+  /// bestehenden Unique-Index).
+  Future<({int id, ModelEngine engine})> createOrReuseGlobalGoalsV1Challenger({
+    required String? leagueId,
+    required String market,
+    required int generation,
+    required int challengerIndex,
+    required int sampleSize,
+    required int parentModelId,
+    DateTime? trainingStart,
+    DateTime? trainingEnd,
+    required int trainingCount,
+    required int validationCount,
+    required int holdoutCount,
+  }) async {
+    final readableVersion = 'V$generation-C$challengerIndex-GG1';
+    final id = await database.insertModelVersion(
+      readableVersion: readableVersion,
+      parentModelId: parentModelId,
+      generation: generation,
+      leagueId: leagueId,
+      market: market,
+      modelType: 'weight_variant',
+      featureConfig: const {
+        'features': 'globalGoalsV1',
+        'engineFamily': 'weighted_feature_blend_poisson_derived',
+      },
+      weights: const {'engineVersion': GlobalGoalsV1Engine.version},
+      trainingStart: trainingStart,
+      trainingEnd: trainingEnd,
+      trainingCount: trainingCount,
+      validationCount: validationCount,
+      holdoutCount: holdoutCount,
+      shadowCount: 0,
+      status: 'challenger',
+      configHash: GlobalGoalsV1Engine.configHash(),
+      codeSchemaVersion: codeSchemaVersion,
+    );
+
+    await database.insertModelLabAuditLog(
+      action: 'challenger_created',
+      actor: 'system',
+      modelVersionId: id,
+      leagueId: leagueId,
+      market: market,
+      details: {
+        'readableVersion': readableVersion,
+        'engineVersion': GlobalGoalsV1Engine.version,
+        'sampleSize': sampleSize,
+      },
+    );
+
+    return (id: id, engine: const ModelEngine.globalGoalsV1());
   }
 }

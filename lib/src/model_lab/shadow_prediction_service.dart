@@ -2,6 +2,7 @@ import '../config/model_lab_config.dart';
 import '../database/database.dart';
 import 'engine_replica.dart';
 import 'feature_whitelist.dart';
+import 'global_goals_v1_engine.dart';
 import 'learning_market.dart';
 import 'metrics.dart';
 import 'model_registry_service.dart';
@@ -83,6 +84,20 @@ class ShadowPredictionService {
 
         for (final model in modelsById.values) {
           final modelId = model['id'] as int;
+          final modelWeights = model['weights'];
+          // GLOBAL_GOALS_V1-Challenger brauchen einen Phase-2-Snapshot des
+          // NÄCHSTEN Fixtures (andere Datenquelle als der whitelisted-
+          // Feature-Satz, den Shadow Predictions hier verwenden) - dessen
+          // Live-Beschaffung ist noch nicht angebunden. `weightsFromModel`
+          // würde für so ein Model kommentarlos auf attackWeight=0.5
+          // zurückfallen und eine falsche Vorhersage unter dem Namen dieses
+          // Challengers speichern; bis die Anbindung existiert, wird für
+          // dieses Model lieber ehrlich keine Shadow Prediction erzeugt statt
+          // eine irreführende.
+          if (modelWeights is Map &&
+              modelWeights['engineVersion'] == GlobalGoalsV1Engine.version) {
+            continue;
+          }
           final weights = registry.weightsFromModel(model);
           final output = EngineReplica.evaluate(
             market: market,

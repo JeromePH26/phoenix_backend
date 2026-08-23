@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'package:crypto/crypto.dart';
+
 import 'feature_renormalization.dart';
 
 /// Section "GLOBAL GOALS V1": ein neues, gewichtetes Torerwartungs-Modell -
@@ -16,6 +19,13 @@ class GlobalGoalsV1Engine {
   const GlobalGoalsV1Engine._();
 
   static const version = 'GLOBAL_GOALS_V1';
+
+  /// GLOBAL_GOALS_V1 hat keinen freien Parameter (anders als `attackWeight`)
+  /// - der Hash ist deshalb für jede Model-Lab-Instanz konstant. Die
+  /// Eindeutigkeit pro Liga x Markt kommt aus dem Unique-Index auf
+  /// `(market, league_id, config_hash)`, nicht aus diesem Hash selbst.
+  static String configHash() =>
+      sha256.convert(utf8.encode(version)).toString();
 
   static const _finishedStatuses = {'FT', 'AET', 'PEN'};
 

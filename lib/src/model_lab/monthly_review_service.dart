@@ -143,7 +143,7 @@ class MonthlyReviewService {
       );
     }
 
-    final championWeights = registry.weightsFromModel(championModel);
+    final championEngine = registry.modelEngine(championModel);
     final championId = championModel['id'] as int;
 
     // Section 51: aktuelle Holdout-Menge frisch berechnen (nicht nur die zum
@@ -157,7 +157,7 @@ class MonthlyReviewService {
     final perChallenger = <Map<String, Object?>>[];
 
     for (final challenger in challengers) {
-      final challengerWeights = registry.weightsFromModel(challenger);
+      final challengerEngine = registry.modelEngine(challenger);
       final challengerId = challenger['id'] as int;
 
       final holdoutComparison = split.holdout.isEmpty
@@ -166,8 +166,8 @@ class MonthlyReviewService {
               market: market,
               leagueId: leagueId,
               scopeSamples: split.holdout,
-              championWeights: championWeights,
-              challengerWeights: challengerWeights,
+              championEngine: championEngine,
+              challengerEngine: challengerEngine,
               config: config,
             );
 

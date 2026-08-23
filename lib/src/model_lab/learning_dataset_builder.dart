@@ -1,6 +1,7 @@
 import '../config/model_lab_config.dart';
 import '../database/database.dart';
 import 'feature_whitelist.dart';
+import 'global_goals_v1_engine.dart';
 import 'learning_sample.dart';
 
 /// Baut leakage-sichere Learning-Datensätze aus gespeicherten PHÖNIX-Daten
@@ -20,8 +21,8 @@ class LearningDatasetBuilder {
       leagueId: leagueId,
       minDataQuality: config.minDataQuality,
     );
-
-    return _samplesFromRows(rows);
+    final goalsV1ByFixture = await _globalGoalsV1ByFixture();
+    return _samplesFromRows(rows, goalsV1ByFixture);
   }
 
   /// Lädt den gemeinsamen, leakage-sicheren Rohdatensatz genau einmal und
@@ -32,18 +33,47 @@ class LearningDatasetBuilder {
     final rows = await database.modelLabRawDataset(
       minDataQuality: config.minDataQuality,
     );
+    final goalsV1ByFixture = await _globalGoalsV1ByFixture();
     final grouped = <String, List<LearningSample>>{};
-    for (final sample in _samplesFromRows(rows)) {
+    for (final sample in _samplesFromRows(rows, goalsV1ByFixture)) {
       grouped.putIfAbsent(sample.leagueId, () => <LearningSample>[])
           .add(sample);
     }
     return grouped;
   }
 
-  List<LearningSample> _samplesFromRows(List<Map<String, Object?>> rows) {
+  /// Section GLOBAL_GOALS_V1: berechnet für jedes Fixture mit einem
+  /// leakage-sicheren Phase-2-Snapshot vor dem Kickoff die Torerwartung des
+  /// GLOBAL_GOALS_V1-Engines EINMAL im Voraus, statt sie bei jeder
+  /// Markt-Auswertung desselben Fixtures neu zu berechnen (derselbe
+  /// Batch-Gedanke wie bei `buildSamplesByLeague`).
+  Future<Map<String, ({double? home, double? away})>>
+      _globalGoalsV1ByFixture() async {
+    final rows = await database.modelLabGlobalGoalsV1Dataset();
+    final result = <String, ({double? home, double? away})>{};
+    for (final row in rows) {
+      final fixtureId = row['fixture_id']?.toString();
+      final availability = row['availability'];
+      if (fixtureId == null || availability is! Map) continue;
+      final v1 = GlobalGoalsV1Engine.compute(
+        availability: Map<String, Object?>.from(availability),
+        homeTeamId: row['home_team_id']?.toString() ?? '',
+        awayTeamId: row['away_team_id']?.toString() ?? '',
+        leagueAvgHomeGoalsPerGame: _double(row['league_avg_home_goals']),
+        leagueAvgAwayGoalsPerGame: _double(row['league_avg_away_goals']),
+      );
+      result[fixtureId] = (home: v1.expectedHome, away: v1.expectedAway);
+    }
+    return result;
+  }
+
+  List<LearningSample> _samplesFromRows(
+    List<Map<String, Object?>> rows,
+    Map<String, ({double? home, double? away})> goalsV1ByFixture,
+  ) {
     final samples = <LearningSample>[];
     for (final row in rows) {
-      final sample = _rowToSample(row);
+      final sample = _rowToSample(row, goalsV1ByFixture);
       if (sample == null) continue;
       // Section 19: defensive Zweitprüfung, auch wenn die SQL-Abfrage
       // bereits vorfiltert. Ein Sample, dessen Snapshot nicht sicher vor dem
@@ -56,7 +86,10 @@ class LearningDatasetBuilder {
     return samples;
   }
 
-  LearningSample? _rowToSample(Map<String, Object?> row) {
+  LearningSample? _rowToSample(
+    Map<String, Object?> row,
+    Map<String, ({double? home, double? away})> goalsV1ByFixture,
+  ) {
     final fixtureId = row['fixture_id']?.toString();
     final leagueId = row['league_id']?.toString();
     final kickoff = _dateTime(row['kickoff_utc']);
@@ -80,6 +113,7 @@ class LearningDatasetBuilder {
     final features = FeatureWhitelist.extract(
       Map<String, Object?>.from(normalizedInput),
     );
+    final goalsV1 = goalsV1ByFixture[fixtureId];
 
     return LearningSample(
       fixtureId: fixtureId,
@@ -91,6 +125,8 @@ class LearningDatasetBuilder {
       homeGoals: homeGoals,
       awayGoals: awayGoals,
       earliestRedCardMinute: _int(row['earliest_red_card_minute']),
+      globalGoalsV1ExpectedHome: goalsV1?.home,
+      globalGoalsV1ExpectedAway: goalsV1?.away,
     );
   }
 
@@ -118,7 +154,7 @@ class LearningDatasetBuilder {
       );
       counts.stored += 1;
 
-      final manualStatus = row['manual_status']?.toString();
+      final collectionTier = row['collection_tier']?.toString();
       final status = row['status']?.toString();
       final homeGoals = _int(row['home_goals']);
       final awayGoals = _int(row['away_goals']);
@@ -130,7 +166,13 @@ class LearningDatasetBuilder {
           PhoenixDatabase.modelLabFinishedMatchStatuses.contains(status);
       final hasOutcome = isFinished && homeGoals != null && awayGoals != null;
 
-      if (manualStatus != 'whitelist') {
+      // Muss exakt denselben Kreis wie [PhoenixDatabase.modelLabRawDataset]
+      // verwenden (Fokus- UND Beobachtungsliga), sonst zeigt der Audit-
+      // Bericht Beobachtungsliga-Spiele fälschlich als "not_whitelisted" an,
+      // obwohl sie im echten Training längst berücksichtigt werden. Der
+      // alte `manual_status == 'whitelist'`-Check kannte nur Fokus-Ligen und
+      // wurde vor Einführung der Beobachtungsliste/des Datenpools geschrieben.
+      if (collectionTier != 'focus' && collectionTier != 'watchlist') {
         exclusions['not_whitelisted'] = exclusions['not_whitelisted']! + 1;
         continue;
       }
@@ -178,6 +220,11 @@ class LearningDatasetBuilder {
     if (value is int) return value;
     if (value is num) return value.round();
     return int.tryParse(value?.toString() ?? '');
+  }
+
+  static double? _double(Object? value) {
+    if (value is num) return value.toDouble();
+    return double.tryParse(value?.toString() ?? '');
   }
 }
 

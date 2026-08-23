@@ -1,4 +1,5 @@
 import 'package:phoenix_backend/src/config/model_lab_config.dart';
+import 'package:phoenix_backend/src/model_lab/engine_replica.dart';
 import 'package:phoenix_backend/src/model_lab/learning_market.dart';
 import 'package:phoenix_backend/src/model_lab/learning_sample.dart';
 import 'package:phoenix_backend/src/model_lab/walk_forward_evaluator.dart';
@@ -40,10 +41,14 @@ ModelLabConfig _config({
   staleLockMinutes: 180,
 );
 
-List<LearningSample> _chronologicalSamples(int count) {
+List<LearningSample> _chronologicalSamples(
+  int count, {
+  bool Function(int index)? hasGlobalGoalsV1,
+}) {
   final base = DateTime.utc(2024, 1, 1);
   return List.generate(count, (i) {
     final kickoff = base.add(Duration(days: i));
+    final withGoalsV1 = hasGlobalGoalsV1?.call(i) ?? false;
     return LearningSample(
       fixtureId: 'fixture-$i',
       leagueId: '78',
@@ -58,6 +63,8 @@ List<LearningSample> _chronologicalSamples(int count) {
       },
       homeGoals: i.isEven ? 2 : 1,
       awayGoals: i.isEven ? 0 : 1,
+      globalGoalsV1ExpectedHome: withGoalsV1 ? 1.6 : null,
+      globalGoalsV1ExpectedAway: withGoalsV1 ? 1.2 : null,
     );
   });
 }
@@ -124,8 +131,8 @@ void main() {
         market: LearningMarket.oneXTwo,
         leagueId: '78',
         scopeSamples: samples,
-        championWeights: EngineWeightConfig.global,
-        challengerWeights: const EngineWeightConfig(attackWeight: 0.6),
+        championEngine: const ModelEngine.attackWeightBlend(EngineWeightConfig.global),
+        challengerEngine: const ModelEngine.attackWeightBlend(EngineWeightConfig(attackWeight: 0.6)),
         config: _config(),
       );
 
@@ -139,8 +146,8 @@ void main() {
         market: LearningMarket.btts,
         leagueId: '78',
         scopeSamples: samples,
-        championWeights: EngineWeightConfig.global,
-        challengerWeights: EngineWeightConfig.global,
+        championEngine: const ModelEngine.attackWeightBlend(EngineWeightConfig.global),
+        challengerEngine: const ModelEngine.attackWeightBlend(EngineWeightConfig.global),
         config: _config(),
       );
       expect(comparison.brierUncertainty.meanDifference, closeTo(0.0, 1e-9));
@@ -153,11 +160,48 @@ void main() {
         market: LearningMarket.overUnder25,
         leagueId: '78',
         scopeSamples: samples,
-        championWeights: EngineWeightConfig.global,
-        challengerWeights: const EngineWeightConfig(attackWeight: 0.45),
+        championEngine: const ModelEngine.attackWeightBlend(EngineWeightConfig.global),
+        challengerEngine: const ModelEngine.attackWeightBlend(EngineWeightConfig(attackWeight: 0.45)),
         config: _config(),
       );
       expect(comparison.championClean.sampleSize, lessThanOrEqualTo(comparison.championAll.sampleSize));
+    });
+
+    // Regression: ein GLOBAL_GOALS_V1-Challenger kann nur für Samples mit
+    // einem passenden Phase-2-Snapshot ausgewertet werden. Champion und
+    // Challenger MÜSSEN trotzdem auf exakt derselben (kleineren) Menge
+    // verglichen werden, sonst würde `diffs` in `compare()` zwei
+    // unterschiedlich lange/sortierte Listen positionsweise gegeneinander
+    // subtrahieren.
+    test('a GLOBAL_GOALS_V1 challenger without full coverage restricts both sides to the samples it can actually evaluate', () {
+      final samples = _chronologicalSamples(20, hasGlobalGoalsV1: (i) => i.isEven);
+      final comparison = ChampionChallengerComparison.compare(
+        market: LearningMarket.oneXTwo,
+        leagueId: '78',
+        scopeSamples: samples,
+        championEngine: const ModelEngine.attackWeightBlend(EngineWeightConfig.global),
+        challengerEngine: const ModelEngine.globalGoalsV1(),
+        config: _config(),
+      );
+
+      // Nur die 10 geraden Indizes haben GLOBAL_GOALS_V1-Daten.
+      expect(comparison.championAll.sampleSize, 10);
+      expect(comparison.challengerAll.sampleSize, 10);
+    });
+
+    test('an attackWeight-vs-attackWeight comparison is unaffected by GLOBAL_GOALS_V1 filtering (no samples lost)', () {
+      final samples = _chronologicalSamples(20, hasGlobalGoalsV1: (i) => i.isEven);
+      final comparison = ChampionChallengerComparison.compare(
+        market: LearningMarket.oneXTwo,
+        leagueId: '78',
+        scopeSamples: samples,
+        championEngine: const ModelEngine.attackWeightBlend(EngineWeightConfig.global),
+        challengerEngine: const ModelEngine.attackWeightBlend(EngineWeightConfig(attackWeight: 0.6)),
+        config: _config(),
+      );
+
+      expect(comparison.championAll.sampleSize, 20);
+      expect(comparison.challengerAll.sampleSize, 20);
     });
   });
 }

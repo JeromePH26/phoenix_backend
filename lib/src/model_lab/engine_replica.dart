@@ -1,4 +1,6 @@
+import 'global_goals_v1_engine.dart';
 import 'learning_market.dart';
+import 'learning_sample.dart';
 import 'poisson_math.dart';
 import 'weight_config.dart';
 
@@ -89,7 +91,20 @@ class EngineReplica {
     required EngineWeightConfig weights,
   }) {
     final goals = expectedGoals(features: features, weights: weights);
+    return evaluateGoals(market: market, goals: goals);
+  }
 
+  /// Wie [evaluate], nimmt aber eine bereits berechnete Torerwartung
+  /// entgegen statt sie selbst aus [weights] herzuleiten. Das trennt die
+  /// eigentliche Markt-Wahrscheinlichkeitsberechnung (Poisson, engine-
+  /// unabhängig) von der Frage, WIE die Torerwartung zustande kam -
+  /// notwendig, damit auch das GLOBAL_GOALS_V1-Modell (siehe `ModelEngine`
+  /// unten), das keine `EngineWeightConfig` verwendet, dieselbe
+  /// Markt-Logik nutzen kann statt sie zu duplizieren.
+  static EngineReplicaOutput evaluateGoals({
+    required LearningMarket market,
+    required ({double home, double away, bool usedFallback}) goals,
+  }) {
     switch (market) {
       case LearningMarket.oneXTwo:
         final probabilities = PoissonMath.matchResultProbabilities(
@@ -302,4 +317,58 @@ class EngineReplica {
     if (value is num) return value.toDouble();
     return double.tryParse(value?.toString() ?? '');
   }
+}
+
+/// Welche Formel ein konkretes Model verwendet, um aus einem [LearningSample]
+/// eine Torerwartung abzuleiten. Ein Model verwendet immer GENAU eine
+/// Formel, nie eine Mischung:
+/// - `attackWeightBlend`: die ursprüngliche V0-Formel (`EngineReplica`,
+///   ein einziger Freiheitsgrad, siehe `weight_config.dart`).
+/// - `globalGoalsV1`: das später hinzugekommene, sechs-Feature-gewichtete
+///   Modell (`GlobalGoalsV1Engine`) mit echter Fehlende-Daten-
+///   Renormalisierung statt eines groben Fallback-Werts. Braucht einen
+///   vorab (bei Sample-Erstellung) berechneten, leakage-sicheren
+///   Phase-2-Snapshot - ist dieser für ein Sample nicht vorhanden, liefert
+///   [evaluate] `null` statt eine erfundene Zahl.
+class ModelEngine {
+  const ModelEngine.attackWeightBlend(EngineWeightConfig weights)
+      : _attackWeightConfig = weights,
+        _isGlobalGoalsV1 = false;
+
+  const ModelEngine.globalGoalsV1()
+      : _attackWeightConfig = null,
+        _isGlobalGoalsV1 = true;
+
+  final EngineWeightConfig? _attackWeightConfig;
+  final bool _isGlobalGoalsV1;
+
+  bool get isGlobalGoalsV1 => _isGlobalGoalsV1;
+
+  /// `null`, wenn dieses Engine für [sample] keine Torerwartung berechnen
+  /// kann (aktuell nur GLOBAL_GOALS_V1 ohne passenden Phase-2-Snapshot -
+  /// die attackWeight-Formel hat immer einen neutralen Fallback und liefert
+  /// nie `null`).
+  EngineReplicaOutput? evaluate({
+    required LearningMarket market,
+    required LearningSample sample,
+  }) {
+    if (_isGlobalGoalsV1) {
+      final home = sample.globalGoalsV1ExpectedHome;
+      final away = sample.globalGoalsV1ExpectedAway;
+      if (home == null || away == null) return null;
+      return EngineReplica.evaluateGoals(
+        market: market,
+        goals: (home: home, away: away, usedFallback: false),
+      );
+    }
+    return EngineReplica.evaluate(
+      market: market,
+      features: sample.features,
+      weights: _attackWeightConfig!,
+    );
+  }
+
+  Map<String, Object?> toJson() => _isGlobalGoalsV1
+      ? {'engineVersion': GlobalGoalsV1Engine.version}
+      : _attackWeightConfig!.toJson();
 }

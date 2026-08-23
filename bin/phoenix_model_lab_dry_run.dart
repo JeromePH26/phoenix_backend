@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:phoenix_backend/src/config/model_lab_config.dart';
 import 'package:phoenix_backend/src/database/database.dart';
 import 'package:phoenix_backend/src/model_lab/challenger_generator.dart';
+import 'package:phoenix_backend/src/model_lab/engine_replica.dart';
 import 'package:phoenix_backend/src/model_lab/learning_dataset_builder.dart';
 import 'package:phoenix_backend/src/model_lab/learning_market.dart';
 import 'package:phoenix_backend/src/model_lab/league_market_status.dart';
@@ -152,8 +153,8 @@ Future<void> main() async {
               market: market,
               leagueId: leagueId,
               scopeSamples: split.validation,
-              championWeights: EngineWeightConfig.global,
-              challengerWeights: shrunk,
+              championEngine: const ModelEngine.attackWeightBlend(EngineWeightConfig.global),
+              challengerEngine: ModelEngine.attackWeightBlend(shrunk),
               config: config,
             );
             stdout.writeln('Validation: ${jsonEncode(validationComparison.toJson())}');
@@ -163,8 +164,8 @@ Future<void> main() async {
               market: market,
               leagueId: leagueId,
               scopeSamples: split.holdout,
-              championWeights: EngineWeightConfig.global,
-              challengerWeights: shrunk,
+              championEngine: const ModelEngine.attackWeightBlend(EngineWeightConfig.global),
+              challengerEngine: ModelEngine.attackWeightBlend(shrunk),
               config: config,
             );
             stdout.writeln('Holdout: ${jsonEncode(holdoutComparison.toJson())}');
