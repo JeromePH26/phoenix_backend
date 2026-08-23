@@ -36,6 +36,14 @@ class PhoenixDatabase {
 
   Future<Connection> connection() async {
     await _connectionGate;
+    return _ensureConnection();
+  }
+
+  /// Verbindungsaufbau OHNE auf [_connectionGate] zu warten - nur für
+  /// [runTx] gedacht, das das Gate zu diesem Zeitpunkt bereits selbst hält.
+  /// [connection] hier aufzurufen wäre ein Deadlock: `runTx` würde auf sein
+  /// EIGENES, noch offenes Gate warten (live beobachtet, direkt behoben).
+  Future<Connection> _ensureConnection() async {
     final current = _connection;
     if (current != null && current.isOpen) return current;
     if (!isConfigured) {
@@ -74,7 +82,7 @@ class PhoenixDatabase {
     _connectionGate = completer.future;
     await previousGate;
     try {
-      final db = await connection();
+      final db = await _ensureConnection();
       return await db.runTx(fn);
     } finally {
       completer.complete();

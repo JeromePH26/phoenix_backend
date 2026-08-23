@@ -341,18 +341,20 @@ class ModelLabRoutes {
           database: database,
           config: modelLabConfig,
         );
-        final results = <Map<String, Object?>>[];
-        var activated = 0;
-        for (final market in LearningMarket.values) {
-          final result = await registry.activateGlobalMarketChampion(market);
-          if (result['status'] == 'activated') activated++;
-          results.add(result);
-        }
+        // 17 Märkte x mehrere DB-Roundtrips (Generation, Insert, Promote-
+        // Transaktion, Audit-Log) je Markt kann das Reverse-Proxy-Timeout
+        // überschreiten, bevor der Request fertig ist, obwohl der Vorgang
+        // gesund läuft - dasselbe Problem/dieselbe Lösung wie bei
+        // `/learning-runs/start` (dort ausführlich begründet).
+        unawaited(() async {
+          for (final market in LearningMarket.values) {
+            await registry.activateGlobalMarketChampion(market);
+          }
+        }());
         return jsonResponse({
-          'status': 'completed',
-          'activated': activated,
-          'markets': results,
-        });
+          'status': 'accepted',
+          'message': 'Aktivierung wurde im Hintergrund gestartet.',
+        }, statusCode: 202);
       } catch (error) {
         return jsonResponse({'error': error.toString()}, statusCode: 500);
       }
