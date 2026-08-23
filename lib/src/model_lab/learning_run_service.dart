@@ -5,6 +5,7 @@ import 'engine_replica.dart';
 import 'global_goals_v1_engine.dart';
 import 'learning_dataset_builder.dart';
 import 'learning_market.dart';
+import 'learning_sample.dart';
 import 'league_market_status.dart';
 import 'model_registry_service.dart';
 import 'walk_forward_evaluator.dart';
@@ -250,6 +251,26 @@ class LearningRunService {
       // Lauf ist).
       await registry.ensureGlobalBaseline(market.key);
       marketsProcessed += 1;
+
+      // Über alle Ligen gepoolter GLOBAL_GOALS_V1-Kandidat für diesen Markt
+      // (Liga-Feld = null, genau wie bei der globalen Baseline selbst).
+      // Läuft VOR dem Resume-Skip unten und unabhängig von der Liga-Schleife,
+      // weil er nicht auf eine einzelne Liga wartet: die meisten Ligen
+      // sammeln einzeln viel zu wenige Spiele, um je die 40er-Schwelle zu
+      // erreichen (im Schnitt 5-6 Spiele je Liga) - über alle Ligen zusammen
+      // ist die Stichprobe sofort/viel früher groß genug für eine echte
+      // Aussage: lohnt sich das reichere Modell für diesen Markt überhaupt.
+      // Idempotent wie jeder andere Challenger (config_hash) - ein erneuter
+      // Aufruf für einen bereits erzeugten Kandidaten ist ein billiger
+      // No-op, deshalb bewusst auch bei jedem (auch fortgesetzten) Run-Versuch
+      // erneut angestoßen statt in die Resume-Logik verwoben zu werden.
+      challengersCreated += await _ensurePooledGlobalGoalsV1Challenger(
+        market: market,
+        leagues: leagues,
+        samplesByLeague: samplesByLeague,
+        registry: registry,
+        runId: runId,
+      );
 
       if (resumeMarketIndex >= 0 && marketIndex < resumeMarketIndex) {
         for (final league in leagues) {
@@ -551,6 +572,114 @@ class LearningRunService {
         'leagueMarketStatuses': leagueStatusSummary,
       },
     );
+  }
+
+  /// Erzeugt (idempotent) den über alle Ligen gepoolten GLOBAL_GOALS_V1-
+  /// Kandidaten für [market] gegen den globalen Champion, sofern genug
+  /// gepoolte Samples mit echten GLOBAL_GOALS_V1-Daten existieren und noch
+  /// kein solcher Kandidat für diesen Markt existiert. Gibt zurück, wie
+  /// viele Challenger dabei neu erzeugt wurden (0 oder 1), damit der Aufrufer
+  /// den laufenden `challengersCreated`-Zähler aktualisieren kann.
+  Future<int> _ensurePooledGlobalGoalsV1Challenger({
+    required LearningMarket market,
+    required List<Map<String, Object?>> leagues,
+    required Map<String, List<LearningSample>> samplesByLeague,
+    required ModelRegistryService registry,
+    required int runId,
+  }) async {
+    final existingGlobalChallengers = await registry.currentChallengers(
+      leagueId: null,
+      market: market.key,
+    );
+    final alreadyExists = existingGlobalChallengers.any(
+      (c) =>
+          (c['weights'] as Map?)?['engineVersion'] ==
+          GlobalGoalsV1Engine.version,
+    );
+    if (alreadyExists) return 0;
+
+    final pooled = <LearningSample>[
+      for (final league in leagues)
+        ...?samplesByLeague[league['league_id']?.toString()]?.where(
+          (s) => s.hasGlobalGoalsV1Data,
+        ),
+    ]..sort((a, b) => a.kickoff.compareTo(b.kickoff));
+
+    final split = ChronologicalSplit.split(pooled, config);
+    if (split.validation.length < config.minValidationSample &&
+        split.holdout.length < config.minHoldoutSample) {
+      return 0;
+    }
+
+    final globalChampionModel = await database.globalBaselineModel(market.key);
+    if (globalChampionModel == null) return 0;
+    final globalChampionId = globalChampionModel['id'] as int;
+    final globalChampionEngine = ModelEngine.attackWeightBlend(
+      registry.weightsFromModel(globalChampionModel),
+    );
+
+    final generation = await registry.nextGeneration(
+      leagueId: null,
+      market: market.key,
+    );
+    final challengerIndex = await registry.nextChallengerIndex(
+      leagueId: null,
+      market: market.key,
+      generation: generation,
+    );
+    final challenger = await registry.createOrReuseGlobalGoalsV1Challenger(
+      leagueId: null,
+      market: market.key,
+      generation: generation,
+      challengerIndex: challengerIndex,
+      sampleSize: pooled.length,
+      parentModelId: globalChampionId,
+      trainingStart: split.training.isEmpty ? null : split.training.first.kickoff,
+      trainingEnd: split.training.isEmpty ? null : split.training.last.kickoff,
+      trainingCount: split.training.length,
+      validationCount: split.validation.length,
+      holdoutCount: split.holdout.length,
+    );
+
+    await database.addLearningCandidate(
+      learningRunId: runId,
+      modelVersionId: challenger.id,
+      leagueId: null,
+      market: market.key,
+    );
+
+    if (split.validation.isNotEmpty) {
+      await _persistComparison(
+        comparison: ChampionChallengerComparison.compare(
+          market: market,
+          leagueId: null,
+          scopeSamples: split.validation,
+          championEngine: globalChampionEngine,
+          challengerEngine: challenger.engine,
+          config: config,
+        ),
+        evaluationType: 'walk_forward',
+        championModelId: globalChampionId,
+        challengerModelId: challenger.id,
+      );
+    }
+    if (split.holdout.isNotEmpty) {
+      await _persistComparison(
+        comparison: ChampionChallengerComparison.compare(
+          market: market,
+          leagueId: null,
+          scopeSamples: split.holdout,
+          championEngine: globalChampionEngine,
+          challengerEngine: challenger.engine,
+          config: config,
+        ),
+        evaluationType: 'holdout',
+        championModelId: globalChampionId,
+        challengerModelId: challenger.id,
+      );
+    }
+
+    return 1;
   }
 
   Future<void> _persistComparison({
