@@ -281,6 +281,29 @@ class ModelLabRoutes {
       }
     });
 
+    // Section 33 (Claude AN2.txt): "Run History" auf der Challenger-
+    // Detailseite - in welchen Learning Runs dieses Model als Kandidat
+    // entstanden ist bzw. mitgelaufen ist.
+    router.get('/models/<id|[0-9]+>/learning-runs', (
+      Request request,
+      String id,
+    ) async {
+      if (!_isAdmin(request)) return _unauthorized();
+      final modelId = int.tryParse(id);
+      if (modelId == null) {
+        return jsonResponse({'error': 'Ungültige Model-ID.'}, statusCode: 400);
+      }
+      try {
+        final runs = await database.learningRunsForModel(modelId);
+        return jsonResponse({
+          'count': runs.length,
+          'runs': runs.map(_jsonSafe).toList(),
+        });
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
     // Reparatur-/Initialisierungsweg für globale Champion-Baselines. Ein
     // abgebrochener Learning-Run darf nicht verhindern, dass neue, bereits
     // produktiv berechnete Markt-Familien im Model Lab sichtbar werden. Die

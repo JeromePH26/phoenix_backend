@@ -7814,6 +7814,35 @@ class PhoenixDatabase {
         .toList();
   }
 
+  /// Section 33 (Claude AN2.txt): "Run History" - in welchen Learning Runs
+  /// dieses Model als Kandidat entstanden ist bzw. mitgelaufen ist, samt der
+  /// Kerndaten des jeweiligen Runs (Status, Zeitpunkt, Auslöser).
+  Future<List<Map<String, Object?>>> learningRunsForModel(
+    int modelVersionId,
+  ) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT
+          r.id AS learning_run_id,
+          r.status AS run_status,
+          r.trigger_type,
+          r.started_at,
+          r.completed_at,
+          c.status AS candidate_status,
+          c.created_at AS candidate_created_at
+        FROM phoenix_learning_candidates c
+        JOIN phoenix_learning_runs r ON r.id = c.learning_run_id
+        WHERE c.model_version_id = @model_version_id
+        ORDER BY c.created_at DESC
+      '''),
+      parameters: {'model_version_id': modelVersionId},
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
   /// Speichert eine Shadow Prediction idempotent und meldet zurück, ob dabei
   /// wirklich eine neue Zeile entstanden ist. Damit sind Cron-Protokoll und
   /// Monitoring nach Wiederholungen/Deploys korrekt statt künstlich erhöht.
