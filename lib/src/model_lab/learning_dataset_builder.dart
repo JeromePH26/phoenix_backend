@@ -25,9 +25,9 @@ class LearningDatasetBuilder {
       minDataQuality: config.minDataQuality,
       includeAllTiers: includeAllTiers,
     );
-    final goalsV1ByFixture =
-        await _globalGoalsV1ByFixture(includeAllTiers: includeAllTiers);
-    return _samplesFromRows(rows, goalsV1ByFixture);
+    final phaseTwoByFixture =
+        await _phaseTwoDataByFixture(includeAllTiers: includeAllTiers);
+    return _samplesFromRows(rows, phaseTwoByFixture);
   }
 
   /// Lädt den gemeinsamen, leakage-sicheren Rohdatensatz genau einmal und
@@ -45,51 +45,68 @@ class LearningDatasetBuilder {
       minDataQuality: config.minDataQuality,
       includeAllTiers: includeAllTiers,
     );
-    final goalsV1ByFixture =
-        await _globalGoalsV1ByFixture(includeAllTiers: includeAllTiers);
+    final phaseTwoByFixture =
+        await _phaseTwoDataByFixture(includeAllTiers: includeAllTiers);
     final grouped = <String, List<LearningSample>>{};
-    for (final sample in _samplesFromRows(rows, goalsV1ByFixture)) {
+    for (final sample in _samplesFromRows(rows, phaseTwoByFixture)) {
       grouped.putIfAbsent(sample.leagueId, () => <LearningSample>[])
           .add(sample);
     }
     return grouped;
   }
 
-  /// Section GLOBAL_GOALS_V1: berechnet für jedes Fixture mit einem
-  /// leakage-sicheren Phase-2-Snapshot vor dem Kickoff die Torerwartung des
-  /// GLOBAL_GOALS_V1-Engines EINMAL im Voraus, statt sie bei jeder
-  /// Markt-Auswertung desselben Fixtures neu zu berechnen (derselbe
-  /// Batch-Gedanke wie bei `buildSamplesByLeague`).
-  Future<Map<String, ({double? home, double? away})>> _globalGoalsV1ByFixture({
+  /// Section GLOBAL_GOALS_V1 / GlobalMarketEngine: liefert für jedes Fixture
+  /// mit einem leakage-sicheren Phase-2-Snapshot vor dem Kickoff sowohl die
+  /// vorab berechnete GLOBAL_GOALS_V1-Torerwartung (fester Preset, ein
+  /// Feature-Set) als auch die Rohdaten für `GlobalMarketEngine` (mehrere
+  /// Marktfamilien x Hypothesis-Varianten - dafür lohnt sich keine
+  /// Vorab-Berechnung, siehe `LearningSample.globalMarketAvailability`).
+  /// Ein Datenbank-Scan für beide statt zwei getrennte.
+  Future<Map<String, _PhaseTwoSampleData>> _phaseTwoDataByFixture({
     bool includeAllTiers = false,
   }) async {
     final rows = await database.modelLabGlobalGoalsV1Dataset(
       includeAllTiers: includeAllTiers,
     );
-    final result = <String, ({double? home, double? away})>{};
+    final result = <String, _PhaseTwoSampleData>{};
     for (final row in rows) {
       final fixtureId = row['fixture_id']?.toString();
-      final availability = row['availability'];
-      if (fixtureId == null || availability is! Map) continue;
+      final availabilityRaw = row['availability'];
+      if (fixtureId == null || availabilityRaw is! Map) continue;
+      final availability = Map<String, Object?>.from(availabilityRaw);
+      final homeTeamId = row['home_team_id']?.toString() ?? '';
+      final awayTeamId = row['away_team_id']?.toString() ?? '';
+      final leagueAvgHome = _double(row['league_avg_home_goals']);
+      final leagueAvgAway = _double(row['league_avg_away_goals']);
+
       final v1 = GlobalGoalsV1Engine.compute(
-        availability: Map<String, Object?>.from(availability),
-        homeTeamId: row['home_team_id']?.toString() ?? '',
-        awayTeamId: row['away_team_id']?.toString() ?? '',
-        leagueAvgHomeGoalsPerGame: _double(row['league_avg_home_goals']),
-        leagueAvgAwayGoalsPerGame: _double(row['league_avg_away_goals']),
+        availability: availability,
+        homeTeamId: homeTeamId,
+        awayTeamId: awayTeamId,
+        leagueAvgHomeGoalsPerGame: leagueAvgHome,
+        leagueAvgAwayGoalsPerGame: leagueAvgAway,
       );
-      result[fixtureId] = (home: v1.expectedHome, away: v1.expectedAway);
+
+      result[fixtureId] = _PhaseTwoSampleData(
+        goalsV1Home: v1.expectedHome,
+        goalsV1Away: v1.expectedAway,
+        availability: availability,
+        homeTeamId: homeTeamId,
+        awayTeamId: awayTeamId,
+        leagueAvgHomeGoals: leagueAvgHome,
+        leagueAvgAwayGoals: leagueAvgAway,
+      );
     }
     return result;
   }
 
   List<LearningSample> _samplesFromRows(
     List<Map<String, Object?>> rows,
-    Map<String, ({double? home, double? away})> goalsV1ByFixture,
+    Map<String, _PhaseTwoSampleData> phaseTwoByFixture,
   ) {
     final samples = <LearningSample>[];
     for (final row in rows) {
-      final sample = _rowToSample(row, goalsV1ByFixture);
+      final sample = _rowToSample(row, phaseTwoByFixture);
       if (sample == null) continue;
       // Section 19: defensive Zweitprüfung, auch wenn die SQL-Abfrage
       // bereits vorfiltert. Ein Sample, dessen Snapshot nicht sicher vor dem
@@ -104,7 +121,7 @@ class LearningDatasetBuilder {
 
   LearningSample? _rowToSample(
     Map<String, Object?> row,
-    Map<String, ({double? home, double? away})> goalsV1ByFixture,
+    Map<String, _PhaseTwoSampleData> phaseTwoByFixture,
   ) {
     final fixtureId = row['fixture_id']?.toString();
     final leagueId = row['league_id']?.toString();
@@ -129,7 +146,7 @@ class LearningDatasetBuilder {
     final features = FeatureWhitelist.extract(
       Map<String, Object?>.from(normalizedInput),
     );
-    final goalsV1 = goalsV1ByFixture[fixtureId];
+    final phaseTwo = phaseTwoByFixture[fixtureId];
 
     return LearningSample(
       fixtureId: fixtureId,
@@ -141,8 +158,13 @@ class LearningDatasetBuilder {
       homeGoals: homeGoals,
       awayGoals: awayGoals,
       earliestRedCardMinute: _int(row['earliest_red_card_minute']),
-      globalGoalsV1ExpectedHome: goalsV1?.home,
-      globalGoalsV1ExpectedAway: goalsV1?.away,
+      globalGoalsV1ExpectedHome: phaseTwo?.goalsV1Home,
+      globalGoalsV1ExpectedAway: phaseTwo?.goalsV1Away,
+      globalMarketAvailability: phaseTwo?.availability,
+      globalMarketHomeTeamId: phaseTwo?.homeTeamId,
+      globalMarketAwayTeamId: phaseTwo?.awayTeamId,
+      globalMarketLeagueAvgHomeGoals: phaseTwo?.leagueAvgHomeGoals,
+      globalMarketLeagueAvgAwayGoals: phaseTwo?.leagueAvgAwayGoals,
     );
   }
 
@@ -284,4 +306,28 @@ class EligibilityAudit {
     'exclusionsByReason': exclusionsByReason,
     'perLeague': perLeague.map((e) => e.toJson()).toList(),
   };
+}
+
+/// Interner Zwischentyp: alles, was `LearningDatasetBuilder` pro Fixture aus
+/// der Phase-2-Quelle braucht, um sowohl die GLOBAL_GOALS_V1-Torerwartung
+/// (fest vorberechnet) als auch die `GlobalMarketEngine`-Rohdaten (auf
+/// Abruf berechnet, siehe `LearningSample.hasGlobalMarketData`) zu befüllen.
+class _PhaseTwoSampleData {
+  const _PhaseTwoSampleData({
+    required this.goalsV1Home,
+    required this.goalsV1Away,
+    required this.availability,
+    required this.homeTeamId,
+    required this.awayTeamId,
+    required this.leagueAvgHomeGoals,
+    required this.leagueAvgAwayGoals,
+  });
+
+  final double? goalsV1Home;
+  final double? goalsV1Away;
+  final Map<String, Object?> availability;
+  final String homeTeamId;
+  final String awayTeamId;
+  final double? leagueAvgHomeGoals;
+  final double? leagueAvgAwayGoals;
 }

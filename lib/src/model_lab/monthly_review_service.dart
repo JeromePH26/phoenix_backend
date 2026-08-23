@@ -125,7 +125,7 @@ class MonthlyReviewService {
   }) async {
     final championModel = await registry.currentChampion(
             leagueId: leagueId, market: market.key) ??
-        await database.globalBaselineModel(market.key);
+        await registry.currentChampion(leagueId: null, market: market.key);
 
     if (championModel == null) {
       return _persistReview(

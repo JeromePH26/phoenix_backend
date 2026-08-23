@@ -2,6 +2,8 @@ import '../config/model_lab_config.dart';
 import '../database/database.dart';
 import 'engine_replica.dart';
 import 'global_goals_v1_engine.dart';
+import 'global_market_engine.dart';
+import 'learning_market.dart';
 import 'weight_config.dart';
 
 /// Section 12/59/60: Model Registry. Verwaltet unveränderliche
@@ -105,7 +107,12 @@ class ModelRegistryService {
       leagueId: leagueId,
       market: market,
     );
-    return leagueChampion ?? await database.globalBaselineModel(market);
+    // NICHT `globalBaselineModel` (liefert immer die ÄLTESTE
+    // `global_baseline`-Zeile unabhängig vom Status - seit
+    // `activateGlobalMarketChampion` kann das die längst archivierte
+    // attackWeight-Formel sein). `currentChampion(leagueId: null, ...)`
+    // respektiert den tatsächlichen `champion`-Status.
+    return leagueChampion ?? await currentChampion(leagueId: null, market: market);
   }
 
   Future<List<Map<String, Object?>>> currentChallengers({
@@ -256,16 +263,35 @@ class ModelRegistryService {
   }
 
   /// Wie [weightsFromModel], aber engine-übergreifend: erkennt an
-  /// `weights.engineVersion`, ob ein Model die attackWeight-Formel oder
-  /// GLOBAL_GOALS_V1 verwendet. Champions sind aktuell immer attackWeight-
-  /// basiert (Promotion ist V0 serverseitig blockiert und die produktive
-  /// Simulation liest ausschließlich [weightsFromModel]) - diese Methode
-  /// wird für Vergleiche gebraucht, bei denen ein Challenger auch
-  /// GLOBAL_GOALS_V1 sein kann.
+  /// `weights.engineVersion`, welche Formel ein Model tatsächlich verwendet
+  /// - attackWeight-Blend, GLOBAL_GOALS_V1, oder eine `GlobalMarketEngine`-
+  /// Familie (optional mit Hypothesis). WICHTIG seit Section 59 (Claude
+  /// AN2.txt): globale Champions sind NICHT mehr zwingend attackWeight-
+  /// basiert - `activateGlobalMarketChampion` aktiviert `GlobalMarketEngine`-
+  /// Champions. Jeder Vergleich, der einen Champion liest (Learning Run,
+  /// Monthly Review, produktive Simulation), muss deshalb diese Methode
+  /// verwenden statt [weightsFromModel] direkt.
   ModelEngine modelEngine(Map<String, Object?> model) {
     final weights = model['weights'];
-    if (weights is Map && weights['engineVersion'] == GlobalGoalsV1Engine.version) {
-      return const ModelEngine.globalGoalsV1();
+    if (weights is Map) {
+      final engineVersion = weights['engineVersion'];
+      if (engineVersion == GlobalGoalsV1Engine.version) {
+        return const ModelEngine.globalGoalsV1();
+      }
+      for (final family in GlobalMarketFamily.values) {
+        if (engineVersion != family.version) continue;
+        final hypothesisKey = weights['hypothesis']?.toString();
+        GlobalMarketHypothesis? hypothesis;
+        if (hypothesisKey != null) {
+          for (final h in GlobalMarketHypothesis.values) {
+            if (h.key == hypothesisKey) {
+              hypothesis = h;
+              break;
+            }
+          }
+        }
+        return ModelEngine.globalMarket(family, hypothesis: hypothesis);
+      }
     }
     return ModelEngine.attackWeightBlend(weightsFromModel(model));
   }
@@ -331,5 +357,164 @@ class ModelRegistryService {
     );
 
     return (id: id, engine: const ModelEngine.globalGoalsV1());
+  }
+
+  /// Section 2/3/59 (Claude AN2.txt): archiviert (Status `retired`, NIE
+  /// gelöscht - Section 25) den bisherigen globalen Champion eines Marktes
+  /// und aktiviert ein `GlobalMarketEngine`-Model (Basis-Preset der
+  /// zugehörigen Marktfamilie, keine Hypothesis-Abweichung) als neuen
+  /// globalen Champion. Idempotent: ist bereits ein solches Model aktiver
+  /// Champion, passiert nichts (Section 12: Modelle nie still verändern -
+  /// ein zweiter Aufruf legt kein Duplikat an).
+  ///
+  /// WICHTIG: dies ist eine bewusste, einmalige Admin-Aktion (Section 59:
+  /// "Heute: Neue Global Champions aktivieren"), KEINE durch Learning-Runs
+  /// automatisch ausgelöste Promotion - genau deshalb ist sie separat von
+  /// der sonst überall gesperrten `promoteModel`-Nutzung (Section 23: keine
+  /// automatische Promotion) und wird nur explizit administrativ
+  /// angestoßen.
+  Future<Map<String, Object?>> activateGlobalMarketChampion(
+    LearningMarket market,
+  ) async {
+    final family = GlobalMarketFamily.forMarket(market);
+    final currentChampion = await database.championModel(
+      leagueId: null,
+      market: market.key,
+    );
+    final currentWeights = currentChampion?['weights'];
+    final alreadyActive = currentWeights is Map &&
+        currentWeights['engineVersion'] == family.version &&
+        currentWeights['hypothesis'] == null;
+    if (alreadyActive) {
+      return {
+        'status': 'already_active',
+        'market': market.key,
+        'family': family.version,
+        'modelVersionId': currentChampion!['id'],
+      };
+    }
+
+    final previousChampionId = currentChampion?['id'] as int?;
+    final generation = await nextGeneration(leagueId: null, market: market.key);
+    final engine = ModelEngine.globalMarket(family);
+    final readableVersion = 'V$generation';
+
+    final newChampionId = await database.insertModelVersion(
+      readableVersion: readableVersion,
+      parentModelId: previousChampionId,
+      generation: generation,
+      leagueId: null,
+      market: market.key,
+      modelType: 'global_baseline',
+      featureConfig: {
+        'features': 'globalMarketEngine',
+        'family': family.version,
+        'market': market.key,
+        'note':
+            'Globaler Basis-Champion (Claude AN2.txt) - echte, gewichtete '
+                'Features statt fester 50/50-Formel. xG/Rating/Motivation '
+                'aus der Vorlage entfernt (in PHÖNIX nicht real verfügbar), '
+                'verbleibende echte Kategorien proportional neu normiert.',
+      },
+      weights: engine.toJson(),
+      trainingCount: 0,
+      validationCount: 0,
+      holdoutCount: 0,
+      shadowCount: 0,
+      status: 'challenger',
+      configHash: GlobalMarketEngine.configHash(family: family),
+      codeSchemaVersion: codeSchemaVersion,
+    );
+
+    await database.promoteModel(
+      newChampionId: newChampionId,
+      previousChampionId: previousChampionId,
+    );
+
+    await database.insertModelLabAuditLog(
+      action: 'global_champion_activated',
+      actor: 'admin',
+      modelVersionId: newChampionId,
+      market: market.key,
+      details: {
+        'family': family.version,
+        'readableVersion': readableVersion,
+        'previousChampionId': previousChampionId,
+        'previousChampionArchived': previousChampionId != null,
+      },
+    );
+
+    return {
+      'status': 'activated',
+      'market': market.key,
+      'family': family.version,
+      'modelVersionId': newChampionId,
+      'previousChampionId': previousChampionId,
+    };
+  }
+
+  /// Erzeugt (oder findet die bereits existierende) `GlobalMarketEngine`-
+  /// Challenger-Version für eine Liga x Markt-Kombination und optionale
+  /// benannte Hypothesis (siehe `GlobalMarketHypothesis`, Section 10-12).
+  /// `hypothesis: null` würde denselben Konfigurations-Hash wie der
+  /// gerade aktivierte globale Champion selbst ergeben - deshalb nur mit
+  /// gesetzter Hypothesis aufrufen (der Champion braucht keinen eigenen
+  /// Challenger auf sich selbst).
+  Future<({int id, ModelEngine engine})> createOrReuseGlobalMarketChallenger({
+    required String? leagueId,
+    required LearningMarket market,
+    required GlobalMarketHypothesis hypothesis,
+    required int generation,
+    required int challengerIndex,
+    required int sampleSize,
+    required int parentModelId,
+    DateTime? trainingStart,
+    DateTime? trainingEnd,
+    required int trainingCount,
+    required int validationCount,
+    required int holdoutCount,
+  }) async {
+    final family = GlobalMarketFamily.forMarket(market);
+    final readableVersion = 'V$generation-C$challengerIndex-${hypothesis.key}';
+    final id = await database.insertModelVersion(
+      readableVersion: readableVersion,
+      parentModelId: parentModelId,
+      generation: generation,
+      leagueId: leagueId,
+      market: market.key,
+      modelType: 'weight_variant',
+      featureConfig: {
+        'features': 'globalMarketEngine',
+        'family': family.version,
+        'hypothesis': hypothesis.key,
+        'hypothesisLabel': hypothesis.label,
+      },
+      weights: ModelEngine.globalMarket(family, hypothesis: hypothesis).toJson(),
+      trainingStart: trainingStart,
+      trainingEnd: trainingEnd,
+      trainingCount: trainingCount,
+      validationCount: validationCount,
+      holdoutCount: holdoutCount,
+      shadowCount: 0,
+      status: 'challenger',
+      configHash: GlobalMarketEngine.configHash(family: family, hypothesis: hypothesis),
+      codeSchemaVersion: codeSchemaVersion,
+    );
+
+    await database.insertModelLabAuditLog(
+      action: 'challenger_created',
+      actor: 'system',
+      modelVersionId: id,
+      leagueId: leagueId,
+      market: market.key,
+      details: {
+        'readableVersion': readableVersion,
+        'engineVersion': family.version,
+        'hypothesis': hypothesis.key,
+        'sampleSize': sampleSize,
+      },
+    );
+
+    return (id: id, engine: ModelEngine.globalMarket(family, hypothesis: hypothesis));
   }
 }

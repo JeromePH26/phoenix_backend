@@ -128,7 +128,7 @@ class ModelLabRoutes {
               leagueId: leagueId,
               market: market,
             ) ??
-            await database.globalBaselineModel(market);
+            await registry.currentChampion(leagueId: null, market: market);
         final challengers = await registry.currentChallengers(
           leagueId: leagueId,
           market: market,
@@ -315,6 +315,42 @@ class ModelLabRoutes {
         return jsonResponse({
           'status': 'completed',
           'created': created,
+          'markets': results,
+        });
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
+    // Section 2/3/59 (Claude AN2.txt): einmalige Admin-Aktion - archiviert
+    // (Status `retired`, nie gelöscht) den bisherigen attackWeight-basierten
+    // globalen Champion je Markt und aktiviert ein GlobalMarketEngine-Model
+    // (echte, gewichtete Features statt fest 50/50) als neuen globalen
+    // Champion. KEINE Learning-Run-Promotion - bewusst separat und nur
+    // explizit administrativ ausgelöst.
+    router.post('/global-market-engines/activate', (Request request) async {
+      if (!_isAdmin(request)) return _unauthorized();
+      if (!await database.moduleEnabled('model_lab_learning')) {
+        return jsonResponse({
+          'error':
+              'Modul "Model Lab Learning" ist deaktiviert (App Control → Module).',
+        }, statusCode: 503);
+      }
+      try {
+        final registry = ModelRegistryService(
+          database: database,
+          config: modelLabConfig,
+        );
+        final results = <Map<String, Object?>>[];
+        var activated = 0;
+        for (final market in LearningMarket.values) {
+          final result = await registry.activateGlobalMarketChampion(market);
+          if (result['status'] == 'activated') activated++;
+          results.add(result);
+        }
+        return jsonResponse({
+          'status': 'completed',
+          'activated': activated,
           'markets': results,
         });
       } catch (error) {

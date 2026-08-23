@@ -1,4 +1,5 @@
 import 'global_goals_v1_engine.dart';
+import 'global_market_engine.dart';
 import 'learning_market.dart';
 import 'learning_sample.dart';
 import 'poisson_math.dart';
@@ -319,56 +320,112 @@ class EngineReplica {
   }
 }
 
+enum _ModelEngineKind { attackWeightBlend, globalGoalsV1, globalMarket }
+
 /// Welche Formel ein konkretes Model verwendet, um aus einem [LearningSample]
 /// eine Torerwartung abzuleiten. Ein Model verwendet immer GENAU eine
 /// Formel, nie eine Mischung:
 /// - `attackWeightBlend`: die ursprüngliche V0-Formel (`EngineReplica`,
 ///   ein einziger Freiheitsgrad, siehe `weight_config.dart`).
-/// - `globalGoalsV1`: das später hinzugekommene, sechs-Feature-gewichtete
-///   Modell (`GlobalGoalsV1Engine`) mit echter Fehlende-Daten-
-///   Renormalisierung statt eines groben Fallback-Werts. Braucht einen
-///   vorab (bei Sample-Erstellung) berechneten, leakage-sicheren
-///   Phase-2-Snapshot - ist dieser für ein Sample nicht vorhanden, liefert
-///   [evaluate] `null` statt eine erfundene Zahl.
+/// - `globalGoalsV1`: das erste sechs-Feature-gewichtete Modell
+///   (`GlobalGoalsV1Engine`), bereits produktiv als Challenger im Einsatz -
+///   bleibt unverändert bestehen (Section 12: nie still verändern).
+/// - `globalMarket`: die Nachfolge-Generation (`GlobalMarketEngine`,
+///   Claude AN2.txt) mit eigenem Gewichtsprofil je Marktfamilie und
+///   optionalen benannten Hypothesis-Varianten (`GlobalMarketHypothesis`).
+///
+/// `globalGoalsV1` und `globalMarket` liefern `null` aus [evaluate], wenn für
+/// das Sample kein leakage-sicherer Phase-2-Snapshot vorhanden ist - die
+/// attackWeight-Formel hat immer einen neutralen Fallback und liefert nie
+/// `null`.
 class ModelEngine {
   const ModelEngine.attackWeightBlend(EngineWeightConfig weights)
-      : _attackWeightConfig = weights,
-        _isGlobalGoalsV1 = false;
+      : _kind = _ModelEngineKind.attackWeightBlend,
+        _attackWeightConfig = weights,
+        _globalMarketFamily = null,
+        _globalMarketWeights = null,
+        _globalMarketHypothesis = null;
 
   const ModelEngine.globalGoalsV1()
-      : _attackWeightConfig = null,
-        _isGlobalGoalsV1 = true;
+      : _kind = _ModelEngineKind.globalGoalsV1,
+        _attackWeightConfig = null,
+        _globalMarketFamily = null,
+        _globalMarketWeights = null,
+        _globalMarketHypothesis = null;
 
+  /// [hypothesis] `null` bedeutet: der Basis-Preset der Marktfamilie (der
+  /// Champion selbst), sonst eine benannte, abweichende Gewichts-Variante.
+  ModelEngine.globalMarket(
+    GlobalMarketFamily family, {
+    GlobalMarketHypothesis? hypothesis,
+  })  : _kind = _ModelEngineKind.globalMarket,
+        _attackWeightConfig = null,
+        _globalMarketFamily = family,
+        _globalMarketWeights = hypothesis == null
+            ? GlobalMarketWeights.presets[family]!
+            : hypothesis.apply(GlobalMarketWeights.presets[family]!),
+        _globalMarketHypothesis = hypothesis;
+
+  final _ModelEngineKind _kind;
   final EngineWeightConfig? _attackWeightConfig;
-  final bool _isGlobalGoalsV1;
+  final GlobalMarketFamily? _globalMarketFamily;
+  final GlobalMarketWeights? _globalMarketWeights;
+  final GlobalMarketHypothesis? _globalMarketHypothesis;
 
-  bool get isGlobalGoalsV1 => _isGlobalGoalsV1;
+  bool get isGlobalGoalsV1 => _kind == _ModelEngineKind.globalGoalsV1;
+  bool get isGlobalMarket => _kind == _ModelEngineKind.globalMarket;
 
-  /// `null`, wenn dieses Engine für [sample] keine Torerwartung berechnen
-  /// kann (aktuell nur GLOBAL_GOALS_V1 ohne passenden Phase-2-Snapshot -
-  /// die attackWeight-Formel hat immer einen neutralen Fallback und liefert
-  /// nie `null`).
   EngineReplicaOutput? evaluate({
     required LearningMarket market,
     required LearningSample sample,
   }) {
-    if (_isGlobalGoalsV1) {
-      final home = sample.globalGoalsV1ExpectedHome;
-      final away = sample.globalGoalsV1ExpectedAway;
-      if (home == null || away == null) return null;
-      return EngineReplica.evaluateGoals(
-        market: market,
-        goals: (home: home, away: away, usedFallback: false),
-      );
+    switch (_kind) {
+      case _ModelEngineKind.attackWeightBlend:
+        return EngineReplica.evaluate(
+          market: market,
+          features: sample.features,
+          weights: _attackWeightConfig!,
+        );
+      case _ModelEngineKind.globalGoalsV1:
+        final home = sample.globalGoalsV1ExpectedHome;
+        final away = sample.globalGoalsV1ExpectedAway;
+        if (home == null || away == null) return null;
+        return EngineReplica.evaluateGoals(
+          market: market,
+          goals: (home: home, away: away, usedFallback: false),
+        );
+      case _ModelEngineKind.globalMarket:
+        if (!sample.hasGlobalMarketData) return null;
+        final result = GlobalMarketEngine.compute(
+          family: _globalMarketFamily!,
+          availability: sample.globalMarketAvailability!,
+          homeTeamId: sample.globalMarketHomeTeamId!,
+          awayTeamId: sample.globalMarketAwayTeamId!,
+          leagueAvgHomeGoalsPerGame: sample.globalMarketLeagueAvgHomeGoals,
+          leagueAvgAwayGoalsPerGame: sample.globalMarketLeagueAvgAwayGoals,
+          weightsOverride: _globalMarketWeights,
+        );
+        final home = result.expectedHome;
+        final away = result.expectedAway;
+        if (home == null || away == null) return null;
+        return EngineReplica.evaluateGoals(
+          market: market,
+          goals: (home: home, away: away, usedFallback: false),
+        );
     }
-    return EngineReplica.evaluate(
-      market: market,
-      features: sample.features,
-      weights: _attackWeightConfig!,
-    );
   }
 
-  Map<String, Object?> toJson() => _isGlobalGoalsV1
-      ? {'engineVersion': GlobalGoalsV1Engine.version}
-      : _attackWeightConfig!.toJson();
+  Map<String, Object?> toJson() {
+    switch (_kind) {
+      case _ModelEngineKind.attackWeightBlend:
+        return _attackWeightConfig!.toJson();
+      case _ModelEngineKind.globalGoalsV1:
+        return {'engineVersion': GlobalGoalsV1Engine.version};
+      case _ModelEngineKind.globalMarket:
+        return {
+          'engineVersion': _globalMarketFamily!.version,
+          if (_globalMarketHypothesis case final hypothesis?) 'hypothesis': hypothesis.key,
+        };
+    }
+  }
 }

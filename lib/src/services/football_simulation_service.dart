@@ -355,6 +355,22 @@ class FootballSimulationService {
           ModelRegistryService.leagueMarketKey(leagueId, market.key)];
       if (champion == null) continue;
 
+      // Section 59 (Claude AN2.txt): globale Champions können inzwischen
+      // GlobalMarketEngine-basiert sein (H2H/Form/Tabelle statt fest 50/50),
+      // die dafür nötigen Live-Rohdaten (Phase-2-Snapshot mit H2H/Standings)
+      // werden an dieser Stelle der produktiven Analyse-Pipeline aber noch
+      // nicht mitgeführt. `weightsFromModel` würde ein solches Model
+      // stillschweigend als attackWeight=0.5 fehlinterpretieren statt seine
+      // echte Formel zu nutzen - lieber ehrlich überspringen (identisch zum
+      // "kein Champion"-Fall) als eine falsche Zahl unter dem Namen dieses
+      // Champions veröffentlichen. Betrifft heute nur eine hypothetische
+      // künftige Liga-Promotion (Promotion ist serverseitig blockiert,
+      // aktuell hat keine Liga einen eigenen Champion).
+      final championWeights = champion['weights'];
+      if (championWeights is Map && championWeights['engineVersion'] != null) {
+        continue;
+      }
+
       final output = EngineReplica.evaluate(
         market: market,
         features: features,

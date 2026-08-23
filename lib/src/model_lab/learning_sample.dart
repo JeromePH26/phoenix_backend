@@ -18,6 +18,11 @@ class LearningSample {
     this.earliestRedCardMinute,
     this.globalGoalsV1ExpectedHome,
     this.globalGoalsV1ExpectedAway,
+    this.globalMarketAvailability,
+    this.globalMarketHomeTeamId,
+    this.globalMarketAwayTeamId,
+    this.globalMarketLeagueAvgHomeGoals,
+    this.globalMarketLeagueAvgAwayGoals,
   });
 
   final String fixtureId;
@@ -37,6 +42,25 @@ class LearningSample {
   /// erst seit Kurzem und nicht für jede Liga/jedes historische Spiel.
   final double? globalGoalsV1ExpectedHome;
   final double? globalGoalsV1ExpectedAway;
+
+  /// Rohdaten für `GlobalMarketEngine` (siehe `global_market_engine.dart`) -
+  /// im Gegensatz zu [globalGoalsV1ExpectedHome]/[globalGoalsV1ExpectedAway]
+  /// wird hier NICHT eine einzelne fertige Torerwartung vorab berechnet,
+  /// sondern die Rohdaten gespeichert: `GlobalMarketEngine` hat mehrere
+  /// Marktfamilien UND mehrere Hypothesis-Gewichtsvarianten je Familie -
+  /// eine Vorab-Berechnung für jede Kombination wäre unnötig viel
+  /// gespeicherter/berechneter Ballast. Dieselbe leakage-sichere
+  /// Phase-2-Snapshot-Quelle wie [globalGoalsV1ExpectedHome].
+  final Map<String, Object?>? globalMarketAvailability;
+  final String? globalMarketHomeTeamId;
+  final String? globalMarketAwayTeamId;
+  final double? globalMarketLeagueAvgHomeGoals;
+  final double? globalMarketLeagueAvgAwayGoals;
+
+  bool get hasGlobalMarketData =>
+      globalMarketAvailability != null &&
+      globalMarketHomeTeamId != null &&
+      globalMarketAwayTeamId != null;
 
   bool get hasGlobalGoalsV1Data =>
       globalGoalsV1ExpectedHome != null && globalGoalsV1ExpectedAway != null;
