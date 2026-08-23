@@ -7614,13 +7614,49 @@ class PhoenixDatabase {
     });
   }
 
-  /// Rückwärtskompatibler Name für bestehende Aufrufer.
-  Future<List<Map<String, Object?>>> reconcileOrphanedLearningRuns({
-    required int staleAfterMinutes,
-  }) {
-    return recoverOrphanedLearningRunAndLock(
-      staleAfterMinutes: staleAfterMinutes,
+  /// Wird NUR aufgerufen, nachdem der Aufrufer den Advisory-Lock bereits
+  /// exklusiv erworben hat (siehe `LearningRunService.run()`). Das
+  /// Lock-System garantiert, dass zu jedem Zeitpunkt höchstens ein Learning
+  /// Run aktiv sein darf - jede Zeile, die an dieser Stelle trotzdem noch
+  /// als "running" markiert ist, MUSS also von einem toten Vorgänger
+  /// stammen, unabhängig davon, wie lange er schon "läuft". Anders als
+  /// [recoverOrphanedLearningRunAndLock] (das VOR einem Lock-Erwerb prüft
+  /// und deshalb noch auf die konfigurierte Stale-Schwelle angewiesen ist,
+  /// weil zu diesem Zeitpunkt noch nicht sicher ist, ob der Lock wirklich
+  /// verwaist ist) braucht dieser Pfad keine Altersgrenze.
+  ///
+  /// Ohne diese altersunabhängige Prüfung blieb ein Run für bis zu
+  /// [ModelLabConfig.staleLockMinutes] als "running" liegen und ein neuer
+  /// Versuch startete komplett neu statt fortzusetzen, sobald sein Prozess
+  /// zwar seinen Lock im finally-Block sauber freigeben konnte (z.B. bei
+  /// einem kontrollierten Shutdown mit Gnadenfrist), aber nie bis zum
+  /// eigentlichen Abschluss (`completeLearningRun`) kam - live beobachtet:
+  /// der Lock war nach 59 Minuten schon wieder frei, weit unter der
+  /// 180-Minuten-Schwelle.
+  Future<List<Map<String, Object?>>> reconcileOrphanedLearningRuns() async {
+    final db = await connection();
+    final orphaned = await db.execute(
+      Sql.named('''
+        UPDATE phoenix_learning_runs SET
+          status = 'failed',
+          completed_at = NOW(),
+          current_step = 'orphaned',
+          errors = CAST(@errors AS JSONB)
+        WHERE status = 'running'
+        RETURNING id, summary, challengers_created, leagues_processed,
+          markets_processed
+      '''),
+      parameters: {
+        'errors': jsonEncode([
+          'Orphaned: Prozess wurde vor Abschluss beendet (z.B. durch einen '
+              'Deploy) und automatisch nachgetragen, nachdem ein neuer Run '
+              'den Lock erfolgreich (neu) erworben hat.',
+        ]),
+      },
     );
+    return orphaned
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
   }
 
   Future<void> releaseModelLabLock(String lockName) async {

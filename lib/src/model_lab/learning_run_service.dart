@@ -69,15 +69,15 @@ class LearningRunService {
       };
     }
 
-    // Section 64/65: falls der Lock gerade per Stale-Reclaim übernommen
-    // wurde, hängt evtl. noch ein alter Run auf "running" - sauber als
-    // "failed" nachtragen, bevor ein neuer Run beginnt. Der Rückgabewert
-    // trägt den letzten Fortschritt des verwaisten Laufs (siehe
-    // `_resumeStateFrom`), damit ein neuer Run bei vielen Liga×Markt-Paaren
-    // nicht bei jedem Redeploy wieder bei Null anfängt.
-    final orphanedRuns = await database.reconcileOrphanedLearningRuns(
-      staleAfterMinutes: config.staleLockMinutes,
-    );
+    // Der Lock ist jetzt exklusiv unser - jede Zeile, die trotzdem noch als
+    // "running" markiert ist, MUSS von einem toten Vorgänger stammen
+    // (unabhängig von ihrem Alter, siehe Doku an
+    // `reconcileOrphanedLearningRuns`). Sauber als "failed" nachtragen,
+    // bevor ein neuer Run beginnt. Der Rückgabewert trägt den letzten
+    // Fortschritt des verwaisten Laufs (siehe `_resumeStateFrom`), damit ein
+    // neuer Run bei vielen Liga×Markt-Paaren nicht bei jedem Redeploy wieder
+    // bei Null anfängt.
+    final orphanedRuns = await database.reconcileOrphanedLearningRuns();
     final resumeState = _resumeStateFrom(orphanedRuns);
 
     final runId = await database.createLearningRun(triggerType: triggerType);
