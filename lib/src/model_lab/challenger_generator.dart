@@ -16,6 +16,21 @@ class ChallengerGenerator {
         .toSet() // Duplikate aus der Config entfernen
         .toList()
       ..sort();
-    return withinBounds.take(config.maxChallengersPerLeagueMarket).toList();
+    if (withinBounds.length <= config.maxChallengersPerLeagueMarket ||
+        config.maxChallengersPerLeagueMarket <= 1) {
+      return withinBounds.take(config.maxChallengersPerLeagueMarket).toList();
+    }
+    // Ein simples `.take(n)` nach dem Sortieren hätte hier immer nur die
+    // NIEDRIGSTEN Werte des Gitters behalten und die obere Hälfte des
+    // konfigurierten Suchraums stillschweigend nie getestet, sobald das
+    // Gitter mehr Punkte als `maxChallengersPerLeagueMarket` enthält.
+    // Gleichmäßiges Sampling über das gesamte (sortierte) Gitter deckt
+    // stattdessen den ganzen erlaubten Bereich ab.
+    final step = (withinBounds.length - 1) / (config.maxChallengersPerLeagueMarket - 1);
+    return [
+      for (var i = 0; i < config.maxChallengersPerLeagueMarket; i++)
+        withinBounds[(i * step).round().clamp(0, withinBounds.length - 1)],
+    ].toSet().toList()
+      ..sort();
   }
 }

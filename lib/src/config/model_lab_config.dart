@@ -162,13 +162,22 @@ class ModelLabConfig {
       fullLeagueEngineSampleThreshold:
           readInt('PHOENIX_MODEL_LAB_FULL_LEAGUE_ENGINE_THRESHOLD', 600),
       shrinkageK: readInt('PHOENIX_MODEL_LAB_SHRINKAGE_K', 150),
+      // Erweitert 2026-08-23: der alte Suchraum (±0.20 um 0.5, nur 4
+      // Gitterpunkte) war so eng, dass ein Challenger kaum je einen messbar
+      // anderen Torerwartungswert als der Champion produzieren konnte - bei
+      // wenigen hundert Beobachtungen bleibt der Unterschied dann fast immer
+      // im Rauschen und es entsteht praktisch nie eine klare Verbesserung.
+      // ±0.30 mit 6 statt 4 Punkten deckt einen deutlich größeren Teil des
+      // sinnvollen Bereichs ab, bleibt aber innerhalb von [0,1] weit von den
+      // physikalisch bedeutungslosen Extremen (reine Angriffs- bzw. reine
+      // Verteidigungsgewichtung) entfernt.
       attackWeightMin:
-          readDouble('PHOENIX_MODEL_LAB_ATTACK_WEIGHT_MIN', 0.30),
+          readDouble('PHOENIX_MODEL_LAB_ATTACK_WEIGHT_MIN', 0.20),
       attackWeightMax:
-          readDouble('PHOENIX_MODEL_LAB_ATTACK_WEIGHT_MAX', 0.70),
+          readDouble('PHOENIX_MODEL_LAB_ATTACK_WEIGHT_MAX', 0.80),
       attackWeightGrid: readGrid(
         'PHOENIX_MODEL_LAB_ATTACK_WEIGHT_GRID',
-        const [0.40, 0.45, 0.55, 0.60],
+        const [0.20, 0.35, 0.45, 0.55, 0.65, 0.80],
       ),
       holdoutFraction:
           readDouble('PHOENIX_MODEL_LAB_HOLDOUT_FRACTION', 0.20),
@@ -203,7 +212,7 @@ class ModelLabConfig {
       monthlyReviewMaxDayOfMonth:
           readInt('PHOENIX_MODEL_LAB_MONTHLY_REVIEW_MAX_DAY', 7),
       maxChallengersPerLeagueMarket:
-          readInt('PHOENIX_MODEL_LAB_MAX_CHALLENGERS', 4),
+          readInt('PHOENIX_MODEL_LAB_MAX_CHALLENGERS', 6),
       staleLockMinutes:
           readInt('PHOENIX_MODEL_LAB_STALE_LOCK_MINUTES', 180),
     );
