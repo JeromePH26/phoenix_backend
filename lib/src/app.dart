@@ -158,11 +158,9 @@ class PhoenixBackend {
   }
 
   Future<void> _initializeDatabase() async {
-    final serverStartedAt = DateTime.now().toUtc();
     try {
       await database.migrate();
-      final interrupted =
-          await database.failPipelineJobsFromEarlierServer(serverStartedAt);
+      final interrupted = await database.failPipelineJobsFromEarlierServer();
       if (interrupted > 0) {
         stdout.writeln(
           'PHOENIX: $interrupted Tagesscan(s) vom vorherigen Serverlauf beendet.',

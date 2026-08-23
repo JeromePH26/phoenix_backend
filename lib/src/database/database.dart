@@ -6606,8 +6606,7 @@ class PhoenixDatabase {
 
   /// Ein Railway-Deploy beendet alle In-Process-Pipelines des alten
   /// Containers. Diese Jobs dürfen danach keinen neuen Scan blockieren.
-  Future<int> failPipelineJobsFromEarlierServer(
-      DateTime serverStartedAt) async {
+  Future<int> failPipelineJobsFromEarlierServer() async {
     final db = await connection();
     final result = await db.execute(
       Sql.named('''
@@ -6618,10 +6617,8 @@ class PhoenixDatabase {
             completed_at = NOW(),
             last_activity_at = NOW()
         WHERE status = 'running'
-          AND created_at < @server_started_at
         RETURNING id
       '''),
-      parameters: {'server_started_at': serverStartedAt.toUtc()},
     );
     return result.length;
   }
