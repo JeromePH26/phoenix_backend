@@ -7843,6 +7843,40 @@ class PhoenixDatabase {
         .toList();
   }
 
+  /// Live-Aktivitäts-Feed für einen laufenden Learning Run: die zuletzt
+  /// erstellten Kandidaten (Markt/Liga/Hypothese), damit man dem Run beim
+  /// Arbeiten zusehen kann, statt nur auf das Endergebnis zu warten.
+  Future<List<Map<String, Object?>>> learningRunCandidatesFeed(
+    int runId, {
+    int limit = 40,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT
+          c.id,
+          c.market,
+          c.league_id,
+          c.status AS candidate_status,
+          c.created_at,
+          m.id AS model_version_id,
+          m.readable_version,
+          m.model_type,
+          (m.weights->>'hypothesis') AS hypothesis,
+          (m.weights->>'engineVersion') AS engine_version
+        FROM phoenix_learning_candidates c
+        JOIN phoenix_model_versions m ON m.id = c.model_version_id
+        WHERE c.learning_run_id = @run_id
+        ORDER BY c.created_at DESC
+        LIMIT @limit
+      '''),
+      parameters: {'run_id': runId, 'limit': limit},
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
   /// Speichert eine Shadow Prediction idempotent und meldet zurück, ob dabei
   /// wirklich eine neue Zeile entstanden ist. Damit sind Cron-Protokoll und
   /// Monitoring nach Wiederholungen/Deploys korrekt statt künstlich erhöht.

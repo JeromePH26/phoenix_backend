@@ -419,6 +419,31 @@ class ModelLabRoutes {
       }
     });
 
+    router.get('/learning-runs/<id|[0-9]+>/candidates',
+        (Request request, String id) async {
+      if (!_isAdmin(request)) return _unauthorized();
+      final runId = int.tryParse(id);
+      if (runId == null) {
+        return jsonResponse({'error': 'Ungültige Run-ID.'}, statusCode: 400);
+      }
+      final limit = int.tryParse(
+            request.url.queryParameters['limit'] ?? '',
+          ) ??
+          40;
+      try {
+        final candidates = await database.learningRunCandidatesFeed(
+          runId,
+          limit: limit,
+        );
+        return jsonResponse({
+          'count': candidates.length,
+          'candidates': candidates.map(_jsonSafe).toList(),
+        });
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
     router.post('/learning-runs/start', (Request request) async {
       if (!_isAdmin(request)) return _unauthorized();
       if (!await database.moduleEnabled('model_lab_learning')) {
