@@ -37,6 +37,12 @@ class FootballDailyPipelineService {
     int minimumDataQuality = 0,
     int simulations = 100000,
   }) async {
+    // Ein aktiver Job aktualisiert seine Lease auch innerhalb längerer
+    // Detail-/Simulationsschritte. Stürzt der Prozess ab, endet der
+    // Heartbeat und ein späterer Start kann den hängenden Job freigeben.
+    final heartbeat = Timer.periodic(const Duration(seconds: 30), (_) {
+      unawaited(database.touchFootballDailyPipelineJob(jobId).catchError((_) {}));
+    });
     try {
       // Kein fachliches 20er-Limit mehr: Standard sind alle Fokus-Spiele.
       // Der manuelle Wert bleibt aber absichtlich wirksam, damit das Control
@@ -249,6 +255,8 @@ class FootballDailyPipelineService {
         error: error,
         completed: true,
       );
+    } finally {
+      heartbeat.cancel();
     }
   }
 

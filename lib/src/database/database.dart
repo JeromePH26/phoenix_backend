@@ -451,6 +451,7 @@ class PhoenixDatabase {
         published INTEGER NOT NULL DEFAULT 0,
         error TEXT,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        last_activity_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         completed_at TIMESTAMPTZ
       )
     ''');
@@ -473,12 +474,55 @@ class PhoenixDatabase {
         ADD COLUMN IF NOT EXISTS published INTEGER NOT NULL DEFAULT 0,
         ADD COLUMN IF NOT EXISTS error TEXT,
         ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMPTZ,
         ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ
+    ''');
+
+    // Ein Scan darf nie unbegrenzt als "läuft" hängen bleiben. Bestehende
+    // Datensätze erhalten zunächst einen sinnvollen Aktivitätszeitpunkt;
+    // neue Läufe aktualisieren ihn zusätzlich durch einen Heartbeat.
+    await db.execute('''
+      UPDATE football_daily_pipeline_jobs
+      SET last_activity_at = COALESCE(last_activity_at, completed_at, created_at)
+      WHERE last_activity_at IS NULL
+    ''');
+
+    await db.execute('''
+      ALTER TABLE football_daily_pipeline_jobs
+      ALTER COLUMN last_activity_at SET DEFAULT NOW()
+    ''');
+
+    await db.execute('''
+      ALTER TABLE football_daily_pipeline_jobs
+      ALTER COLUMN last_activity_at SET NOT NULL
+    ''');
+
+    // Alte Prozesse aus früheren Deployments haben keinen Heartbeat. Sie
+    // blockieren keinen weiteren manuellen Scan mehr, wenn sie 15 Minuten
+    // keinerlei Aktivität gemeldet haben.
+    await db.execute('''
+      UPDATE football_daily_pipeline_jobs
+      SET status = 'failed',
+          current_step = 'timed_out',
+          error = 'Scan wegen fehlender Aktivität automatisch beendet.',
+          completed_at = NOW(),
+          last_activity_at = NOW()
+      WHERE status = 'running'
+        AND last_activity_at < NOW() - INTERVAL '15 minutes'
     ''');
 
     await db.execute('''
       CREATE INDEX IF NOT EXISTS idx_football_daily_pipeline_jobs_date
       ON football_daily_pipeline_jobs (scan_date, id DESC)
+    ''');
+
+    // Es darf genau ein rechenintensiver Football-Scan gleichzeitig laufen.
+    // Das ist absichtlich kein Tageslimit: Nach Abschluss kann derselbe Tag
+    // jederzeit erneut gescannt werden.
+    await db.execute('''
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_football_daily_pipeline_one_running
+      ON football_daily_pipeline_jobs ((1))
+      WHERE status = 'running'
     ''');
 
     // PHÖNIX-Fußballanalysen laufen verbindlich mit 100.000 Simulationen.
@@ -6448,18 +6492,37 @@ class PhoenixDatabase {
     };
   }
 
-  Future<int> createFootballDailyPipelineJob({
+  /// Startet atomar einen neuen Tages-Scan oder liefert den bereits aktiven
+  /// Scan zurück. Es gibt bewusst kein Limit pro Tag – nur keine parallelen,
+  /// ressourcenfressenden Pipeline-Läufe.
+  Future<Map<String, Object?>> startFootballDailyPipelineJob({
     required DateTime date,
     required int limit,
     required int minimumDataQuality,
     required int simulations,
   }) async {
     final db = await connection();
+
+    // Ein abgestürzter Railway-Prozess kann seinen Status nicht selbst
+    // zurücksetzen. Der Heartbeat neuer Läufe schützt gültige lange Scans;
+    // ohne Herzschlag wird ein Job nach 15 Minuten freigegeben.
+    await db.execute('''
+      UPDATE football_daily_pipeline_jobs
+      SET status = 'failed',
+          current_step = 'timed_out',
+          error = 'Scan wegen fehlender Aktivität automatisch beendet.',
+          completed_at = NOW(),
+          last_activity_at = NOW()
+      WHERE status = 'running'
+        AND last_activity_at < NOW() - INTERVAL '15 minutes'
+    ''');
+
     final result = await db.execute(
       Sql.named('''
         INSERT INTO football_daily_pipeline_jobs (
           scan_date, requested_limit, minimum_data_quality, simulations
         ) VALUES (@date, @limit, @quality, @simulations)
+        ON CONFLICT DO NOTHING
         RETURNING id
       '''),
       parameters: {
@@ -6471,7 +6534,20 @@ class PhoenixDatabase {
             : simulations.clamp(100000, 100000).toInt(),
       },
     );
-    return result.first[0] as int;
+    if (result.isNotEmpty) {
+      return {'started': true, 'jobId': result.first[0] as int};
+    }
+
+    final running = await db.execute('''
+      SELECT id FROM football_daily_pipeline_jobs
+      WHERE status = 'running'
+      ORDER BY created_at DESC
+      LIMIT 1
+    ''');
+    if (running.isEmpty) {
+      throw StateError('Tagesscan konnte nicht exklusiv gestartet werden.');
+    }
+    return {'started': false, 'jobId': running.first[0] as int};
   }
 
   Future<void> updateFootballDailyPipelineJob({
@@ -6498,7 +6574,8 @@ class PhoenixDatabase {
           processed = COALESCE(@processed, processed),
           published = COALESCE(@published, published),
           error = @error,
-          completed_at = CASE WHEN @completed THEN NOW() ELSE completed_at END
+          completed_at = CASE WHEN @completed THEN NOW() ELSE completed_at END,
+          last_activity_at = NOW()
         WHERE id = @job_id
       '''),
       parameters: {
@@ -6512,6 +6589,18 @@ class PhoenixDatabase {
         'error': error?.toString(),
         'completed': completed,
       },
+    );
+  }
+
+  Future<void> touchFootballDailyPipelineJob(int jobId) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        UPDATE football_daily_pipeline_jobs
+        SET last_activity_at = NOW()
+        WHERE id = @job_id AND status = 'running'
+      '''),
+      parameters: {'job_id': jobId},
     );
   }
 

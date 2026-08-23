@@ -2060,12 +2060,22 @@ class ApiRoutes {
         }, statusCode: 400);
       }
 
-      final jobId = await database.createFootballDailyPipelineJob(
+      final start = await database.startFootballDailyPipelineJob(
         date: date,
         limit: limit,
         minimumDataQuality: minimumDataQuality,
         simulations: simulations,
       );
+      final jobId = start['jobId'] as int;
+
+      if (start['started'] != true) {
+        return jsonResponse({
+          'status': 'already_running',
+          'jobId': jobId,
+          'error': 'Ein Tagesscan läuft bereits. Nach dessen Abschluss kann sofort ein weiterer Scan gestartet werden.',
+          'statusUrl': '/api/admin/football/daily-scan/$jobId',
+        }, statusCode: 409);
+      }
 
       unawaited(
         FootballDailyPipelineService(
