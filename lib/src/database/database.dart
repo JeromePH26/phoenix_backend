@@ -6874,10 +6874,23 @@ class PhoenixDatabase {
   Future<List<Map<String, Object?>>> modelLabRawDataset({
     String? leagueId,
     required int minDataQuality,
+    // Section GLOBAL_GOALS_V1 Weight-Search: NUR für die schreibgeschützte
+    // Offline-Analyse in bin/phoenix_model_lab_weight_search.dart gedacht -
+    // erweitert den Ligenkreis auf ALLE Ligen inkl. Datenpool, um für die
+    // reine Gewichts-Exploration die größtmögliche Stichprobe zu nutzen.
+    // Die eigentliche Learning-Run-Pipeline (Challenger-Erzeugung) bleibt
+    // bewusst auf Fokus+Beobachtungsliste beschränkt (Section 93: Datenpool
+    // ist ein reiner Datensammler, noch keine geprüfte Trainingsquelle).
+    // Data-Quality- und Leakage-Filter (Snapshot vor Kickoff) gelten
+    // unverändert - die sind Korrektheit, keine Konservativität.
+    bool includeAllTiers = false,
   }) async {
     final db = await connection();
     final leagueFilter =
         leagueId == null ? '' : 'AND ei.league_id = @league_id';
+    final tierFilter = includeAllTiers
+        ? ''
+        : "AND fl.collection_tier IN ('focus', 'watchlist')";
     final result = await db.execute(
       Sql.named('''
         SELECT DISTINCT ON (ei.fixture_id)
@@ -6901,13 +6914,13 @@ class PhoenixDatabase {
           FROM football_live_events
           WHERE fixture_id = ei.fixture_id AND event_type = 'redCard'
         ) rc ON TRUE
-        WHERE fl.collection_tier IN ('focus', 'watchlist')
-          AND m.status = ANY(@finished_statuses)
+        WHERE m.status = ANY(@finished_statuses)
           AND m.home_goals IS NOT NULL
           AND m.away_goals IS NOT NULL
           AND m.kickoff_utc IS NOT NULL
           AND ei.created_at < m.kickoff_utc
           AND ei.data_quality >= @min_data_quality
+          $tierFilter
           $leagueFilter
         ORDER BY ei.fixture_id, ei.created_at DESC
       '''),
@@ -7034,8 +7047,15 @@ class PhoenixDatabase {
   /// Ergebnisse einfließen lassen. Nicht jedes Fixture aus
   /// [modelLabRawDataset] hat einen passenden Eintrag hier - Phase-2-Scans
   /// laufen erst seit Kurzem und nur budgetiert für Beobachtungsligen.
-  Future<List<Map<String, Object?>>> modelLabGlobalGoalsV1Dataset() async {
+  Future<List<Map<String, Object?>>> modelLabGlobalGoalsV1Dataset({
+    // Siehe `includeAllTiers` an [modelLabRawDataset] - dieselbe Begründung,
+    // nur für die GLOBAL_GOALS_V1-Datenquelle.
+    bool includeAllTiers = false,
+  }) async {
     final db = await connection();
+    final tierFilter = includeAllTiers
+        ? ''
+        : "AND fl.collection_tier IN ('focus', 'watchlist')";
     final result = await db.execute(
       Sql.named('''
       SELECT
@@ -7056,12 +7076,12 @@ class PhoenixDatabase {
         FROM football_matches m
         JOIN football_leagues fl ON fl.league_id = m.league_id
         JOIN football_phase_two_results p ON p.fixture_id = m.id
-        WHERE fl.collection_tier IN ('focus', 'watchlist')
-          AND m.status = ANY(@finished_statuses)
+        WHERE m.status = ANY(@finished_statuses)
           AND m.home_goals IS NOT NULL
           AND m.away_goals IS NOT NULL
           AND m.kickoff_utc IS NOT NULL
           AND p.created_at < m.kickoff_utc
+          $tierFilter
         ORDER BY m.id, p.created_at DESC
       ) picked
       LEFT JOIN LATERAL (

@@ -16,12 +16,17 @@ class LearningDatasetBuilder {
   /// Section 19/21: liefert alle leakage-sicheren Samples für eine (optional
   /// auf eine Liga eingeschränkte) Abfrage, chronologisch nach Kickoff
   /// sortiert (Voraussetzung für Walk-Forward, Section 30/31).
-  Future<List<LearningSample>> buildSamples({String? leagueId}) async {
+  Future<List<LearningSample>> buildSamples({
+    String? leagueId,
+    bool includeAllTiers = false,
+  }) async {
     final rows = await database.modelLabRawDataset(
       leagueId: leagueId,
       minDataQuality: config.minDataQuality,
+      includeAllTiers: includeAllTiers,
     );
-    final goalsV1ByFixture = await _globalGoalsV1ByFixture();
+    final goalsV1ByFixture =
+        await _globalGoalsV1ByFixture(includeAllTiers: includeAllTiers);
     return _samplesFromRows(rows, goalsV1ByFixture);
   }
 
@@ -29,11 +34,19 @@ class LearningDatasetBuilder {
   /// gruppiert ihn anschließend nach Liga. Ein Learning-Run bewertet viele
   /// Märkte auf denselben Fixtures; ohne diesen Batch-Pfad wurde derselbe
   /// Datenbank-Scan bisher für jeden Markt erneut ausgeführt.
-  Future<Map<String, List<LearningSample>>> buildSamplesByLeague() async {
+  ///
+  /// [includeAllTiers] ist ausschließlich für die schreibgeschützte
+  /// Offline-Gewichtsanalyse (`bin/phoenix_model_lab_weight_search.dart`)
+  /// gedacht - siehe `PhoenixDatabase.modelLabRawDataset`.
+  Future<Map<String, List<LearningSample>>> buildSamplesByLeague({
+    bool includeAllTiers = false,
+  }) async {
     final rows = await database.modelLabRawDataset(
       minDataQuality: config.minDataQuality,
+      includeAllTiers: includeAllTiers,
     );
-    final goalsV1ByFixture = await _globalGoalsV1ByFixture();
+    final goalsV1ByFixture =
+        await _globalGoalsV1ByFixture(includeAllTiers: includeAllTiers);
     final grouped = <String, List<LearningSample>>{};
     for (final sample in _samplesFromRows(rows, goalsV1ByFixture)) {
       grouped.putIfAbsent(sample.leagueId, () => <LearningSample>[])
@@ -47,9 +60,12 @@ class LearningDatasetBuilder {
   /// GLOBAL_GOALS_V1-Engines EINMAL im Voraus, statt sie bei jeder
   /// Markt-Auswertung desselben Fixtures neu zu berechnen (derselbe
   /// Batch-Gedanke wie bei `buildSamplesByLeague`).
-  Future<Map<String, ({double? home, double? away})>>
-      _globalGoalsV1ByFixture() async {
-    final rows = await database.modelLabGlobalGoalsV1Dataset();
+  Future<Map<String, ({double? home, double? away})>> _globalGoalsV1ByFixture({
+    bool includeAllTiers = false,
+  }) async {
+    final rows = await database.modelLabGlobalGoalsV1Dataset(
+      includeAllTiers: includeAllTiers,
+    );
     final result = <String, ({double? home, double? away})>{};
     for (final row in rows) {
       final fixtureId = row['fixture_id']?.toString();
