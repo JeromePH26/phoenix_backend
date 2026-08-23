@@ -158,8 +158,16 @@ class PhoenixBackend {
   }
 
   Future<void> _initializeDatabase() async {
+    final serverStartedAt = DateTime.now().toUtc();
     try {
       await database.migrate();
+      final interrupted =
+          await database.failPipelineJobsFromEarlierServer(serverStartedAt);
+      if (interrupted > 0) {
+        stdout.writeln(
+          'PHOENIX: $interrupted Tagesscan(s) vom vorherigen Serverlauf beendet.',
+        );
+      }
     } catch (error, stackTrace) {
       stderr.writeln('Database migration failed: $error');
       stderr.writeln(stackTrace);

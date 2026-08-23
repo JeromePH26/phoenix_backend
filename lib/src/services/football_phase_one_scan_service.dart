@@ -17,6 +17,8 @@ class FootballPhaseOneScanService {
     DateTime date, {
     bool includeDetails = false,
     int? eligibleLimit,
+    int backgroundFixtureLimit = 30,
+    Future<void> Function(int processed, int total)? onProgress,
   }) async {
     final scanRunId = await database.createFootballScanRun(date);
 
@@ -44,9 +46,28 @@ class FootballPhaseOneScanService {
                 FootballLeagueTier.dataPool) ==
             FootballLeagueTier.focus;
       }).length;
+
+      // Öffentliche Fokus-Spiele dürfen nicht warten, bis mehrere hundert
+      // Datenpool-Partien einzeln gespeichert wurden. Der Datenpool bleibt
+      // aktiv, erhält pro Tageslauf aber ein festes Hintergrundbudget.
+      final focusMatches = relevantMatches.where((match) {
+        return (knownTiers[_string(match['leagueId'])] ??
+                FootballLeagueTier.dataPool) ==
+            FootballLeagueTier.focus;
+      });
+      final backgroundMatches = relevantMatches.where((match) {
+        return (knownTiers[_string(match['leagueId'])] ??
+                FootballLeagueTier.dataPool) !=
+            FootballLeagueTier.focus;
+      });
+      final scheduledMatches = <Map<String, Object?>>[
+        ...focusMatches,
+        ...backgroundMatches.take(backgroundFixtureLimit.clamp(0, 100)),
+      ];
       stdout.writeln(
         '[PHOENIX PHASE1] Datenpool: ${relevantMatches.length} Fixtures, '
-        '$focusCount Fokus-Fixtures heute.',
+        '$focusCount Fokus-Fixtures heute, ${scheduledMatches.length} '
+        'davon in diesem Lauf eingeplant.',
       );
       final eligible = <Map<String, Object?>>[];
       final excluded = <Map<String, Object?>>[];
@@ -54,7 +75,7 @@ class FootballPhaseOneScanService {
       final safeEligibleLimit = eligibleLimit?.clamp(1, 1000);
       var processed = 0;
 
-      for (final match in relevantMatches) {
+      for (final match in scheduledMatches) {
         if (safeEligibleLimit != null && eligible.length >= safeEligibleLimit) {
           break;
         }
@@ -108,6 +129,13 @@ class FootballPhaseOneScanService {
           final reason = decision.reason ?? 'unknown';
           reasons[reason] = (reasons[reason] ?? 0) + 1;
         }
+
+        if (onProgress != null &&
+            (processed == 1 ||
+                processed % 10 == 0 ||
+                processed == scheduledMatches.length)) {
+          await onProgress(processed, scheduledMatches.length);
+        }
       }
 
       final result = <String, Object?>{
@@ -115,6 +143,8 @@ class FootballPhaseOneScanService {
         'phase': 1,
         'date': _day(date),
         'total': processed,
+        'totalAvailable': relevantMatches.length,
+        'backgroundScheduled': scheduledMatches.length - focusCount,
         'eligibleCount': eligible.length,
         'excludedCount': excluded.length,
         'exclusionReasons': reasons,
@@ -156,6 +186,10 @@ class FootballPhaseOneScanService {
     );
   }
 
+  // Für eine spätere Rückkehr zu einer tier-übergreifenden Freigabe bleibt
+  // die vollständige Prüfregel erhalten; aktuell nutzt die Pipeline bewusst
+  // ausschließlich _decideWhitelisted für Fokus-Ligen.
+  // ignore: unused_element
   Future<_PhaseOneDecision> _decide(Map<String, Object?> match) async {
     final fixtureId = _string(match['id']);
     final homeTeamId = _string(match['homeTeamId']);

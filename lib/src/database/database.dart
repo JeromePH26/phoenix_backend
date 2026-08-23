@@ -6604,6 +6604,28 @@ class PhoenixDatabase {
     );
   }
 
+  /// Ein Railway-Deploy beendet alle In-Process-Pipelines des alten
+  /// Containers. Diese Jobs dürfen danach keinen neuen Scan blockieren.
+  Future<int> failPipelineJobsFromEarlierServer(
+      DateTime serverStartedAt) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        UPDATE football_daily_pipeline_jobs
+        SET status = 'failed',
+            current_step = 'interrupted_by_restart',
+            error = 'Scan durch Server-Neustart unterbrochen.',
+            completed_at = NOW(),
+            last_activity_at = NOW()
+        WHERE status = 'running'
+          AND created_at < @server_started_at
+        RETURNING id
+      '''),
+      parameters: {'server_started_at': serverStartedAt.toUtc()},
+    );
+    return result.length;
+  }
+
   Future<Map<String, Object?>?> footballDailyPipelineJob(int id) async {
     final db = await connection();
     final result = await db.execute(

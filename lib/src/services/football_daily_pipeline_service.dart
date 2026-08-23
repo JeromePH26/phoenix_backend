@@ -41,7 +41,8 @@ class FootballDailyPipelineService {
     // Detail-/Simulationsschritte. Stürzt der Prozess ab, endet der
     // Heartbeat und ein späterer Start kann den hängenden Job freigeben.
     final heartbeat = Timer.periodic(const Duration(seconds: 30), (_) {
-      unawaited(database.touchFootballDailyPipelineJob(jobId).catchError((_) {}));
+      unawaited(
+          database.touchFootballDailyPipelineJob(jobId).catchError((_) {}));
     });
     try {
       // Kein fachliches 20er-Limit mehr: Standard sind alle Fokus-Spiele.
@@ -61,7 +62,21 @@ class FootballDailyPipelineService {
       final phaseOne = await FootballPhaseOneScanService(
         database: database,
         football: football,
-      ).run(date, eligibleLimit: effectiveLimit);
+      ).run(
+        date,
+        eligibleLimit: effectiveLimit,
+        onProgress: (processed, total) async {
+          await database.updateFootballDailyPipelineJob(
+            jobId: jobId,
+            status: 'running',
+            currentStep: 'phase1',
+            processed: processed,
+          );
+          stdout.writeln(
+            '[PHOENIX PIPELINE] Job $jobId: Phase 1 $processed/$total.',
+          );
+        },
+      );
       final phaseOneId = _integer(phaseOne['scanRunId']);
       stdout.writeln(
         '[PHOENIX PIPELINE] Job $jobId: Phase 1 fertig – '
