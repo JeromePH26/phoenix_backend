@@ -8378,6 +8378,7 @@ class PhoenixDatabase {
   Future<Map<String, Object?>> listFootballMatchesAdmin({
     String? date,
     String? leagueId,
+    String? collectionTier,
     String? teamId,
     String? status,
     bool? visible,
@@ -8398,6 +8399,23 @@ class PhoenixDatabase {
     if (leagueId != null && leagueId.trim().isNotEmpty) {
       conditions.add('m.league_id = @league_id');
       filterParameters['league_id'] = leagueId.trim();
+    }
+    // Die Kategorie ist an der Liga hinterlegt, nicht am einzelnen Match.
+    // EXISTS hält die Match-Abfrage und die COUNT-Abfrage identisch, ohne
+    // Duplikate durch einen Join zu erzeugen.
+    const allowedCollectionTiers = {'focus', 'watchlist', 'data_pool'};
+    final normalizedCollectionTier = collectionTier?.trim().toLowerCase();
+    if (normalizedCollectionTier != null &&
+        allowedCollectionTiers.contains(normalizedCollectionTier)) {
+      conditions.add('''
+        EXISTS (
+          SELECT 1
+          FROM football_leagues l
+          WHERE l.league_id = m.league_id
+            AND l.collection_tier = @collection_tier
+        )
+      ''');
+      filterParameters['collection_tier'] = normalizedCollectionTier;
     }
     if (teamId != null && teamId.trim().isNotEmpty) {
       conditions

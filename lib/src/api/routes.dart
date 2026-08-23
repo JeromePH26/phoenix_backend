@@ -1340,6 +1340,7 @@ class ApiRoutes {
         final result = await database.listFootballMatchesAdmin(
           date: query['date'],
           leagueId: query['leagueId'],
+          collectionTier: query['collectionTier'],
           teamId: query['teamId'],
           status: query['status'],
           visible: parseBoolParam(query['visible']),
