@@ -7023,6 +7023,65 @@ class PhoenixDatabase {
         .toList();
   }
 
+  /// Leakage-sicherer Rohdatensatz für den GLOBAL_GOALS_V1-Engine-Kandidaten
+  /// im Model Lab (siehe `GlobalGoalsV1Engine`): je Fixture der letzte VOR
+  /// dem Kickoff gespeicherte Phase-2-Availability-Snapshot, plus den
+  /// Liga-Tor-Kontext als gleitender 400-Tage-Schnitt VOR genau diesem
+  /// Kickoff (nicht - wie `footballLeagueGoalContext`, das ausschließlich
+  /// für die Live-Vorschau eines einzelnen künftigen Spiels gedacht ist -
+  /// relativ zu NOW()). Ein Kontext relativ zu NOW() würde für ein Spiel aus
+  /// der Vergangenheit spätere, dem Modell zur Trainingszeit noch unbekannte
+  /// Ergebnisse einfließen lassen. Nicht jedes Fixture aus
+  /// [modelLabRawDataset] hat einen passenden Eintrag hier - Phase-2-Scans
+  /// laufen erst seit Kurzem und nur budgetiert für Beobachtungsligen.
+  Future<List<Map<String, Object?>>> modelLabGlobalGoalsV1Dataset() async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+      SELECT
+        picked.fixture_id,
+        picked.availability,
+        picked.home_team_id,
+        picked.away_team_id,
+        ctx.avg_home_goals AS league_avg_home_goals,
+        ctx.avg_away_goals AS league_avg_away_goals
+      FROM (
+        SELECT DISTINCT ON (m.id)
+          m.id AS fixture_id,
+          p.availability,
+          m.home_team_id,
+          m.away_team_id,
+          m.league_id,
+          m.kickoff_utc
+        FROM football_matches m
+        JOIN football_leagues fl ON fl.league_id = m.league_id
+        JOIN football_phase_two_results p ON p.fixture_id = m.id
+        WHERE fl.collection_tier IN ('focus', 'watchlist')
+          AND m.status = ANY(@finished_statuses)
+          AND m.home_goals IS NOT NULL
+          AND m.away_goals IS NOT NULL
+          AND m.kickoff_utc IS NOT NULL
+          AND p.created_at < m.kickoff_utc
+        ORDER BY m.id, p.created_at DESC
+      ) picked
+      LEFT JOIN LATERAL (
+        SELECT AVG(m2.home_goals) AS avg_home_goals,
+               AVG(m2.away_goals) AS avg_away_goals
+        FROM football_matches m2
+        WHERE m2.league_id = picked.league_id
+          AND m2.home_goals IS NOT NULL
+          AND m2.away_goals IS NOT NULL
+          AND m2.kickoff_utc < picked.kickoff_utc
+          AND m2.kickoff_utc >= picked.kickoff_utc - INTERVAL '400 days'
+      ) ctx ON TRUE
+    '''),
+      parameters: {'finished_statuses': modelLabFinishedMatchStatuses},
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
   Future<int> insertModelVersion({
     required String readableVersion,
     int? parentModelId,
@@ -7500,7 +7559,11 @@ class PhoenixDatabase {
   /// KEINEN frischen Learning-Run innerhalb der konfigurierten Lease-Zeit
   /// gibt. Sie markiert den alten Lauf nachvollziehbar als failed und gibt
   /// seinen Lock frei; Modelle oder Produktionsprognosen werden nie gelöscht.
-  Future<int> recoverOrphanedLearningRunAndLock({
+  /// Gibt die soeben als "failed" nachgetragenen Zeilen zurück (inkl. ihres
+  /// letzten `summary`/`challengers_created`-Zwischenstands), damit ein neuer
+  /// Learning Run dort weitermachen kann, statt bei Hunderten Liga×Markt-
+  /// Paaren jedes Mal wieder bei null anzufangen (Section 65 Fortsetzung).
+  Future<List<Map<String, Object?>>> recoverOrphanedLearningRunAndLock({
     required int staleAfterMinutes,
   }) async {
     final db = await connection();
@@ -7514,7 +7577,8 @@ class PhoenixDatabase {
           errors = CAST(@errors AS JSONB)
         WHERE status = 'running'
           AND started_at < NOW() - make_interval(mins => @stale_minutes)
-        RETURNING id
+        RETURNING id, summary, challengers_created, leagues_processed,
+          markets_processed
       '''),
         parameters: {
           'stale_minutes': staleAfterMinutes,
@@ -7526,7 +7590,10 @@ class PhoenixDatabase {
         },
       );
 
-      if (orphaned.isEmpty) return 0;
+      final rows = orphaned
+          .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+          .toList();
+      if (rows.isEmpty) return rows;
 
       // Nur wenn nach der Bereinigung kein frischer Run existiert, darf ein
       // alter Lock entfernt werden. Das verhindert Paralleltraining bei
@@ -7543,15 +7610,15 @@ class PhoenixDatabase {
         '''),
         parameters: {'stale_minutes': staleAfterMinutes},
       );
-      return orphaned.length;
+      return rows;
     });
   }
 
   /// Rückwärtskompatibler Name für bestehende Aufrufer.
-  Future<void> reconcileOrphanedLearningRuns({
+  Future<List<Map<String, Object?>>> reconcileOrphanedLearningRuns({
     required int staleAfterMinutes,
-  }) async {
-    await recoverOrphanedLearningRunAndLock(
+  }) {
+    return recoverOrphanedLearningRunAndLock(
       staleAfterMinutes: staleAfterMinutes,
     );
   }

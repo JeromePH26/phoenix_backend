@@ -1,6 +1,8 @@
 import '../config/model_lab_config.dart';
 import '../database/database.dart';
 import 'challenger_generator.dart';
+import 'engine_replica.dart';
+import 'global_goals_v1_engine.dart';
 import 'learning_dataset_builder.dart';
 import 'learning_market.dart';
 import 'league_market_status.dart';
@@ -68,21 +70,34 @@ class LearningRunService {
 
     // Section 64/65: falls der Lock gerade per Stale-Reclaim übernommen
     // wurde, hängt evtl. noch ein alter Run auf "running" - sauber als
-    // "failed" nachtragen, bevor ein neuer Run beginnt.
-    await database.reconcileOrphanedLearningRuns(
+    // "failed" nachtragen, bevor ein neuer Run beginnt. Der Rückgabewert
+    // trägt den letzten Fortschritt des verwaisten Laufs (siehe
+    // `_resumeStateFrom`), damit ein neuer Run bei vielen Liga×Markt-Paaren
+    // nicht bei jedem Redeploy wieder bei Null anfängt.
+    final orphanedRuns = await database.reconcileOrphanedLearningRuns(
       staleAfterMinutes: config.staleLockMinutes,
     );
+    final resumeState = _resumeStateFrom(orphanedRuns);
 
     final runId = await database.createLearningRun(triggerType: triggerType);
     await database.insertModelLabAuditLog(
       action: 'learning_started',
       actor: triggerType == 'scheduled' ? 'system' : 'admin',
       learningRunId: runId,
-      details: {'triggerType': triggerType},
+      details: {
+        'triggerType': triggerType,
+        if (resumeState != null)
+          'resumedFrom': {
+            'market': resumeState.marketKey,
+            'leagueId': resumeState.leagueId,
+            'carriedOverChallengersCreated':
+                resumeState.challengersCreatedCarriedOver,
+          },
+      },
     );
 
     try {
-      final result = await _runSteps(runId);
+      final result = await _runSteps(runId, resumeState);
       await database.completeLearningRun(
         id: runId,
         status: 'completed',
@@ -133,7 +148,32 @@ class LearningRunService {
     }
   }
 
-  Future<_RunResult> _runSteps(int runId) async {
+  /// Section 65 Fortsetzung: liest aus den soeben als "failed" nachgetragenen
+  /// verwaisten Läufen (siehe [PhoenixDatabase.reconcileOrphanedLearningRuns])
+  /// heraus, wie weit der letzte Versuch tatsächlich gekommen war. Es kann
+  /// wegen des Advisory-Locks nie mehr als einen echten "running"-Lauf
+  /// gleichzeitig geben, daher genügt der erste Treffer.
+  _ResumeState? _resumeStateFrom(List<Map<String, Object?>> orphanedRuns) {
+    if (orphanedRuns.isEmpty) return null;
+    final summary = orphanedRuns.first['summary'];
+    if (summary is! Map || summary['phase'] != 'processing_league_markets') {
+      // Der alte Lauf ist vor Erreichen der Liga×Markt-Schleife gestorben
+      // (z.B. noch beim Laden der Trainingsdaten) - dort gibt es nichts
+      // Sinnvolles zum Fortsetzen, ein normaler Neustart ist am saubersten.
+      return null;
+    }
+    final marketKey = summary['currentMarket']?.toString();
+    final leagueId = summary['currentLeagueId']?.toString();
+    if (marketKey == null || leagueId == null) return null;
+    return _ResumeState(
+      marketKey: marketKey,
+      leagueId: leagueId,
+      challengersCreatedCarriedOver:
+          orphanedRuns.first['challengers_created'] as int? ?? 0,
+    );
+  }
+
+  Future<_RunResult> _runSteps(int runId, _ResumeState? resumeState) async {
     final datasetBuilder = LearningDatasetBuilder(
       database: database,
       config: config,
@@ -169,11 +209,33 @@ class LearningRunService {
     );
     final samplesByLeague = await datasetBuilder.buildSamplesByLeague();
 
-    var challengersCreated = 0;
+    var challengersCreated = resumeState?.challengersCreatedCarriedOver ?? 0;
     var marketsProcessed = 0;
     var leagueMarketPairsProcessed = 0;
     final processedLeagueIds = <String>{};
     final leagueStatusSummary = <Map<String, Object?>>[];
+
+    // Section 65 Fortsetzung: Position, an der der letzte (verwaiste)
+    // Versuch unterbrochen wurde. Vollständig abgeschlossene Märkte
+    // (marketIndex < resumeMarketIndex) werden komplett übersprungen; im
+    // Markt, in dem der Abbruch passierte, werden alle Ligen bis
+    // einschließlich der zuletzt bearbeiteten übersprungen - deren
+    // Challenger existieren entweder schon (config_hash verhindert
+    // Duplikate ohnehin) oder werden bewusst ausgelassen statt riskiert,
+    // ihre Evaluationszeilen durch ein erneutes Durchlaufen zu duplizieren.
+    // Fehlt die Liga im aktuellen Whitelist-Snapshot (z.B. inzwischen
+    // entfernt), greift kein Skip und der Markt läuft komplett neu - sicher,
+    // nur etwas langsamer.
+    final resumeMarket = resumeState != null
+        ? LearningMarket.fromKey(resumeState.marketKey)
+        : null;
+    final resumeMarketIndex =
+        resumeMarket != null ? LearningMarket.values.indexOf(resumeMarket) : -1;
+    final resumeLeagueIndex = resumeMarket != null
+        ? leagues.indexWhere(
+            (l) => l['league_id']?.toString() == resumeState!.leagueId,
+          )
+        : -1;
 
     await database.updateLearningRunStep(
       id: runId,
@@ -189,9 +251,27 @@ class LearningRunService {
       await registry.ensureGlobalBaseline(market.key);
       marketsProcessed += 1;
 
-      for (final league in leagues) {
+      if (resumeMarketIndex >= 0 && marketIndex < resumeMarketIndex) {
+        for (final league in leagues) {
+          final leagueId = league['league_id']?.toString();
+          if (leagueId != null) processedLeagueIds.add(leagueId);
+        }
+        leagueMarketPairsProcessed += leagues.length;
+        continue;
+      }
+
+      for (var leagueIndex = 0; leagueIndex < leagues.length; leagueIndex++) {
+        final league = leagues[leagueIndex];
         final leagueId = league['league_id']?.toString();
         if (leagueId == null) continue;
+
+        if (marketIndex == resumeMarketIndex &&
+            resumeLeagueIndex >= 0 &&
+            leagueIndex <= resumeLeagueIndex) {
+          processedLeagueIds.add(leagueId);
+          leagueMarketPairsProcessed += 1;
+          continue;
+        }
 
         try {
 
@@ -267,7 +347,93 @@ class LearningRunService {
             leagueChampion ?? await database.globalBaselineModel(market.key);
         if (baselineModel == null) continue;
         final championWeights = registry.weightsFromModel(baselineModel);
+        final championEngine = ModelEngine.attackWeightBlend(championWeights);
         final championId = baselineModel['id'] as int;
+
+        // Section GLOBAL_GOALS_V1: zusätzlich zum attackWeight-Gitter EIN
+        // deterministischer Challenger mit dem sechs-Feature-gewichteten
+        // GLOBAL_GOALS_V1-Modell (siehe `GlobalGoalsV1Engine`) - kein
+        // Suchraum nötig, da es keinen freien Parameter hat. Läuft VOR dem
+        // `remainingSlots`-Check unten, weil er ein eigenes, unabhängiges
+        // Budget hat (immer genau 1 pro Liga x Markt, nie mehr) und sonst
+        // nie erzeugt würde, sobald das attackWeight-Gitter bereits voll
+        // ist. Entsteht erst, sobald genug historische Fixtures dieser Liga
+        // einen Phase-2-Scan VOR ihrem Kickoff haben - das läuft erst seit
+        // Kurzem und nur budgetiert für Beobachtungsligen, ist also anfangs
+        // oft noch leer.
+        final ggv1Validation =
+            split.validation.where((s) => s.hasGlobalGoalsV1Data).toList();
+        final ggv1Holdout =
+            split.holdout.where((s) => s.hasGlobalGoalsV1Data).toList();
+        final hasGlobalGoalsV1Challenger = existingChallengers.any(
+          (c) =>
+              (c['weights'] as Map?)?['engineVersion'] ==
+              GlobalGoalsV1Engine.version,
+        );
+        if (!hasGlobalGoalsV1Challenger &&
+            (ggv1Validation.length >= config.minValidationSample ||
+                ggv1Holdout.length >= config.minHoldoutSample)) {
+          final ggv1ChallengerIndex = await registry.nextChallengerIndex(
+            leagueId: leagueId,
+            market: market.key,
+            generation: generation,
+          );
+          final ggv1Challenger =
+              await registry.createOrReuseGlobalGoalsV1Challenger(
+            leagueId: leagueId,
+            market: market.key,
+            generation: generation,
+            challengerIndex: ggv1ChallengerIndex,
+            sampleSize: eligibleSampleSize,
+            parentModelId: championId,
+            trainingStart:
+                split.training.isEmpty ? null : split.training.first.kickoff,
+            trainingEnd:
+                split.training.isEmpty ? null : split.training.last.kickoff,
+            trainingCount: split.training.length,
+            validationCount: ggv1Validation.length,
+            holdoutCount: ggv1Holdout.length,
+          );
+          challengersCreated += 1;
+
+          await database.addLearningCandidate(
+            learningRunId: runId,
+            modelVersionId: ggv1Challenger.id,
+            leagueId: leagueId,
+            market: market.key,
+          );
+
+          if (ggv1Validation.isNotEmpty) {
+            await _persistComparison(
+              comparison: ChampionChallengerComparison.compare(
+                market: market,
+                leagueId: leagueId,
+                scopeSamples: ggv1Validation,
+                championEngine: championEngine,
+                challengerEngine: ggv1Challenger.engine,
+                config: config,
+              ),
+              evaluationType: 'walk_forward',
+              championModelId: championId,
+              challengerModelId: ggv1Challenger.id,
+            );
+          }
+          if (ggv1Holdout.isNotEmpty) {
+            await _persistComparison(
+              comparison: ChampionChallengerComparison.compare(
+                market: market,
+                leagueId: leagueId,
+                scopeSamples: ggv1Holdout,
+                championEngine: championEngine,
+                challengerEngine: ggv1Challenger.engine,
+                config: config,
+              ),
+              evaluationType: 'holdout',
+              championModelId: championId,
+              challengerModelId: ggv1Challenger.id,
+            );
+          }
+        }
 
         final grid = ChallengerGenerator.candidateAttackWeights(config);
         // Die Challenger-Obergrenze ist ein echter Sicherheitsmechanismus,
@@ -317,8 +483,8 @@ class LearningRunService {
                 market: market,
                 leagueId: leagueId,
                 scopeSamples: split.validation,
-                championWeights: championWeights,
-                challengerWeights: created.weights,
+                championEngine: championEngine,
+                challengerEngine: ModelEngine.attackWeightBlend(created.weights),
                 config: config,
               ),
               evaluationType: 'walk_forward',
@@ -332,8 +498,8 @@ class LearningRunService {
                 market: market,
                 leagueId: leagueId,
                 scopeSamples: split.holdout,
-                championWeights: championWeights,
-                challengerWeights: created.weights,
+                championEngine: championEngine,
+                challengerEngine: ModelEngine.attackWeightBlend(created.weights),
                 config: config,
               ),
               evaluationType: 'holdout',
@@ -446,6 +612,20 @@ class LearningRunService {
       clean: comparison.challengerClean,
     );
   }
+}
+
+/// Wo der letzte, per Redeploy/Crash unterbrochene Learning Run stehen
+/// geblieben ist - siehe [LearningRunService._resumeStateFrom].
+class _ResumeState {
+  const _ResumeState({
+    required this.marketKey,
+    required this.leagueId,
+    required this.challengersCreatedCarriedOver,
+  });
+
+  final String marketKey;
+  final String leagueId;
+  final int challengersCreatedCarriedOver;
 }
 
 class _RunResult {
