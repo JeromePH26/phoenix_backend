@@ -4431,8 +4431,14 @@ class PhoenixDatabase {
           l.collection_tier,
           COALESCE(NULLIF(m.raw_json->>'season', '')::INTEGER,
                    EXTRACT(YEAR FROM m.kickoff_utc)::INTEGER) AS season,
-          COALESCE(last_detail.created_at, '-infinity'::timestamptz)
-            AS last_detail_at,
+          // Der PostgreSQL-Spezialwert -infinity kann vom Dart-Postgres-
+          // Treiber nicht als DateTime decodiert werden. Ein festes altes
+          // Datum erfüllt dieselbe Sortiersemantik, ohne den kompletten
+          // Hintergrundlauf bei noch nie angereicherten Spielen zu leeren.
+          COALESCE(
+            last_detail.created_at,
+            TIMESTAMPTZ '1970-01-01 00:00:00+00'
+          ) AS last_detail_at,
           l.detail_refresh_hours
         FROM football_matches m
         INNER JOIN football_leagues l ON l.league_id = m.league_id
