@@ -4784,6 +4784,42 @@ class PhoenixDatabase {
         .toList();
   }
 
+  /// Vollständig berechnete, aber nicht veröffentlichte Shadow-Analysen für
+  /// Beobachtungsliste und Datenpool. Diese Fixtures durchlaufen dieselbe
+  /// Engine, Simulation und Marktauswahl wie Fokus-Ligen, werden jedoch nie
+  /// in [football_analysis_history] geschrieben. Dadurch bleiben öffentliche
+  /// Tipps und deren ROI sauber, während das Control Center die Einschätzung
+  /// für Learning und Qualitätskontrolle anzeigen kann.
+  Future<List<Map<String, Object?>>> backgroundAnalysisCandidates({
+    required int phaseTwoScanRunId,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        SELECT
+          p.fixture_id,
+          p.data_quality,
+          p.payload,
+          s.result AS simulation,
+          m.selection
+        FROM football_phase_two_results p
+        INNER JOIN football_simulation_results s
+          ON s.phase_two_scan_run_id = p.scan_run_id
+         AND s.fixture_id = p.fixture_id
+        LEFT JOIN football_market_selections m
+          ON m.phase_two_scan_run_id = p.scan_run_id
+         AND m.fixture_id = p.fixture_id
+        WHERE p.scan_run_id = @scan_run_id
+          AND p.analysis_allowed = FALSE
+        ORDER BY p.fixture_id
+      '''),
+      parameters: {'scan_run_id': phaseTwoScanRunId},
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList(growable: false);
+  }
+
   Future<void> upsertFootballMatchFromPayload({
     required String fixtureId,
     required Map<String, Object?> payload,
@@ -5260,6 +5296,44 @@ class PhoenixDatabase {
       },
     );
     return rows.isNotEmpty;
+  }
+
+  /// Speichert den aktuellen Learning-/Shadow-Stand eines Hintergrundspiels.
+  /// Das eigene Model-Version-Suffix trennt ihn zuverlässig von der
+  /// unveränderlichen, öffentlichen Pre-Match-Prognose.
+  Future<void> upsertFootballShadowAnalysis({
+    required String fixtureId,
+    required int dataQuality,
+    required int confidence,
+    String? recommendation,
+    required Map<String, Object?> payload,
+  }) async {
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        INSERT INTO analyses (
+          sport, match_id, model_version, data_quality,
+          confidence, recommendation, payload
+        ) VALUES (
+          'football', @match_id, 'phoenix_shadow_learning_v1',
+          @data_quality, @confidence, @recommendation,
+          CAST(@payload AS JSONB)
+        )
+        ON CONFLICT (sport, match_id, model_version) DO UPDATE SET
+          data_quality = EXCLUDED.data_quality,
+          confidence = EXCLUDED.confidence,
+          recommendation = EXCLUDED.recommendation,
+          payload = EXCLUDED.payload,
+          analyzed_at = NOW()
+      '''),
+      parameters: {
+        'match_id': fixtureId,
+        'data_quality': dataQuality.clamp(0, 100),
+        'confidence': confidence.clamp(0, 100),
+        'recommendation': recommendation,
+        'payload': jsonEncode(payload),
+      },
+    );
   }
 
   Future<void> saveFootballAnalysisHistory({
@@ -8460,7 +8534,9 @@ class PhoenixDatabase {
     final latestAnalysisRows = await db.execute(
       Sql.named('''
         SELECT model_version, data_quality, confidence, recommendation,
-               analyzed_at
+               analyzed_at,
+               COALESCE(payload->>'analysisScope', 'public') AS analysis_scope,
+               NULLIF(payload->>'collectionTier', '') AS collection_tier
         FROM analyses
         WHERE sport = 'football' AND match_id = @id
         ORDER BY analyzed_at DESC

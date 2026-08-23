@@ -1,10 +1,14 @@
 import '../database/database.dart';
 import 'football_engine_input_service.dart';
+import 'football_market_selection_service.dart';
 import 'football_service.dart';
+import 'football_simulation_service.dart';
 
 /// Lädt Details für Beobachtungsliste und Datenpool mit festem Tagesbudget.
 /// Gespeicherte Coverage ist mit Fokus-Ligen strukturell identisch, erhält
-/// aber nie eine öffentliche Analyse-Freigabe.
+/// aber nie eine öffentliche Analyse-Freigabe. Nach der Anreicherung werden
+/// trotzdem Shadow-Analysen berechnet: sie sind im Control Center sichtbar
+/// und Lernmaterial, aber weder App-Tipps noch Teil von ROI/History.
 class FootballBackgroundEnrichmentService {
   FootballBackgroundEnrichmentService({
     required this.database,
@@ -73,8 +77,9 @@ class FootballBackgroundEnrichmentService {
         }
       }
 
-      // Diese Inputs sind ausschließlich Shadow-Trainingsmaterial: Sie
-      // werden niemals simuliert, bewertet oder als Tipp veröffentlicht.
+      // Shadow-Inputs werden genauso simuliert und bewertet wie Fokusspiele.
+      // Entscheidend: Ihre Ergebnisse bleiben vom öffentlichen Tipp-/ROI-Feed
+      // getrennt und erscheinen nur als klar markierte Control-Center-Analyse.
       final engineInputs = await FootballEngineInputService(
         database: database,
       ).prepare(
@@ -82,6 +87,21 @@ class FootballBackgroundEnrichmentService {
         limit: maxFixtures,
         includeBackground: true,
       );
+
+      final simulation = await FootballSimulationService(database: database)
+          .run(
+        phaseTwoScanRunId: scanRunId,
+        limit: maxFixtures,
+        simulations: 100000,
+      );
+      final marketSelection = await FootballMarketSelectionService(
+        database: database,
+      ).select(
+        phaseTwoScanRunId: scanRunId,
+        limit: maxFixtures,
+        minimumProbability: 68,
+      );
+      final analyses = await _saveShadowAnalyses(scanRunId);
 
       await database.completeFootballScanRun(
         scanRunId: scanRunId,
@@ -93,6 +113,9 @@ class FootballBackgroundEnrichmentService {
           'processed': processed,
           'failed': failed,
           'engineInputs': engineInputs['prepared'] ?? 0,
+          'simulations': simulation['processed'] ?? 0,
+          'marketSelections': marketSelection['processed'] ?? 0,
+          'shadowAnalyses': analyses,
         },
       );
       return {
@@ -101,11 +124,71 @@ class FootballBackgroundEnrichmentService {
         'processed': processed,
         'failed': failed,
         'engineInputs': engineInputs['prepared'] ?? 0,
+        'simulations': simulation['processed'] ?? 0,
+        'marketSelections': marketSelection['processed'] ?? 0,
+        'shadowAnalyses': analyses,
       };
     } catch (error) {
       await database.failFootballScanRun(scanRunId, error);
       rethrow;
     }
+  }
+
+  Future<int> _saveShadowAnalyses(int scanRunId) async {
+    final candidates = await database.backgroundAnalysisCandidates(
+      phaseTwoScanRunId: scanRunId,
+    );
+    var saved = 0;
+
+    for (final candidate in candidates) {
+      final fixtureId = _text(candidate['fixture_id']);
+      final match = _map(candidate['payload']);
+      final simulation = _map(candidate['simulation']);
+      final selection = _map(candidate['selection']);
+      if (fixtureId.isEmpty || simulation.isEmpty) continue;
+
+      final analysisLead = _map(selection['phoenixTip']);
+      final trust = _map(selection['trust']);
+      final dataQuality =
+          _integer(candidate['data_quality']).clamp(0, 100).toInt();
+      final confidence = _integer(trust['score']).clamp(0, 100).toInt();
+      final tier = _text(
+        _map(match['backgroundEnrichment'])['tier'],
+      );
+      final recommendation = _text(analysisLead['market']);
+
+      await database.upsertFootballShadowAnalysis(
+        fixtureId: fixtureId,
+        dataQuality: dataQuality,
+        confidence: confidence,
+        recommendation: recommendation.isEmpty ? null : recommendation,
+        payload: {
+          ...match,
+          'source': 'background_shadow',
+          'analysisScope': 'shadow_learning',
+          'visibility': 'control_center_only',
+          'collectionTier': tier,
+          'modelVersion': FootballSimulationService.modelVersion,
+          'dataQuality': dataQuality,
+          'confidence': confidence,
+          'recommendation': recommendation,
+          // Eine Markt-Führung darf angezeigt werden, ist aber ausdrücklich
+          // kein veröffentlichter PHÖNIX-Tipp und fließt nicht in ROI ein.
+          'analysisLead': analysisLead,
+          'phoenixTip': const <String, Object?>{},
+          'selection': selection,
+          'probabilities': _map(simulation['probabilities']),
+          'fairOdds': _map(simulation['fairOdds']),
+          'goalExpectations': simulation['goalExpectations'],
+          'topScorelines': simulation['topScorelines'],
+          'simulation': simulation,
+          'simulationCount': simulation['simulations'],
+          'analyzedAt': DateTime.now().toUtc().toIso8601String(),
+        },
+      );
+      saved += 1;
+    }
+    return saved;
   }
 
   int _quality(Map<String, Object?> value) {

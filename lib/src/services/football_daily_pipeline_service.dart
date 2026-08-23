@@ -247,8 +247,8 @@ class FootballDailyPipelineService {
       );
 
       // Datenpool und Beobachtung laufen nach der öffentlichen Pipeline mit
-      // festem Budget weiter. Sie schreiben dieselben Detail- und Coverage-
-      // Daten, erzeugen aber keine Analysen oder Tipps.
+      // festem Budget weiter. Sie erzeugen Shadow-Analysen für Learning und
+      // Control Center, aber ausdrücklich keine öffentlichen Tipps oder ROI.
       unawaited(
         FootballBackgroundEnrichmentService(
           database: database,
