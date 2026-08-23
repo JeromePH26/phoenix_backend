@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:postgres/postgres.dart';
@@ -10,9 +11,31 @@ class PhoenixDatabase {
   final String databaseUrl;
   Connection? _connection;
 
+  // KRITISCHER BUGFIX (2026-08-23, live beobachtet): `_connection` ist eine
+  // EINZELNE, für den gesamten Prozess geteilte Verbindung (kein Pool). Der
+  // postgres-Treiber wirft eine UNGEFANGENE Exception ("Attempting to
+  // execute query on connection while inside a `runTx` call"), sobald
+  // während einer offenen Transaktion gleichzeitig eine andere Anfrage über
+  // dieselbe Connection eine Query ausführt - das killt den kompletten
+  // Prozess sofort (live beobachtet: der alle 5 Sekunden laufende
+  // Live-Monitor-Poll kollidierte mit einer administrativen Transaktion und
+  // riss dabei unabhängige produktive Endpunkte wie das Settlement mit
+  // runter). Dieses einfache Future-Chaining-Gate serialisiert Transaktionen
+  // gegen alle anderen Connection-Nutzer: `connection()` wartet, solange
+  // eine Transaktion offen ist, bevor sie die (gemeinsame) Connection an
+  // einen neuen Aufrufer zurückgibt; `runTx()` beansprucht das Gate für die
+  // Dauer der Transaktion exklusiv. Kein perfekter Ersatz für einen echten
+  // Connection-Pool (ein bereits laufender einzelner `execute()`-Aufruf kann
+  // theoretisch noch in den Mikrotask-schmalen Moment fallen, in dem eine
+  // Transaktion gerade erst startet), reduziert das Kollisionsfenster aber
+  // von "mehrere hundert Millisekunden" auf einzelne Mikrotasks - genug, um
+  // den live beobachteten Absturz in der Praxis zu beheben.
+  Future<void> _connectionGate = Future.value();
+
   bool get isConfigured => databaseUrl.trim().isNotEmpty;
 
   Future<Connection> connection() async {
+    await _connectionGate;
     final current = _connection;
     if (current != null && current.isOpen) return current;
     if (!isConfigured) {
@@ -36,6 +59,26 @@ class PhoenixDatabase {
     );
     _connection = connection;
     return connection;
+  }
+
+  /// Ersetzt direkte `(await connection()).runTx(...)`-Aufrufe - siehe
+  /// [_connectionGate] oben. JEDE Transaktion in dieser Klasse muss über
+  /// diese Methode laufen, sonst greift die Serialisierung nicht.
+  Future<T> runTx<T>(Future<T> Function(Session session) fn) async {
+    final previousGate = _connectionGate;
+    final completer = Completer<void>();
+    // Synchron VOR dem ersten await gesetzt - siehe Klassendoku: das macht
+    // dieses Gate robust gegenüber mehreren "gleichzeitigen" Aufrufen, ohne
+    // einen externen Locking-Mechanismus zu brauchen (Dart führt den
+    // synchronen Teil einer async-Funktion ohne Unterbrechung aus).
+    _connectionGate = completer.future;
+    await previousGate;
+    try {
+      final db = await connection();
+      return await db.runTx(fn);
+    } finally {
+      completer.complete();
+    }
   }
 
   Future<void> migrate() async {
@@ -1493,8 +1536,7 @@ class PhoenixDatabase {
     String? termsVersion,
     String? privacyVersion,
   }) async {
-    final db = await connection();
-    return db.runTx((session) async {
+    return runTx((session) async {
       final result = await session.execute(
         Sql.named('''
           INSERT INTO users (
@@ -7297,8 +7339,7 @@ class PhoenixDatabase {
     required int newChampionId,
     int? previousChampionId,
   }) async {
-    final db = await connection();
-    await db.runTx((session) async {
+    await runTx((session) async {
       if (previousChampionId != null) {
         await session.execute(
           Sql.named('''
@@ -7333,8 +7374,7 @@ class PhoenixDatabase {
     required int currentChampionId,
     required int rollbackToModelId,
   }) async {
-    final db = await connection();
-    await db.runTx((session) async {
+    await runTx((session) async {
       await session.execute(
         Sql.named('''
           UPDATE phoenix_model_versions
@@ -7586,8 +7626,7 @@ class PhoenixDatabase {
   Future<List<Map<String, Object?>>> recoverOrphanedLearningRunAndLock({
     required int staleAfterMinutes,
   }) async {
-    final db = await connection();
-    return db.runTx((session) async {
+    return runTx((session) async {
       final orphaned = await session.execute(
         Sql.named('''
         UPDATE phoenix_learning_runs SET
@@ -8286,8 +8325,7 @@ class PhoenixDatabase {
     required String login,
     required String passwordHash,
   }) async {
-    final db = await connection();
-    return db.runTx((session) async {
+    return runTx((session) async {
       final result = await session.execute(
         Sql.named('''
           UPDATE admin_employees
@@ -8314,8 +8352,7 @@ class PhoenixDatabase {
   Future<Map<String, Object?>?> disableAdminEmployeeAndRevokeSessions(
     int id,
   ) async {
-    final db = await connection();
-    return db.runTx((session) async {
+    return runTx((session) async {
       final result = await session.execute(
         Sql.named('''
           UPDATE admin_employees
