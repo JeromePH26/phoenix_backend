@@ -29,8 +29,13 @@ void main() {
 
   group('selectForFixture - balanced primary markets', () {
     test(
-      'selects Doppelte Chance X2 when it is the highest useful individual '
-      'market, instead of artificially forcing a weaker core market',
+      // Section 7 (Claude AN2.txt, "DOPPELTE CHANCE DARF NICHT HAUPTTIPP
+      // WERDEN"): Doppelte Chance darf nie mehr der PHÖNIX-Haupttipp
+      // werden, selbst wenn es klar die höchste Einzelwahrscheinlichkeit
+      // hat - live beobachtet an Fixture 1623096 (Sheffield Wednesday vs.
+      // Wolves), wo "Doppelte Chance 1X" als Haupttipp gewählt wurde.
+      'never selects Doppelte Chance as the main tip, even with the '
+      'highest probability - falls through to the best eligible core market',
       () {
         final selection = service.selectForFixture(
           fixtureId: '1490394',
@@ -63,7 +68,10 @@ void main() {
 
         expect(selection, isNotNull);
         final phoenixTip = selection!['phoenixTip'] as Map;
-        expect(phoenixTip['marketKey'], 'dcX2');
+        // over25 (60%) is the highest-probability market among the
+        // allowed set (1X2/BTTS/Über-Unter 2,5) - dcX2 (80%) is a
+        // computed/displayed market but never eligible as the main tip.
+        expect(phoenixTip['marketKey'], 'over25');
       },
     );
 
@@ -164,73 +172,94 @@ void main() {
       },
     );
 
-    test('can select Unter 3,5 Tore as a specific, fairly priced market', () {
-      final selection = service.selectForFixture(
-        fixtureId: 'under35-fixture',
-        simulation: simulationWith(
-          probabilities: {
-            'homeWin': 0.42,
-            'draw': 0.25,
-            'awayWin': 0.33,
-            'over15': 0.71,
-            'over25': 0.48,
-            'under25': 0.52,
-            'over35': 0.26,
-            'under35': 0.74,
-            'bttsYes': 0.49,
-            'bttsNo': 0.51,
-          },
-          fairOdds: {
-            'over15': 1.41,
-            'under35': 1.36,
-          },
-        ),
-        minimumProbabilityDecimal: 0.68,
-      );
+    test(
+      // Section 7: Über/Unter 3,5 (wie jede Tor-Linie außer 2,5) darf nie
+      // Haupttipp werden, selbst bei hoher, fair bepreister Wahrscheinlichkeit.
+      'never selects Über/Unter 3,5 Tore as the main tip - falls through '
+      'to the best eligible core market instead',
+      () {
+        final selection = service.selectForFixture(
+          fixtureId: 'under35-fixture',
+          simulation: simulationWith(
+            probabilities: {
+              'homeWin': 0.42,
+              'draw': 0.25,
+              'awayWin': 0.33,
+              'over15': 0.71,
+              'over25': 0.48,
+              'under25': 0.52,
+              'over35': 0.26,
+              'under35': 0.74,
+              'bttsYes': 0.49,
+              'bttsNo': 0.51,
+            },
+            fairOdds: {
+              'over15': 1.41,
+              'under35': 1.36,
+            },
+          ),
+          minimumProbabilityDecimal: 0.68,
+        );
 
-      expect(selection, isNotNull);
-      expect((selection!['phoenixTip'] as Map)['marketKey'], 'under35');
-    });
+        expect(selection, isNotNull);
+        // Kein Kernmarkt erreicht hier 68 % - der Selector fällt auf den
+        // Fallback (>= 50 %) zurück. under25 (52 %) ist dort der stärkste
+        // erlaubte Markt, under35 (74 %) bleibt trotz höherer
+        // Wahrscheinlichkeit ausgeschlossen.
+        expect((selection!['phoenixTip'] as Map)['marketKey'], 'under25');
+      },
+    );
 
-    test('allows team goals and DNB only when their pricing gates are met', () {
-      final teamGoals = service.selectForFixture(
-        fixtureId: 'team-goals-fixture',
-        simulation: simulationWith(
-          probabilities: {
-            'homeWin': 0.45,
-            'draw': 0.22,
-            'awayWin': 0.33,
-            'over25': 0.52,
-            'under25': 0.48,
-            'bttsYes': 0.56,
-            'bttsNo': 0.44,
-            'homeOver15': 0.70,
-          },
-          fairOdds: {'homeOver15': 1.45},
-        ),
-        minimumProbabilityDecimal: 0.68,
-      );
-      expect((teamGoals!['phoenixTip'] as Map)['marketKey'], 'homeOver15');
+    test(
+      // Section 7: Team-Tore-Linien und Draw No Bet dürfen nie Haupttipp
+      // werden, auch nicht, wenn ihre Quoten-Freigabe erfüllt ist.
+      'never selects team-goals or Draw No Bet markets as the main tip, '
+      'even when their pricing gates are met',
+      () {
+        final teamGoals = service.selectForFixture(
+          fixtureId: 'team-goals-fixture',
+          simulation: simulationWith(
+            probabilities: {
+              'homeWin': 0.45,
+              'draw': 0.22,
+              'awayWin': 0.33,
+              'over25': 0.52,
+              'under25': 0.48,
+              'bttsYes': 0.56,
+              'bttsNo': 0.44,
+              'homeOver15': 0.70,
+            },
+            fairOdds: {'homeOver15': 1.45},
+          ),
+          minimumProbabilityDecimal: 0.68,
+        );
+        // Kein Kernmarkt erreicht 68 %; Fallback (>= 50 %) wählt bttsYes
+        // (56 %) vor over25 (52 %). homeOver15 (70 %) bleibt ausgeschlossen.
+        expect((teamGoals!['phoenixTip'] as Map)['marketKey'], 'bttsYes');
 
-      final dnb = service.selectForFixture(
-        fixtureId: 'dnb-fixture',
-        simulation: simulationWith(
-          probabilities: {
-            'homeWin': 0.50,
-            'draw': 0.25,
-            'awayWin': 0.25,
-            'dnbHome': 0.68,
-            'over25': 0.40,
-            'under25': 0.60,
-            'bttsYes': 0.45,
-            'bttsNo': 0.55,
-          },
-          fairOdds: {'homeWin': 2.0, 'dnbHome': 1.47},
-        ),
-        minimumProbabilityDecimal: 0.68,
-      );
-      expect((dnb!['phoenixTip'] as Map)['marketKey'], 'dnbHome');
-    });
+        final dnb = service.selectForFixture(
+          fixtureId: 'dnb-fixture',
+          simulation: simulationWith(
+            probabilities: {
+              'homeWin': 0.50,
+              'draw': 0.25,
+              'awayWin': 0.25,
+              'dnbHome': 0.68,
+              'over25': 0.40,
+              'under25': 0.60,
+              'bttsYes': 0.45,
+              'bttsNo': 0.55,
+            },
+            fairOdds: {'homeWin': 2.0, 'dnbHome': 1.47},
+          ),
+          minimumProbabilityDecimal: 0.68,
+        );
+        // Kein Kernmarkt erreicht 68 %; Fallback (>= 50 %) wählt under25
+        // (60 %) vor homeWin (50 %) und bttsNo (55 %). dnbHome (68 %)
+        // bleibt trotz erfüllter Preisfreigabe ausgeschlossen.
+        expect((dnb!['phoenixTip'] as Map)['marketKey'], 'under25');
+      },
+    );
 
     test(
       'qualifiesForTip is false when simulations are 0, even if a core '

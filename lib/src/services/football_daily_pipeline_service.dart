@@ -150,14 +150,17 @@ class FootballDailyPipelineService {
       // Ein KI-Kontext-Schritt (Verletzungen/Aufstellungen) lief hier früher
       // über eine football-spezifische GeminiContextService.verifyPhaseTwoMatches().
       // Diese Klasse existiert im Repo nicht mehr - gemini_context_service.dart
-      // enthält inzwischen eine Tennis-Implementierung, und openai_context_service.dart
-      // liefert ein anderes Antwortschema (verificationStatus/suggestedTrustAdjustment
-      // statt applied/reliability/homeGoalDelta/awayGoalDelta), das
-      // FootballEngineInputService._normalize() nicht versteht. Der Schritt wird
-      // deshalb bewusst ausgelassen, statt eine Klasse einzubinden, deren Ausgabe
-      // von der Engine stillschweigend ignoriert würde. FootballEngineInputService
-      // fällt ohne Kontext automatisch auf die statistische Basis zurück, die
-      // Pipeline bleibt also voll funktionsfähig.
+      // enthält inzwischen eine Tennis-Implementierung. Ein früherer OpenAI-
+      // Ersatz (openai_context_service.dart) lieferte ein anderes
+      // Antwortschema (verificationStatus/suggestedTrustAdjustment statt
+      // applied/reliability/homeGoalDelta/awayGoalDelta), das
+      // FootballEngineInputService._normalize() ohnehin nicht verstanden hätte,
+      // und wurde als toter Code entfernt (Section 10, Claude AN2.txt). Der
+      // Schritt wird deshalb bewusst ausgelassen, statt eine Klasse
+      // einzubinden, deren Ausgabe von der Engine stillschweigend ignoriert
+      // würde. FootballEngineInputService fällt ohne Kontext automatisch auf
+      // die statistische Basis zurück, die Pipeline bleibt also voll
+      // funktionsfähig.
       await _step(jobId, 'engine_input');
       final engineResult = await FootballEngineInputService(
         database: database,

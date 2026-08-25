@@ -51,14 +51,29 @@ class FootballValueService {
       }
 
       if (selection['qualifiesForTip'] != true || marketKey.isEmpty) {
+        // Section "MARKTQUOTEN-WEITERGABE IST VERMUTLICH FEHLERHAFT" (Claude
+        // AN2.txt, 2026-08-25): marketOdds/marketReferenceOdds waren hier
+        // bisher IMMER null, unabhängig davon, ob für genau diesen Markt
+        // tatsächlich eine Buchmacherquote existierte (z.B. bei Fixture
+        // 1623096: dc1x=2.55 stand längst in marketOddsByKey, aber value.
+        // marketOdds blieb trotzdem null, weil dieser Zweig sie nie
+        // ausgefüllt hat). Kein Mapping-Fehler in _oddsForMarket/_matches -
+        // die sind hier ungenutzt geblieben. Informativ nachgezogen: die
+        // Quote wird jetzt auch bei fehlender Wettfreigabe gezeigt (rein zur
+        // Einordnung, siehe Kommentar bei showValueTip unten), OHNE dass sich
+        // an der eigentlichen Freigabe-Entscheidung (isValueTip bleibt hier
+        // immer false) irgendetwas ändert.
+        final infoOddsSummary = marketKey.isEmpty
+            ? const _OddsSummary()
+            : _oddsForMarket(rawOdds, marketKey);
         final updated = <String, Object?>{
           ...selection,
           'modelVersion': modelVersion,
           'marketOddsByKey': marketOddsByKey,
           'value': {
             'status': 'no_estimate',
-            'marketOdds': null,
-            'marketReferenceOdds': null,
+            'marketOdds': infoOddsSummary.best,
+            'marketReferenceOdds': infoOddsSummary.median,
             'fairOdds': fairOdds,
             'minimumMarketOdds': minimumMarketOdds,
             'minimumValuePercent': minimumValuePercent,

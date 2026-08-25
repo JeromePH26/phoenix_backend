@@ -317,15 +317,14 @@ class FootballSimulationService {
         };
       }).toList(),
       'aiContext': aiContext,
+      // Section 10 (Claude AN2.txt, "KEIN GEMINI"): der KI-Kontext-Schritt ist
+      // fuer Fussball bewusst nie verdrahtet (siehe
+      // football_daily_pipeline_service.dart), `aiContext` bleibt strukturell
+      // immer leer. Kein Warnhinweis mehr dafuer - sein Fehlen ist der
+      // dauerhafte Normalzustand, kein Fehler.
       'warnings': [
         if (input['realXgAvailable'] != true)
           'Simulation basiert noch auf Torquoten, nicht auf echtem xG/xGA.',
-        if (aiContext['applied'] == true)
-          'Verifizierter Gemini-Kontext ist in den Torerwartungen enthalten.',
-        if (aiContext['applied'] != true)
-          'Kein verifizierter Gemini-Kontext in dieser Simulation.',
-        if (aiContext['fallbackUsed'] == true)
-          'Kontext-Fallback aus einem vorherigen verifizierten Lauf verwendet.',
         if (activeModels.models.isNotEmpty)
           'Liga-spezifische Champion-Modelle wurden marktweise angewendet.',
       ],

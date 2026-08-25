@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:crypto/crypto.dart';
 
 import 'feature_renormalization.dart';
+import 'fixture_form_filter.dart';
 import 'learning_market.dart';
 
 /// Section "PHÖNIX MODEL LAB – GLOBALE CHAMPIONS" (Claude AN2.txt): eigene
@@ -232,8 +233,6 @@ enum GlobalMarketHypothesis {
 class GlobalMarketEngine {
   const GlobalMarketEngine._();
 
-  static const _finishedStatuses = {'FT', 'AET', 'PEN'};
-
   /// Deterministischer Hash: dieselbe Familie + Hypothese ergibt immer
   /// denselben Hash (verhindert Duplikate über den bestehenden Unique-Index
   /// auf `(market, league_id, config_hash)` - dasselbe Muster wie
@@ -424,14 +423,10 @@ class GlobalMarketEngine {
     var scored = 0.0;
     var conceded = 0.0;
     var counted = 0;
-    for (final entry in fixtureListData) {
-      if (entry is! Map) continue;
-      final fixture = entry['fixture'];
-      final status = fixture is Map ? fixture['status'] : null;
-      final statusShort = status is Map ? status['short']?.toString() : null;
-      if (statusShort == null || !_finishedStatuses.contains(statusShort)) {
-        continue;
-      }
+    // Section 4 (Claude AN2.txt): abgesagte/abgebrochene/ergebnislos
+    // verschobene Spiele raus, Freundschaftsspiele nur als Lückenfüller -
+    // siehe fixture_form_filter.dart für die geteilte Begründung.
+    for (final entry in selectFormFixtures(fixtureListData)) {
       final teams = entry['teams'];
       if (teams is! Map) continue;
       final home = teams['home'];

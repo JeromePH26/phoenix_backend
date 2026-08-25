@@ -4544,26 +4544,6 @@ class PhoenixDatabase {
         .toList(growable: false);
   }
 
-  Future<List<Map<String, Object?>>> geminiPhaseTwoCandidates({
-    required int phaseTwoScanRunId,
-    int limit = 1000000,
-  }) async {
-    final db = await connection();
-    final result = await db.execute(
-      Sql.named('''
-        SELECT fixture_id, league_id, season, data_quality, availability, payload
-        FROM football_phase_two_results
-        WHERE scan_run_id = @scan_run_id
-          AND analysis_allowed = TRUE
-        ORDER BY data_quality DESC, fixture_id
-      '''),
-      parameters: {'scan_run_id': phaseTwoScanRunId},
-    );
-    return result
-        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
-        .toList();
-  }
-
   Future<void> saveFootballAiContextCheck({
     required int phaseTwoScanRunId,
     required String fixtureId,
@@ -5067,7 +5047,7 @@ class PhoenixDatabase {
   /// Schreibt ausschließlich Ergebnis-/Statusfelder für ein bereits
   /// gespeichertes Spiel. `raw_json` wird gezielt per JSONB-Merge ergänzt
   /// (`||`), niemals ersetzt - alle Pre-Match-Blöcke (phaseOne, phaseTwo,
-  /// Quoten, Formdaten, H2H, Gemini-Kontext, ...) bleiben unangetastet.
+  /// Quoten, Formdaten, H2H, KI-Kontext, ...) bleiben unangetastet.
   /// `jsonb_strip_nulls` verhindert, dass ein noch fehlendes Tor-Feld (z. B.
   /// bei abgesagten Spielen) einen zuvor gültigen Wert mit NULL überschreibt.
   Future<void> settleFootballMatchResult({

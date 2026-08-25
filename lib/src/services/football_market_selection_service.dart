@@ -233,36 +233,25 @@ class FootballMarketSelectionService {
         return pB.compareTo(pA);
       });
 
-      // PHÖNIX bewertet mehrere sinnvolle, einzeln abrechenbare
-      // Markt-Familien. Kombis, DC 12, 0,5-Linien und Handicaps bleiben
-      // ausdrücklich ausgeschlossen: Sie erzeugen entweder künstlich hohe
-      // Wahrscheinlichkeiten oder waren bei Providerquoten nicht verlässlich.
-      // Die Mindestquote je Markt verhindert zusätzlich, dass triviale
-      // Absicherungen (z. B. Ü0,5 oder ein extrem niedriges U3,5) den Tipp
-      // nur wegen ihrer hohen Wahrscheinlichkeit verdrängen.
+      // Section 7 (Claude AN2.txt, "DOPPELTE CHANCE DARF NICHT HAUPTTIPP
+      // WERDEN"): der PHÖNIX-Haupttipp (phoenixTip/analysisLead) darf NUR
+      // aus 1X2, BTTS und Über/Unter 2,5 kommen - live beobachtet an
+      // Fixture 1623096 (Sheffield Wednesday vs. Wolves), wo "Doppelte
+      // Chance 1X" als Haupttipp gewählt wurde. Alle anderen Märkte (DC,
+      // DNB, Team-Tore-Linien, weitere Tor-Linien, Handicaps) werden
+      // weiterhin berechnet, gespeichert und im Marktcheck angezeigt -
+      // dafür bleibt `displayTipKeys` bewusst breiter als `mainTipKeys`.
+      // Mindestquoten je Markt (siehe `_minimumFairOddsFor`) verhindern
+      // zusätzlich, dass triviale Absicherungen den Tipp nur wegen ihrer
+      // hohen Wahrscheinlichkeit verdrängen.
       const mainTipKeys = <String>{
         'homeWin',
         'draw',
         'awayWin',
-        'dc1x',
-        'dcX2',
-        'over15',
-        'over25',
-        'under25',
-        'over35',
-        'under35',
         'bttsYes',
         'bttsNo',
-        'homeOver15',
-        'homeUnder15',
-        'awayOver15',
-        'awayUnder15',
-        'homeOver25',
-        'homeUnder25',
-        'awayOver25',
-        'awayUnder25',
-        'dnbHome',
-        'dnbAway',
+        'over25',
+        'under25',
       };
       const displayTipKeys = <String>{
         'homeWin',
@@ -438,18 +427,22 @@ class FootballMarketSelectionService {
           'showPhoenixTip': qualifiesForTip,
           'showValueTip': false,
         },
+        // Section 10 (Claude AN2.txt, "KEIN GEMINI"): die beiden
+        // Gemini-Kontext-Warnungen entfernt - `aiContext['applied']`/
+        // `aiContext['fallbackUsed']` können strukturell nie gesetzt werden
+        // (der KI-Kontext-Schritt ist in der Tagespipeline bewusst nie
+        // verdrahtet, siehe football_daily_pipeline_service.dart), die
+        // "kein Kontext"-Warnung feuerte deshalb auf JEDER Analyse und
+        // suggerierte fälschlich eine fehlende Funktion statt des
+        // dauerhaften Normalzustands. Die Lineup-Warnung bleibt: sie ist
+        // unabhängig vom KI-Kontext wahr (Aufstellungen sind vor Anpfiff
+        // fast nie bestätigt) und weiterhin eine echte, nützliche Information.
         'warnings': [
           if (!qualifiesForTip)
             'Analyse vorhanden, aber kein PHÖNIX-Tipp: Mindestwerte nicht erreicht.',
           if (!realXgAvailable) 'Noch keine echten xG/xGA-Daten vorhanden.',
           if (aiContext['lineupStatus'] != 'confirmed')
             'Bestätigte Aufstellung ist noch nicht verfügbar.',
-          if (aiContext['applied'] == true)
-            'Gemini-Kontext wurde bereits vor der Simulation angewendet.',
-          if (aiContext['applied'] != true)
-            'Kein verifizierter Gemini-Kontext angewendet.',
-          if (aiContext['fallbackUsed'] == true)
-            'Verifizierter Kontext-Fallback wurde verwendet.',
         ],
       };
 

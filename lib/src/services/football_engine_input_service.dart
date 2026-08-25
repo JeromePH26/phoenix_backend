@@ -139,10 +139,16 @@ class FootballEngineInputService {
         'contextAdjusted': contextApplied && (homeDelta != 0 || awayDelta != 0),
       },
       'aiContext': context,
+      // Section 10 (Claude AN2.txt, "KEIN GEMINI"): kein Warnhinweis mehr für
+      // fehlenden KI-Kontext - der Schritt ist bewusst nie verdrahtet (siehe
+      // Kommentar in football_daily_pipeline_service.dart), sein Fehlen ist
+      // der dauerhafte Normalzustand, kein Fehler. `contextApplied` bleibt
+      // heute strukturell immer `false`; die Felder unten bleiben trotzdem
+      // bestehen, falls ein kompatibler Kontext-Dienst künftig wieder
+      // angebunden wird.
       'warnings': [
         if (usesFallback) 'Torwerte fehlen teilweise; PHÖNIX nutzt eine neutrale Basis.',
         if (availability['realXgAvailable'] != true) 'Keine echten xG/xGA-Daten vorhanden.',
-        if (!contextApplied) 'Kein aktueller verifizierter Gemini-Kontext angewendet.',
       ],
       'engineReady': true,
     };
