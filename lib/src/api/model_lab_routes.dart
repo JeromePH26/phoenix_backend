@@ -640,6 +640,44 @@ class ModelLabRoutes {
       }
     });
 
+    // Section (Prediction-History-Backfill, 2026-08-25): "bereits
+    // analysierte sollen [in der Historie] auftauchen" - füllt die
+    // Vorhersage-Historie rückwirkend für bereits abgeschlossene, längst
+    // analysierte Spiele, statt nur ab jetzt langsam neue (künftige)
+    // Predictions anzusammeln. Wiederholt aufrufbar (idempotent, derselbe
+    // Unique-Index wie normale Predictions) - ein zweiter Aufruf mit
+    // höherem limit ergänzt nur, was der erste noch nicht erreicht hat.
+    router.post('/shadow-predictions/backfill', (Request request) async {
+      if (!_isAdmin(request)) return _unauthorized();
+      if (_shadowActionInProgress != null) {
+        return jsonResponse({
+          'error':
+              'Bereits eine Shadow-Aktion aktiv ("$_shadowActionInProgress"). Bitte warten, bis diese fertig ist.',
+        }, statusCode: 409);
+      }
+      final limit = (int.tryParse(
+                request.url.queryParameters['limit'] ?? '',
+              ) ??
+              2000)
+          .clamp(1, 20000);
+      _shadowActionInProgress = 'backfill';
+      try {
+        final created = await ShadowPredictionService(
+          database: database,
+          config: modelLabConfig,
+        ).backfillHistoricalShadowPredictions(limit: limit);
+        return jsonResponse({
+          'status': 'completed',
+          'limit': limit,
+          'created': created,
+        });
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      } finally {
+        _shadowActionInProgress = null;
+      }
+    });
+
     router.post('/shadow-predictions/generate', (Request request) async {
       if (!_isAdmin(request)) return _unauthorized();
       if (_shadowActionInProgress != null) {

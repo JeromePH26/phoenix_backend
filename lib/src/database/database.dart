@@ -7302,6 +7302,66 @@ class PhoenixDatabase {
         .toList();
   }
 
+  /// Section (Shadow Predictions für GLOBAL_GOALS_V1/GlobalMarketEngine-
+  /// Champions, 2026-08-25): dieselbe leakage-sichere Snapshot-Quelle wie
+  /// [modelLabGlobalGoalsV1Dataset], aber für noch nicht angepfiffene Spiele
+  /// statt abgeschlossener - Grundlage für `ShadowPredictionService`, damit
+  /// auch Champions/Challenger dieser Engine-Familie eine laufende
+  /// Vorhersage-Historie bekommen (vorher: kommentarlos übersprungen, siehe
+  /// Kommentar an `ShadowPredictionService.generatePendingShadowPredictions`).
+  Future<List<Map<String, Object?>>> modelLabUpcomingGlobalMarketSnapshots({
+    required int minDataQuality,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+      SELECT
+        picked.fixture_id,
+        picked.league_id,
+        picked.kickoff_utc,
+        picked.phase_two_scan_run_id,
+        picked.availability,
+        picked.home_team_id,
+        picked.away_team_id,
+        ctx.avg_home_goals AS league_avg_home_goals,
+        ctx.avg_away_goals AS league_avg_away_goals
+      FROM (
+        SELECT DISTINCT ON (m.id)
+          m.id AS fixture_id,
+          m.league_id,
+          m.kickoff_utc,
+          p.scan_run_id AS phase_two_scan_run_id,
+          p.availability,
+          m.home_team_id,
+          m.away_team_id
+        FROM football_matches m
+        JOIN football_leagues fl ON fl.league_id = m.league_id
+        JOIN football_phase_two_results p ON p.fixture_id = m.id
+        WHERE m.kickoff_utc IS NOT NULL
+          AND m.kickoff_utc > NOW()
+          AND p.created_at < m.kickoff_utc
+          AND p.data_quality >= @min_data_quality
+          AND fl.collection_tier IN ('focus', 'watchlist', 'data_pool')
+        ORDER BY m.id, p.created_at DESC
+      ) picked
+      LEFT JOIN LATERAL (
+        SELECT AVG(m2.home_goals) AS avg_home_goals,
+               AVG(m2.away_goals) AS avg_away_goals
+        FROM football_matches m2
+        WHERE m2.league_id = picked.league_id
+          AND m2.home_goals IS NOT NULL
+          AND m2.away_goals IS NOT NULL
+          AND m2.kickoff_utc < picked.kickoff_utc
+          AND m2.kickoff_utc >= picked.kickoff_utc - INTERVAL '400 days'
+      ) ctx ON TRUE
+    '''),
+      parameters: {'min_data_quality': minDataQuality},
+    );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
   Future<int> insertModelVersion({
     required String readableVersion,
     int? parentModelId,
@@ -8063,6 +8123,61 @@ class PhoenixDatabase {
         'kickoff': kickoff?.toUtc().toIso8601String(),
         'class_labels': jsonEncode(classLabels),
         'class_probabilities': jsonEncode(classProbabilities),
+      },
+    );
+    return result.isNotEmpty;
+  }
+
+  /// Section (Prediction-History-Backfill, 2026-08-25): legt eine Shadow
+  /// Prediction für ein bereits abgeschlossenes Fixture direkt als
+  /// abgerechnet an (Ergebnis ist zum Zeitpunkt des Aufrufs schon bekannt -
+  /// im Gegensatz zu [upsertShadowPrediction], das für echte Vorab-
+  /// Vorhersagen künftiger Spiele gedacht ist). `predictedBeforeKickoff =
+  /// FALSE` macht ehrlich sichtbar: der zugrunde liegende Snapshot war zwar
+  /// leakage-sicher vor dem Kickoff, die Vorhersage selbst wurde aber erst
+  /// nachträglich berechnet, nicht live in Echtzeit.
+  Future<bool> upsertSettledShadowPrediction({
+    required int modelVersionId,
+    required String fixtureId,
+    required String leagueId,
+    required String market,
+    int? phaseTwoScanRunId,
+    DateTime? kickoff,
+    required List<String> classLabels,
+    required List<double> classProbabilities,
+    required int outcomeIndex,
+    required double brierScore,
+    required double logLoss,
+  }) async {
+    final db = await connection();
+    final result = await db.execute(
+      Sql.named('''
+        INSERT INTO phoenix_shadow_predictions (
+          model_version_id, fixture_id, league_id, market,
+          phase_two_scan_run_id, kickoff, predicted_before_kickoff,
+          class_labels, class_probabilities,
+          settled, outcome_index, brier_score, log_loss, settled_at
+        ) VALUES (
+          @model_version_id, @fixture_id, @league_id, @market,
+          @phase_two_scan_run_id, @kickoff, FALSE,
+          CAST(@class_labels AS JSONB), CAST(@class_probabilities AS JSONB),
+          TRUE, @outcome_index, @brier_score, @log_loss, NOW()
+        )
+        ON CONFLICT (model_version_id, fixture_id, market) DO NOTHING
+        RETURNING id
+      '''),
+      parameters: {
+        'model_version_id': modelVersionId,
+        'fixture_id': fixtureId,
+        'league_id': leagueId,
+        'market': market,
+        'phase_two_scan_run_id': phaseTwoScanRunId,
+        'kickoff': kickoff?.toUtc().toIso8601String(),
+        'class_labels': jsonEncode(classLabels),
+        'class_probabilities': jsonEncode(classProbabilities),
+        'outcome_index': outcomeIndex,
+        'brier_score': brierScore,
+        'log_loss': logLoss,
       },
     );
     return result.isNotEmpty;
