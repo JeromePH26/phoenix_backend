@@ -419,6 +419,16 @@ class ModelLabRoutes {
       }
     });
 
+    router.get('/historical-twins/stats', (Request request) async {
+      if (!_isAdmin(request)) return _unauthorized();
+      try {
+        final stats = await database.historicalTwinDatasetStats();
+        return jsonResponse(_jsonSafe(stats));
+      } catch (error) {
+        return jsonResponse({'error': error.toString()}, statusCode: 500);
+      }
+    });
+
     router.get('/learning-runs/<id|[0-9]+>/candidates',
         (Request request, String id) async {
       if (!_isAdmin(request)) return _unauthorized();

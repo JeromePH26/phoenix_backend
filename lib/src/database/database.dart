@@ -1070,6 +1070,25 @@ class PhoenixDatabase {
       ON historical_twin_matches (normalized_home_probability)
     ''');
 
+    // Team-/Liga-Zuordnung (Section: "68k Spiele unseren Liga-IDs/Mannschaften
+    // zuweisen") - befüllt von bin/phoenix_twins_match_teams.dart --write.
+    // Nur gesetzt, wenn beide Teams UND die Liga mit hoher Konfidenz auf
+    // unsere eigenen football_leagues/football_matches-Namen abgebildet
+    // werden konnten; sonst bleiben die Spalten NULL (kein Raten).
+    await db.execute('''
+      ALTER TABLE historical_twin_matches
+      ADD COLUMN IF NOT EXISTS matched_league_id TEXT REFERENCES football_leagues(league_id),
+      ADD COLUMN IF NOT EXISTS matched_home_team_id TEXT,
+      ADD COLUMN IF NOT EXISTS matched_away_team_id TEXT,
+      ADD COLUMN IF NOT EXISTS match_confidence DOUBLE PRECISION,
+      ADD COLUMN IF NOT EXISTS matched_at TIMESTAMPTZ
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_historical_twin_matches_matched_league
+      ON historical_twin_matches (matched_league_id)
+      WHERE matched_league_id IS NOT NULL
+    ''');
+
     // Zeitreihe aus EloRatings.csv, getrennt von den je-Match-Elo-Werten in
     // historical_twin_matches. Legt die Basis dafür, dass PHÖNIX seine
     // eigene Elo-Reihe künftig selbst fortschreiben kann (siehe Vorgabe 14) -
@@ -5262,6 +5281,68 @@ class PhoenixDatabase {
     return rows
         .map((row) => Map<String, Object?>.from(row.toColumnMap()))
         .toList();
+  }
+
+  /// Admin-Sichtbarkeit für den importierten Historical-Twins-Datensatz
+  /// (Section: "die müssen auch im Center angezeigt werden nicht nur im
+  /// Backend") - reine Lesestatistik, kein Einfluss auf den Twin-Finder
+  /// selbst oder auf das Model Lab.
+  Future<Map<String, Object?>> historicalTwinDatasetStats() async {
+    final db = await connection();
+    final totals = await db.execute('''
+      SELECT
+        count(*) AS total,
+        count(*) FILTER (WHERE home_goals IS NOT NULL AND away_goals IS NOT NULL) AS with_result,
+        count(*) FILTER (WHERE data_coverage_percent >= 60) AS coverage_ge_60,
+        avg(data_coverage_percent) AS avg_coverage,
+        min(match_date) AS earliest,
+        max(match_date) AS latest
+      FROM historical_twin_matches
+    ''');
+    final eloCount = await db.execute('SELECT count(*) FROM historical_elo_ratings');
+    final divisions = await db.execute('''
+      SELECT division, count(*) AS n, min(match_date) AS earliest, max(match_date) AS latest
+      FROM historical_twin_matches
+      GROUP BY division
+      ORDER BY n DESC
+    ''');
+    // Section: Team-/Liga-Zuordnung (matched_*-Spalten) - existiert erst,
+    // sobald bin/phoenix_twins_match_teams.dart --write gelaufen ist; davor
+    // liefert die Spalten-Abfrage einfach 0.
+    var matchedCount = 0;
+    var matchedLeagueCount = 0;
+    try {
+      final matched = await db.execute('''
+        SELECT count(*) FILTER (WHERE matched_home_team_id IS NOT NULL AND matched_away_team_id IS NOT NULL),
+               count(DISTINCT matched_league_id) FILTER (WHERE matched_league_id IS NOT NULL)
+        FROM historical_twin_matches
+      ''');
+      matchedCount = (matched.first[0] as int?) ?? 0;
+      matchedLeagueCount = (matched.first[1] as int?) ?? 0;
+    } catch (_) {
+      // Spalten noch nicht angelegt - Zuordnung wurde noch nicht ausgefuehrt.
+    }
+
+    final row = totals.first;
+    return {
+      'totalMatches': row[0],
+      'withResult': row[1],
+      'coverageAtLeast60Percent': row[2],
+      'averageCoveragePercent': row[3],
+      'earliestMatchDate': (row[4] as DateTime?)?.toIso8601String(),
+      'latestMatchDate': (row[5] as DateTime?)?.toIso8601String(),
+      'totalEloRatings': eloCount.first[0],
+      'matchedToOwnTeams': matchedCount,
+      'matchedLeagueCount': matchedLeagueCount,
+      'divisions': divisions
+          .map((d) => {
+                'division': d[0],
+                'matchCount': d[1],
+                'earliestMatchDate': (d[2] as DateTime?)?.toIso8601String(),
+                'latestMatchDate': (d[3] as DateTime?)?.toIso8601String(),
+              })
+          .toList(),
+    };
   }
 
   /// Liefert den stabilen, zuletzt gespeicherten Spielplan einer Tages- und
