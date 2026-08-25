@@ -35,6 +35,31 @@ class FootballService {
 
   bool get isConfigured => apiKey.trim().isNotEmpty;
 
+  /// Section "ENGINE-FEHLER VOLLSTÄNDIG UNTERSUCHEN UND BEHEBEN" (Claude
+  /// AN2.txt, 2026-08-25): API-Football liefert für einen Home-/Away-/Total-
+  /// Split ohne jedes gespielte Spiel in diesem Split (`played == 0`)
+  /// trotzdem eine Durchschnitts-"0.0" zurück - ein reines Rechenartefakt
+  /// aus "0 Tore / 0 Spiele", keine echte Aussage über die Team-Stärke.
+  /// Ungeprüft übernommen zieht das per Mittelwertbildung
+  /// (`_averageAvailable` in `football_engine_input_service.dart`) BEIDE
+  /// Team-Torerwartungen eines Spiels künstlich nach unten, sobald nur EIN
+  /// Team in einem Split (z.B. "Auswärts") noch kein Spiel hatte - live
+  /// beobachtet an Sheffield Wednesday vs. Wolves (Fixture 1623096): Wolves
+  /// hatten 0 Auswärtsspiele, wodurch beide Teams bei exakt 0,5 Toren
+  /// (Gesamt 1,0) landeten, obwohl beide Teams sonst deutlich höhere
+  /// Torschnitte hatten. 0 gespielte Spiele bedeuten "keine Daten", nicht
+  /// "0 Tore pro Spiel" - gibt deshalb explizit `null` zurück statt die
+  /// Provider-Null weiterzureichen. Jeder nachgelagerte Code
+  /// (`_averageAvailable`, `_relativeStrength`) behandelt `null` bereits
+  /// korrekt als "fehlend" und fällt auf die jeweils andere verfügbare Zahl
+  /// bzw. die neutrale Baseline zurück - kein Sonderfall pro Fixture nötig.
+  static Object? goalAverageIfPlayed(Object? average, Object? played) {
+    final playedCount = played is num
+        ? played.round()
+        : int.tryParse(played?.toString() ?? '') ?? 0;
+    return playedCount > 0 ? average : null;
+  }
+
   Future<List<Map<String, Object?>>> matchesForDate(DateTime date) async {
     final day = _day(date);
     // Der vollständige Spielplan wird serverseitig kurz gecacht. Dadurch
@@ -256,17 +281,27 @@ class FootballService {
           final goalsForAverage = _map(goalsFor['average']);
           final goalsAgainstAverage = _map(goalsAgainst['average']);
           final fixtures = _map(statistics['fixtures']);
+          final played = _map(fixtures['played']);
 
+          // Section "ENGINE-FEHLER" (Claude AN2.txt, 2026-08-25): siehe
+          // FootballService.goalAverageIfPlayed für die Begründung - live
+          // beobachtet an Sheffield Wednesday vs. Wolves, Fixture 1623096.
           result['${prefix}Played'] = fixtures['played'];
-          result['${prefix}GoalsForAverageTotal'] = goalsForAverage['total'];
-          result['${prefix}GoalsForAverageHome'] = goalsForAverage['home'];
-          result['${prefix}GoalsForAverageAway'] = goalsForAverage['away'];
+          result['${prefix}GoalsForAverageTotal'] = FootballService
+              .goalAverageIfPlayed(goalsForAverage['total'], played['total']);
+          result['${prefix}GoalsForAverageHome'] = FootballService
+              .goalAverageIfPlayed(goalsForAverage['home'], played['home']);
+          result['${prefix}GoalsForAverageAway'] = FootballService
+              .goalAverageIfPlayed(goalsForAverage['away'], played['away']);
           result['${prefix}GoalsAgainstAverageTotal'] =
-              goalsAgainstAverage['total'];
+              FootballService.goalAverageIfPlayed(
+                  goalsAgainstAverage['total'], played['total']);
           result['${prefix}GoalsAgainstAverageHome'] =
-              goalsAgainstAverage['home'];
+              FootballService.goalAverageIfPlayed(
+                  goalsAgainstAverage['home'], played['home']);
           result['${prefix}GoalsAgainstAverageAway'] =
-              goalsAgainstAverage['away'];
+              FootballService.goalAverageIfPlayed(
+                  goalsAgainstAverage['away'], played['away']);
           result['${prefix}Form'] = statistics['form'];
         }
       } catch (error) {
