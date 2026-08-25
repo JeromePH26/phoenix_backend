@@ -20,6 +20,7 @@ import 'services/football_service.dart';
 import 'services/firebase_push_service.dart';
 import 'services/football_favorite_live_monitor.dart';
 import 'services/football_news_service.dart';
+import 'services/football_odds_recheck_service.dart';
 import 'services/push_schedule_service.dart';
 import 'services/tennis_service.dart';
 
@@ -33,6 +34,7 @@ class PhoenixBackend {
     required this.favoriteLiveMonitor,
     required this.news,
     required this.pushSchedule,
+    required this.oddsRecheck,
   });
 
   final AppConfig config;
@@ -43,6 +45,7 @@ class PhoenixBackend {
   final FootballFavoriteLiveMonitor favoriteLiveMonitor;
   final FootballNewsService news;
   final PushScheduleService pushSchedule;
+  final FootballOddsRecheckService oddsRecheck;
 
   static Future<PhoenixBackend> create() async {
     final config = AppConfig.fromEnvironment();
@@ -71,6 +74,10 @@ class PhoenixBackend {
       football: football,
     );
     final pushSchedule = PushScheduleService(database: database, push: push);
+    final oddsRecheck = FootballOddsRecheckService(
+      database: database,
+      football: football,
+    );
 
     final routes = ApiRoutes(
       config: config,
@@ -111,6 +118,7 @@ class PhoenixBackend {
       pushSchedule.start();
     }
     if (database.isConfigured) news.start();
+    if (database.isConfigured && football.isConfigured) oddsRecheck.start();
 
     return PhoenixBackend._(
       config: config,
@@ -121,6 +129,7 @@ class PhoenixBackend {
       favoriteLiveMonitor: favoriteLiveMonitor,
       news: news,
       pushSchedule: pushSchedule,
+      oddsRecheck: oddsRecheck,
     );
   }
 
@@ -163,7 +172,7 @@ class PhoenixBackend {
       final interrupted = await database.failPipelineJobsFromEarlierServer();
       if (interrupted > 0) {
         stdout.writeln(
-          'PHOENIX: $interrupted Tagesscan(s) vom vorherigen Serverlauf beendet.',
+          'PHOENIX: $interrupted Job(s) (Tagesscan/Settlement) vom vorherigen Serverlauf beendet.',
         );
       }
     } catch (error, stackTrace) {
@@ -186,6 +195,7 @@ class PhoenixBackend {
   Future<void> close() async {
     favoriteLiveMonitor.close();
     pushSchedule.close();
+    oddsRecheck.close();
     news.close();
     football.close();
     tennis.close();

@@ -20,10 +20,14 @@ class FootballValueService {
     double minimumValuePercent = 5.0,
     double maximumAutomaticValuePercent = 25.0,
     double maximumFairMarketDeviationPercent = 25.0,
+    // Odds-Nachcheck (FootballOddsRecheckService): nur diese Fixtures dieses
+    // Laufs neu bewerten, statt den kompletten Lauf erneut abzufragen.
+    Set<String>? fixtureIds,
   }) async {
     final rows = await database.marketSelectionsForValue(
       phaseTwoScanRunId: phaseTwoScanRunId,
       limit: limit,
+      fixtureIds: fixtureIds,
     );
 
     final outputs = <Map<String, Object?>>[];

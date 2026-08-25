@@ -4813,16 +4813,64 @@ class PhoenixDatabase {
   Future<List<Map<String, Object?>>> marketSelectionsForValue({
     required int phaseTwoScanRunId,
     int limit = 1000000,
+    Set<String>? fixtureIds,
+  }) async {
+    final db = await connection();
+    // fixtureIds grenzt einen Value-Check auf einzelne Spiele eines Laufs
+    // ein (siehe FootballOddsRecheckService: nur die Spiele nachchecken,
+    // die noch keine Quote haben - nicht den ganzen Lauf erneut abfragen).
+    final result = fixtureIds == null
+        ? await db.execute(
+            Sql.named('''
+              SELECT fixture_id, selection
+              FROM football_market_selections
+              WHERE phase_two_scan_run_id = @scan_run_id
+              ORDER BY fixture_id
+            '''),
+            parameters: {'scan_run_id': phaseTwoScanRunId},
+          )
+        : await db.execute(
+            Sql.named('''
+              SELECT fixture_id, selection
+              FROM football_market_selections
+              WHERE phase_two_scan_run_id = @scan_run_id
+                AND fixture_id = ANY(@fixture_ids)
+              ORDER BY fixture_id
+            '''),
+            parameters: {
+              'scan_run_id': phaseTwoScanRunId,
+              'fixture_ids': fixtureIds.toList(),
+            },
+          );
+    return result
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
+  /// Section (Odds-Nachcheck): Buchmacher veröffentlichen Quoten für viele
+  /// Spiele erst Stunden nach dem Tagesscan. Ohne einen späteren Nachcheck
+  /// bleibt ein qualifizierter PHÖNIX-Tipp für immer "odds_unavailable",
+  /// selbst wenn kurz vor Anpfiff eine echte Quote erscheint. Liefert je
+  /// Fixture nur die zuletzt gespeicherte Markt-Auswahl (DISTINCT ON), damit
+  /// ein älterer, längst überholter Lauf nicht erneut angefasst wird.
+  Future<List<Map<String, Object?>>> pendingOddsRecheckCandidates({
+    int limit = 150,
   }) async {
     final db = await connection();
     final result = await db.execute(
       Sql.named('''
-        SELECT fixture_id, selection
-        FROM football_market_selections
-        WHERE phase_two_scan_run_id = @scan_run_id
-        ORDER BY fixture_id
+        SELECT DISTINCT ON (ms.fixture_id)
+          ms.phase_two_scan_run_id, ms.fixture_id
+        FROM football_market_selections ms
+        JOIN football_matches fm ON fm.id = ms.fixture_id
+        WHERE (ms.selection->>'qualifiesForTip') = 'true'
+          AND (ms.selection->'value'->>'status') IN ('odds_unavailable', 'not_checked')
+          AND fm.kickoff_utc > NOW()
+          AND fm.kickoff_utc <= NOW() + interval '3 days'
+        ORDER BY ms.fixture_id, ms.phase_two_scan_run_id DESC
+        LIMIT @limit
       '''),
-      parameters: {'scan_run_id': phaseTwoScanRunId},
+      parameters: {'limit': limit.clamp(1, 1000)},
     );
     return result
         .map((row) => Map<String, Object?>.from(row.toColumnMap()))
@@ -6927,7 +6975,25 @@ class PhoenixDatabase {
         RETURNING id
       '''),
     );
-    return result.length;
+    // Derselbe Container-Neustart, der einen laufenden Tagesscan unterbricht,
+    // kann genauso einen laufenden Match-Settlement-Job mitten im Batch-Loop
+    // (FootballMatchBackfillService.run) killen. Ohne diese Bereinigung
+    // bleibt der Job für immer auf status='running' stehen und blockiert
+    // jeden künftigen Settlement-Start über countPendingFootballMatchSettlementJobs()
+    // (2026-08-25 live beobachtet: ein Backend-Deploy während eines Settlement-
+    // Laufs hat genau das ausgelöst, musste manuell per SQL bereinigt werden).
+    final settlementResult = await db.execute(
+      Sql.named('''
+        UPDATE football_match_settlement_jobs
+        SET status = 'failed',
+            error = 'Lauf durch Server-Neustart unterbrochen.',
+            last_error = 'Lauf durch Server-Neustart unterbrochen.',
+            completed_at = NOW()
+        WHERE status NOT IN ('completed', 'failed')
+        RETURNING id
+      '''),
+    );
+    return result.length + settlementResult.length;
   }
 
   Future<Map<String, Object?>?> footballDailyPipelineJob(int id) async {
