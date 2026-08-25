@@ -9032,7 +9032,7 @@ class PhoenixDatabase {
     final latestAnalysisRows = await db.execute(
       Sql.named('''
         SELECT model_version, data_quality, confidence, recommendation,
-               analyzed_at,
+               analyzed_at, payload,
                COALESCE(payload->>'analysisScope', 'public') AS analysis_scope,
                NULLIF(payload->>'collectionTier', '') AS collection_tier
         FROM analyses
@@ -9049,6 +9049,16 @@ class PhoenixDatabase {
     match['latestAnalysis'] = latestAnalysisRows.isEmpty
         ? null
         : Map<String, Object?>.from(latestAnalysisRows.first.toColumnMap());
+    // Section (Control-Center-Matchdetails vollständig): das komplette
+    // gespeicherte Analyse-JSON (Tabelle, Form, H2H, alle Marktwahrscheinlich-
+    // keiten - dieselben Rohdaten, die auch die App unter payload.phaseTwo.
+    // availability.*Data und payload.probabilities/selection.topMarkets an
+    // die App-UI liefert). `latestAnalysis` oben bleibt schlank für die
+    // bisherige Kurzanzeige; dieses Feld ist die vollständige Quelle für
+    // Tabelle/Form/H2H/Marktcheck im Control Center.
+    match['analysisPayload'] = latestAnalysisRows.isEmpty
+        ? null
+        : _jsonMap(latestAnalysisRows.first.toColumnMap()['payload']);
 
     return match;
   }
