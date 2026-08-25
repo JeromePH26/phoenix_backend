@@ -17,7 +17,12 @@ class FootballPhaseOneScanService {
     DateTime date, {
     bool includeDetails = false,
     int? eligibleLimit,
-    int backgroundFixtureLimit = 30,
+    // War 30: begrenzte, wie viele Nicht-Fokus-Fixtures überhaupt in
+    // football_matches landen und damit für FootballBackgroundEnrichmentService
+    // erreichbar sind. Muss zu dessen eigenem Tagesbudget passen (siehe dort),
+    // sonst hat der Hintergrund-Lauf trotz höherem eigenem Limit nichts zum
+    // Verarbeiten.
+    int backgroundFixtureLimit = 200,
     Future<void> Function(int processed, int total)? onProgress,
   }) async {
     final scanRunId = await database.createFootballScanRun(date);

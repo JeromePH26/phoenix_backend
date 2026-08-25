@@ -20,7 +20,11 @@ class FootballBackgroundEnrichmentService {
 
   Future<Map<String, Object?>> run({
     required DateTime date,
-    int maxFixtures = 30,
+    // War 30: reichte an ruhigen Tagen, aber bei weitem nicht an vollen
+    // Spieltagen (585 Datenpool- + 29 Beobachtungsligen weltweit). Auf
+    // Produktentscheidung 2026-08-25 hochgesetzt, seit Datenpool jetzt auch
+    // fürs Learning zählt (siehe PhoenixDatabase.modelLabRawDataset).
+    int maxFixtures = 200,
   }) async {
     final candidates = await database.backgroundEnrichmentCandidates(
       anchorDate: date,

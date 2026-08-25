@@ -205,12 +205,12 @@ class LearningDatasetBuilder {
       final hasOutcome = isFinished && homeGoals != null && awayGoals != null;
 
       // Muss exakt denselben Kreis wie [PhoenixDatabase.modelLabRawDataset]
-      // verwenden (Fokus- UND Beobachtungsliga), sonst zeigt der Audit-
-      // Bericht Beobachtungsliga-Spiele fälschlich als "not_whitelisted" an,
-      // obwohl sie im echten Training längst berücksichtigt werden. Der
-      // alte `manual_status == 'whitelist'`-Check kannte nur Fokus-Ligen und
-      // wurde vor Einführung der Beobachtungsliste/des Datenpools geschrieben.
-      if (collectionTier != 'focus' && collectionTier != 'watchlist') {
+      // verwenden (Fokus, Beobachtungsliga UND seit 2026-08-25 Datenpool),
+      // sonst zeigt der Audit-Bericht Spiele fälschlich als "not_whitelisted"
+      // an, obwohl sie im echten Training längst berücksichtigt werden.
+      if (collectionTier != 'focus' &&
+          collectionTier != 'watchlist' &&
+          collectionTier != 'data_pool') {
         exclusions['not_whitelisted'] = exclusions['not_whitelisted']! + 1;
         continue;
       }

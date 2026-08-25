@@ -7073,13 +7073,17 @@ class PhoenixDatabase {
     required int minDataQuality,
     // Section GLOBAL_GOALS_V1 Weight-Search: NUR für die schreibgeschützte
     // Offline-Analyse in bin/phoenix_model_lab_weight_search.dart gedacht -
-    // erweitert den Ligenkreis auf ALLE Ligen inkl. Datenpool, um für die
-    // reine Gewichts-Exploration die größtmögliche Stichprobe zu nutzen.
-    // Die eigentliche Learning-Run-Pipeline (Challenger-Erzeugung) bleibt
-    // bewusst auf Fokus+Beobachtungsliste beschränkt (Section 93: Datenpool
-    // ist ein reiner Datensammler, noch keine geprüfte Trainingsquelle).
-    // Data-Quality- und Leakage-Filter (Snapshot vor Kickoff) gelten
-    // unverändert - die sind Korrektheit, keine Konservativität.
+    // erweitert den Ligenkreis auf ALLE Ligen inkl. gesperrter/unbekannter
+    // Ligen, um für die reine Gewichts-Exploration die größtmögliche
+    // Stichprobe zu nutzen.
+    // Update (2026-08-25): Datenpool war ursprünglich bewusst ausgeschlossen
+    // ("noch keine geprüfte Trainingsquelle"), wird nach expliziter
+    // Produktentscheidung jetzt aber wie Fokus/Beobachtungsliste behandelt -
+    // derselbe Hintergrund-Lauf (Shadow-Analyse, Section
+    // FootballBackgroundEnrichmentService) erzeugt für alle drei Stufen
+    // identisch aufbereitete Snapshots, nur mit unterschiedlichem
+    // Tagesbudget. Data-Quality- und Leakage-Filter (Snapshot vor Kickoff)
+    // gelten unverändert - die sind Korrektheit, keine Konservativität.
     bool includeAllTiers = false,
   }) async {
     final db = await connection();
@@ -7087,7 +7091,7 @@ class PhoenixDatabase {
         leagueId == null ? '' : 'AND ei.league_id = @league_id';
     final tierFilter = includeAllTiers
         ? ''
-        : "AND fl.collection_tier IN ('focus', 'watchlist')";
+        : "AND fl.collection_tier IN ('focus', 'watchlist', 'data_pool')";
     final result = await db.execute(
       Sql.named('''
         SELECT DISTINCT ON (ei.fixture_id)
@@ -7202,7 +7206,7 @@ class PhoenixDatabase {
         FROM football_engine_inputs ei
         JOIN football_matches m ON m.id = ei.fixture_id
         JOIN football_leagues fl ON fl.league_id = ei.league_id
-        WHERE fl.collection_tier IN ('focus', 'watchlist')
+        WHERE fl.collection_tier IN ('focus', 'watchlist', 'data_pool')
           AND m.kickoff_utc IS NOT NULL
           AND m.kickoff_utc > NOW()
           AND ei.created_at < m.kickoff_utc
@@ -7216,16 +7220,15 @@ class PhoenixDatabase {
         .toList();
   }
 
-  /// Alle für das Model Lab zugelassenen Fokus- und Beobachtungs-Ligen.
-  /// Der Datenpool bleibt bewusst ein reiner Datensammler, damit ein späterer
-  /// Modelllauf nicht tausende noch unzureichend geprüfte Ligen trainiert.
+  /// Alle für das Model Lab zugelassenen Ligen (Fokus, Beobachtung und seit
+  /// 2026-08-25 auch Datenpool - siehe Kommentar an [modelLabRawDataset]).
   Future<List<Map<String, Object?>>> modelLabWhitelistedLeagues() async {
     final db = await connection();
     final result = await db.execute('''
       SELECT league_id, league_name, country, gender, competition_level,
              total_samples, successful_full_analyses, collection_tier
       FROM football_leagues
-      WHERE collection_tier IN ('focus', 'watchlist')
+      WHERE collection_tier IN ('focus', 'watchlist', 'data_pool')
       ORDER BY league_name
     ''');
     return result
@@ -7252,7 +7255,7 @@ class PhoenixDatabase {
     final db = await connection();
     final tierFilter = includeAllTiers
         ? ''
-        : "AND fl.collection_tier IN ('focus', 'watchlist')";
+        : "AND fl.collection_tier IN ('focus', 'watchlist', 'data_pool')";
     final result = await db.execute(
       Sql.named('''
       SELECT
