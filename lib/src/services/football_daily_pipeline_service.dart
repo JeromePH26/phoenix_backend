@@ -33,8 +33,16 @@ class FootballDailyPipelineService {
   // (leerer marketKey) durch einen frischen Lauf zu ersetzen, statt die
   // Sperre zu umgehen. Alte v10-Zeilen bleiben unverändert als Historie
   // stehen (assignedUnits war dort ohnehin 0, kein ROI-Effekt).
+  //
+  // v11 -> v12 (2026-08-26, Sample-Size-Shrinkage-Fix, siehe
+  // football_engine_input_service.dart): mehrere unter v11 bereits
+  // veröffentlichte Tipps aus dünnen Stichproben (u.a. Lyon/Fenerbahçe,
+  // Celje/Slovan Bratislava, AEK Athens, Newcastle, Rapid Vienna - alle
+  // sampleSize 0-2) hatten unrealistisch hohe Wahrscheinlichkeiten. Aus
+  // demselben Grund wie beim v10->v11-Schritt erneut hochgezählt, damit ein
+  // Nachscan die korrigierten Werte tatsächlich veröffentlicht.
   static const publishedModelVersion =
-      'phoenix_daily_pipeline_v11_visible_tip_fix';
+      'phoenix_daily_pipeline_v12_sample_size_shrinkage';
 
   Future<void> run({
     required int jobId,
