@@ -6415,6 +6415,37 @@ class PhoenixDatabase {
     };
   }
 
+  /// PHÖNIX Engine-Umbau Phase 2 (Plan "wild-cuddling-hoare"): rohe
+  /// abgerechnete Ergebnisse (Team-IDs + Tore + Kickoff) EINER Liga für das
+  /// Team-Stärke-Fitting (`TeamStrengthEngine`). Bewusst unabhängig von
+  /// `LearningSample`/Phase-2-Snapshots - das Fitting braucht nur echte
+  /// Endergebnisse vor einem Stichtag, keine Pre-Match-Features, und die
+  /// Phase-2-Snapshot-Abdeckung ist für viele historische Spiele ohnehin
+  /// lückenhaft (siehe `learning_dataset_builder.dart`s
+  /// `globalMarketHomeTeamId` - dieselbe Einschränkung würde das Fitting
+  /// unnötig auf zu wenige Spiele beschränken). Die Leakage-Sicherheit
+  /// kommt stattdessen vom Aufrufer (nur Spiele VOR dem Holdout-Zeitraum
+  /// übergeben).
+  Future<List<Map<String, Object?>>> footballSettledMatchesForLeague({
+    required String leagueId,
+  }) async {
+    final db = await connection();
+    final rows = await db.execute(
+      Sql.named('''
+        SELECT home_team_id, away_team_id, home_goals, away_goals, kickoff_utc
+        FROM football_matches
+        WHERE league_id = @league_id
+          AND home_goals IS NOT NULL
+          AND away_goals IS NOT NULL
+        ORDER BY kickoff_utc
+      '''),
+      parameters: {'league_id': leagueId},
+    );
+    return rows
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
   /// "Liga-/Tor-Kontext"-Feature für [GlobalGoalsV1Engine]: durchschnittliche
   /// Heim-/Auswärtstore je Spiel dieser Liga über die letzten 400 Tage.
   /// `football_matches` hat keine `season`-Spalte (bekannte Lücke) - ein
