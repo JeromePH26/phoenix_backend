@@ -1,3 +1,4 @@
+import 'dixon_coles_engine.dart';
 import 'global_goals_v1_engine.dart';
 import 'global_market_engine.dart';
 import 'learning_market.dart';
@@ -90,9 +91,10 @@ class EngineReplica {
     required LearningMarket market,
     required Map<String, Object?> features,
     required EngineWeightConfig weights,
+    double rho = 0.0,
   }) {
     final goals = expectedGoals(features: features, weights: weights);
-    return evaluateGoals(market: market, goals: goals);
+    return evaluateGoals(market: market, goals: goals, rho: rho);
   }
 
   /// Wie [evaluate], nimmt aber eine bereits berechnete Torerwartung
@@ -102,15 +104,26 @@ class EngineReplica {
   /// notwendig, damit auch das GLOBAL_GOALS_V1-Modell (siehe `ModelEngine`
   /// unten), das keine `EngineWeightConfig` verwendet, dieselbe
   /// Markt-Logik nutzen kann statt sie zu duplizieren.
+  ///
+  /// [rho] (Default `0.0` = bisheriges, unabhängiges Poisson-Verhalten,
+  /// unverändert) ist der Dixon-Coles-Korrelationsfaktor für die
+  /// zweiseitigen Märkte (1X2, Über/Unter, BTTS, Doppelte Chance, Draw No
+  /// Bet - alle aus derselben gemeinsamen Score-Matrix abgeleitet, siehe
+  /// `PoissonMath.scoreMatrix`). Die Team-Tor-Märkte betreffen nur eine
+  /// Seite und bleiben bewusst unverändert (Standard-Dixon-Coles-Praxis:
+  /// die Korrelation korrigiert das gemeinsame Ergebnis, nicht die
+  /// einseitige Randverteilung).
   static EngineReplicaOutput evaluateGoals({
     required LearningMarket market,
     required ({double home, double away, bool usedFallback}) goals,
+    double rho = 0.0,
   }) {
     switch (market) {
       case LearningMarket.oneXTwo:
         final probabilities = PoissonMath.matchResultProbabilities(
           goals.home,
           goals.away,
+          rho: rho,
         );
         return EngineReplicaOutput(
           market: market,
@@ -127,6 +140,7 @@ class EngineReplica {
           goals.home,
           goals.away,
           2.5,
+          rho: rho,
         );
         return EngineReplicaOutput(
           market: market,
@@ -139,6 +153,7 @@ class EngineReplica {
           goals.home,
           goals.away,
           1.5,
+          rho: rho,
         );
         return EngineReplicaOutput(
           market: market,
@@ -151,6 +166,7 @@ class EngineReplica {
           goals.home,
           goals.away,
           3.5,
+          rho: rho,
         );
         return EngineReplicaOutput(
           market: market,
@@ -162,6 +178,7 @@ class EngineReplica {
         final probabilities = PoissonMath.bttsProbabilities(
           goals.home,
           goals.away,
+          rho: rho,
         );
         return EngineReplicaOutput(
           market: market,
@@ -261,6 +278,7 @@ class EngineReplica {
         final probabilities = PoissonMath.matchResultProbabilities(
           goals.home,
           goals.away,
+          rho: rho,
         );
         final yes = probabilities.home + probabilities.draw;
         return EngineReplicaOutput(
@@ -273,6 +291,7 @@ class EngineReplica {
         final probabilities = PoissonMath.matchResultProbabilities(
           goals.home,
           goals.away,
+          rho: rho,
         );
         final yes = probabilities.draw + probabilities.away;
         return EngineReplicaOutput(
@@ -285,6 +304,7 @@ class EngineReplica {
         final probabilities = PoissonMath.matchResultProbabilities(
           goals.home,
           goals.away,
+          rho: rho,
         );
         return EngineReplicaOutput(
           market: market,
@@ -300,6 +320,7 @@ class EngineReplica {
         final probabilities = PoissonMath.matchResultProbabilities(
           goals.home,
           goals.away,
+          rho: rho,
         );
         return EngineReplicaOutput(
           market: market,
@@ -320,7 +341,12 @@ class EngineReplica {
   }
 }
 
-enum _ModelEngineKind { attackWeightBlend, globalGoalsV1, globalMarket }
+enum _ModelEngineKind {
+  attackWeightBlend,
+  globalGoalsV1,
+  globalMarket,
+  dixonColes,
+}
 
 /// Welche Formel ein konkretes Model verwendet, um aus einem [LearningSample]
 /// eine Torerwartung abzuleiten. Ein Model verwendet immer GENAU eine
@@ -333,10 +359,16 @@ enum _ModelEngineKind { attackWeightBlend, globalGoalsV1, globalMarket }
 /// - `globalMarket`: die Nachfolge-Generation (`GlobalMarketEngine`,
 ///   Claude AN2.txt) mit eigenem Gewichtsprofil je Marktfamilie und
 ///   optionalen benannten Hypothesis-Varianten (`GlobalMarketHypothesis`).
+/// - `dixonColes`: testet einen Korrelationsausgleich für niedrige
+///   Ergebnisse (`DixonColesEngine`/`PoissonMath.scoreMatrix`) auf denselben
+///   Torerwartungen wie der globale Champion (attackWeight 0.5) - `rho` ist
+///   die einzige Testvariable (Section 4: gemeinsame Score-Verteilung statt
+///   unabhängiger Markt-Formeln).
 ///
 /// `globalGoalsV1` und `globalMarket` liefern `null` aus [evaluate], wenn für
 /// das Sample kein leakage-sicherer Phase-2-Snapshot vorhanden ist - die
-/// attackWeight-Formel hat immer einen neutralen Fallback und liefert nie
+/// attackWeight-Formel (und damit auch `dixonColes`, die dieselben
+/// Torerwartungen nutzt) hat immer einen neutralen Fallback und liefert nie
 /// `null`.
 class ModelEngine {
   const ModelEngine.attackWeightBlend(EngineWeightConfig weights)
@@ -344,14 +376,16 @@ class ModelEngine {
         _attackWeightConfig = weights,
         _globalMarketFamily = null,
         _globalMarketWeights = null,
-        _globalMarketHypothesis = null;
+        _globalMarketHypothesis = null,
+        _dixonColesRho = null;
 
   const ModelEngine.globalGoalsV1()
       : _kind = _ModelEngineKind.globalGoalsV1,
         _attackWeightConfig = null,
         _globalMarketFamily = null,
         _globalMarketWeights = null,
-        _globalMarketHypothesis = null;
+        _globalMarketHypothesis = null,
+        _dixonColesRho = null;
 
   /// [hypothesis] `null` bedeutet: der Basis-Preset der Marktfamilie (der
   /// Champion selbst), sonst eine benannte, abweichende Gewichts-Variante.
@@ -364,16 +398,28 @@ class ModelEngine {
         _globalMarketWeights = hypothesis == null
             ? GlobalMarketWeights.presets[family]!
             : hypothesis.apply(GlobalMarketWeights.presets[family]!),
-        _globalMarketHypothesis = hypothesis;
+        _globalMarketHypothesis = hypothesis,
+        _dixonColesRho = null;
+
+  /// [rho] siehe `DixonColesEngine.rhoCandidates`/`PoissonMath.dixonColesTau`.
+  const ModelEngine.dixonColes(double rho)
+      : _kind = _ModelEngineKind.dixonColes,
+        _attackWeightConfig = null,
+        _globalMarketFamily = null,
+        _globalMarketWeights = null,
+        _globalMarketHypothesis = null,
+        _dixonColesRho = rho;
 
   final _ModelEngineKind _kind;
   final EngineWeightConfig? _attackWeightConfig;
   final GlobalMarketFamily? _globalMarketFamily;
+  final double? _dixonColesRho;
   final GlobalMarketWeights? _globalMarketWeights;
   final GlobalMarketHypothesis? _globalMarketHypothesis;
 
   bool get isGlobalGoalsV1 => _kind == _ModelEngineKind.globalGoalsV1;
   bool get isGlobalMarket => _kind == _ModelEngineKind.globalMarket;
+  bool get isDixonColes => _kind == _ModelEngineKind.dixonColes;
 
   EngineReplicaOutput? evaluate({
     required LearningMarket market,
@@ -412,6 +458,13 @@ class ModelEngine {
           market: market,
           goals: (home: home, away: away, usedFallback: false),
         );
+      case _ModelEngineKind.dixonColes:
+        return EngineReplica.evaluate(
+          market: market,
+          features: sample.features,
+          weights: EngineWeightConfig.global,
+          rho: _dixonColesRho!,
+        );
     }
   }
 
@@ -425,6 +478,11 @@ class ModelEngine {
         return {
           'engineVersion': _globalMarketFamily!.version,
           if (_globalMarketHypothesis case final hypothesis?) 'hypothesis': hypothesis.key,
+        };
+      case _ModelEngineKind.dixonColes:
+        return {
+          'engineVersion': DixonColesEngine.version,
+          'rho': _dixonColesRho,
         };
     }
   }

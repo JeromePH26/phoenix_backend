@@ -1,5 +1,6 @@
 import '../config/model_lab_config.dart';
 import '../database/database.dart';
+import 'dixon_coles_engine.dart';
 import 'engine_replica.dart';
 import 'global_goals_v1_engine.dart';
 import 'global_market_engine.dart';
@@ -516,5 +517,70 @@ class ModelRegistryService {
     );
 
     return (id: id, engine: ModelEngine.globalMarket(family, hypothesis: hypothesis));
+  }
+
+  /// Erzeugt (oder findet die bereits existierende) Dixon-Coles-Challenger-
+  /// Version für eine Liga x Markt-Kombination und einen benannten
+  /// `rho`-Wert (siehe `DixonColesEngine.rhoCandidates`). Nutzt exakt
+  /// dieselben Torerwartungen wie der globale Champion (attackWeight 0.5) -
+  /// `rho` ist die einzige Testvariable (Section 4, Claude AN2.txt).
+  Future<({int id, ModelEngine engine})> createOrReuseDixonColesChallenger({
+    required String? leagueId,
+    required LearningMarket market,
+    required double rho,
+    required int generation,
+    required int challengerIndex,
+    required int sampleSize,
+    required int parentModelId,
+    DateTime? trainingStart,
+    DateTime? trainingEnd,
+    required int trainingCount,
+    required int validationCount,
+    required int holdoutCount,
+  }) async {
+    final engine = ModelEngine.dixonColes(rho);
+    final readableVersion =
+        'V$generation-C$challengerIndex-DC${rho.toStringAsFixed(2)}';
+    final id = await database.insertModelVersion(
+      readableVersion: readableVersion,
+      parentModelId: parentModelId,
+      generation: generation,
+      leagueId: leagueId,
+      market: market.key,
+      modelType: 'weight_variant',
+      featureConfig: {
+        'features': 'attackWeightBlend',
+        'engineFamily': DixonColesEngine.version,
+        'rho': rho,
+        'note':
+            'Dixon-Coles-Korrelationsausgleich fuer niedrige Ergebnisse, dieselben Torerwartungen wie der globale Champion.',
+      },
+      weights: engine.toJson(),
+      trainingStart: trainingStart,
+      trainingEnd: trainingEnd,
+      trainingCount: trainingCount,
+      validationCount: validationCount,
+      holdoutCount: holdoutCount,
+      shadowCount: 0,
+      status: 'challenger',
+      configHash: DixonColesEngine.configHash(rho),
+      codeSchemaVersion: codeSchemaVersion,
+    );
+
+    await database.insertModelLabAuditLog(
+      action: 'challenger_created',
+      actor: 'system',
+      modelVersionId: id,
+      leagueId: leagueId,
+      market: market.key,
+      details: {
+        'readableVersion': readableVersion,
+        'engineVersion': DixonColesEngine.version,
+        'rho': rho,
+        'sampleSize': sampleSize,
+      },
+    );
+
+    return (id: id, engine: engine);
   }
 }

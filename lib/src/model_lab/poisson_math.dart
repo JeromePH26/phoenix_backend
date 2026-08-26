@@ -31,19 +31,95 @@ class PoissonMath {
     return result;
   }
 
-  /// Wahrscheinlichkeiten für 1X2 aus zwei unabhängigen Poisson-Verteilungen.
-  static ({double home, double draw, double away}) matchResultProbabilities(
-    double homeLambda,
-    double awayLambda,
-  ) {
-    var home = 0.0;
-    var draw = 0.0;
-    var away = 0.0;
+  /// Dixon-Coles-Korrekturfaktor (Dixon & Coles 1997) für die vier
+  /// niedrigen Scorelines, wo unabhängiges Poisson die empirische
+  /// Torkorrelation systematisch unterschätzt (0:0/1:1 zu selten, 1:0/0:1 zu
+  /// häufig vorhergesagt). `rho == 0.0` liefert für JEDE Scoreline exakt
+  /// `1.0` - macht [scoreMatrix] bei `rho: 0.0` identisch zur bisherigen
+  /// unabhängigen Poisson-Matrix (Regressionsanker, siehe Tests).
+  static double dixonColesTau({
+    required int homeGoals,
+    required int awayGoals,
+    required double homeLambda,
+    required double awayLambda,
+    required double rho,
+  }) {
+    if (homeGoals == 0 && awayGoals == 0) {
+      return 1 - (homeLambda * awayLambda * rho);
+    }
+    if (homeGoals == 0 && awayGoals == 1) {
+      return 1 + (homeLambda * rho);
+    }
+    if (homeGoals == 1 && awayGoals == 0) {
+      return 1 + (awayLambda * rho);
+    }
+    if (homeGoals == 1 && awayGoals == 1) {
+      return 1 - rho;
+    }
+    return 1.0;
+  }
+
+  /// Gemeinsame Score-Verteilung (das "Match-State"-Objekt, Section 4:
+  /// "PHÖNIX soll zuerst das SPIEL verstehen und erst danach die
+  /// WETTMÄRKTE ableiten") - alle Markt-Wahrscheinlichkeiten unten leiten
+  /// sich aus DERSELBEN Matrix ab, statt unabhängig voneinander zu rechnen.
+  /// `rho: 0.0` (Default) reproduziert exakt die bisherige unabhängige
+  /// Poisson-Annahme.
+  static List<List<double>> scoreMatrix({
+    required double homeLambda,
+    required double awayLambda,
+    double rho = 0.0,
+  }) {
+    final matrix = List.generate(
+      maxGoalsPerSide + 1,
+      (_) => List<double>.filled(maxGoalsPerSide + 1, 0.0),
+    );
+    var total = 0.0;
     for (var h = 0; h <= maxGoalsPerSide; h++) {
       final pH = pmf(homeLambda, h);
       for (var a = 0; a <= maxGoalsPerSide; a++) {
         final pA = pmf(awayLambda, a);
-        final joint = pH * pA;
+        final tau = rho == 0.0
+            ? 1.0
+            : dixonColesTau(
+                homeGoals: h,
+                awayGoals: a,
+                homeLambda: homeLambda,
+                awayLambda: awayLambda,
+                rho: rho,
+              );
+        final joint = (pH * pA * tau).clamp(0.0, 1.0).toDouble();
+        matrix[h][a] = joint;
+        total += joint;
+      }
+    }
+    if (total <= 0) return matrix;
+    for (var h = 0; h <= maxGoalsPerSide; h++) {
+      for (var a = 0; a <= maxGoalsPerSide; a++) {
+        matrix[h][a] = matrix[h][a] / total;
+      }
+    }
+    return matrix;
+  }
+
+  /// Wahrscheinlichkeiten für 1X2 aus der gemeinsamen Score-Matrix
+  /// (`rho: 0.0` = unabhängiges Poisson, bisheriges Verhalten unverändert).
+  static ({double home, double draw, double away}) matchResultProbabilities(
+    double homeLambda,
+    double awayLambda, {
+    double rho = 0.0,
+  }) {
+    final matrix = scoreMatrix(
+      homeLambda: homeLambda,
+      awayLambda: awayLambda,
+      rho: rho,
+    );
+    var home = 0.0;
+    var draw = 0.0;
+    var away = 0.0;
+    for (var h = 0; h <= maxGoalsPerSide; h++) {
+      for (var a = 0; a <= maxGoalsPerSide; a++) {
+        final joint = matrix[h][a];
         if (h > a) {
           home += joint;
         } else if (h == a) {
@@ -63,14 +139,19 @@ class PoissonMath {
   static ({double over, double under}) overUnderProbabilities(
     double homeLambda,
     double awayLambda,
-    double line,
-  ) {
+    double line, {
+    double rho = 0.0,
+  }) {
+    final matrix = scoreMatrix(
+      homeLambda: homeLambda,
+      awayLambda: awayLambda,
+      rho: rho,
+    );
     var over = 0.0;
     var under = 0.0;
     for (var h = 0; h <= maxGoalsPerSide; h++) {
-      final pH = pmf(homeLambda, h);
       for (var a = 0; a <= maxGoalsPerSide; a++) {
-        final joint = pH * pmf(awayLambda, a);
+        final joint = matrix[h][a];
         if (h + a > line) {
           over += joint;
         } else {
@@ -83,15 +164,28 @@ class PoissonMath {
     return (over: over / total, under: under / total);
   }
 
-  /// Beide Teams treffen: bei Unabhängigkeit P(H>=1) * P(A>=1).
+  /// Beide Teams treffen. Bei `rho: 0.0` identisch zur bisherigen
+  /// Unabhängigkeits-Kurzformel P(H>=1) * P(A>=1); mit `rho != 0` läuft die
+  /// echte Summe über die Score-Matrix, weil die Korrelation gerade den
+  /// (0,0)-Fall verschiebt, den die Kurzformel nicht abbilden kann.
   static ({double yes, double no}) bttsProbabilities(
     double homeLambda,
-    double awayLambda,
-  ) {
-    final homeScores = 1 - pmf(homeLambda, 0);
-    final awayScores = 1 - pmf(awayLambda, 0);
-    final yes = (homeScores * awayScores).clamp(0.0, 1.0).toDouble();
-    return (yes: yes, no: 1 - yes);
+    double awayLambda, {
+    double rho = 0.0,
+  }) {
+    final matrix = scoreMatrix(
+      homeLambda: homeLambda,
+      awayLambda: awayLambda,
+      rho: rho,
+    );
+    var yes = 0.0;
+    for (var h = 1; h <= maxGoalsPerSide; h++) {
+      for (var a = 1; a <= maxGoalsPerSide; a++) {
+        yes += matrix[h][a];
+      }
+    }
+    final clamped = yes.clamp(0.0, 1.0).toDouble();
+    return (yes: clamped, no: 1 - clamped);
   }
 
   /// P(Team erzielt mehr als [line] Tore) und Gegenwahrscheinlichkeit.

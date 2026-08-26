@@ -1,6 +1,7 @@
 import '../config/model_lab_config.dart';
 import '../database/database.dart';
 import 'challenger_generator.dart';
+import 'dixon_coles_engine.dart';
 import 'engine_replica.dart';
 import 'global_goals_v1_engine.dart';
 import 'global_market_engine.dart';
@@ -543,6 +544,88 @@ class LearningRunService {
                 evaluationType: 'holdout',
                 championModelId: championId,
                 challengerModelId: challenger.id,
+              );
+            }
+          }
+        }
+
+        // PHÖNIX Engine-Umbau Phase 1 Spur A (Plan "wild-cuddling-hoare",
+        // 2026-08-26): Dixon-Coles-Korrelationsausgleich als eigene,
+        // benannte Challenger-Hypothesen (Section 4/10-12, Claude AN2.txt).
+        // Nutzt dieselben, immer verfügbaren attackWeightBlend-Features wie
+        // das attackWeight-Gitter unten - eigenes, unabhängiges Budget (max.
+        // `DixonColesEngine.rhoCandidates.length` pro Liga x Markt), läuft
+        // unabhängig vom attackWeight-Gitter-Budget unten. Bleibt reiner
+        // Model-Lab-Schatten-Betrieb (PHOENIX_MODEL_PROMOTION_ENABLED),
+        // portiert NICHT die produktive Simulation.
+        if (split.validation.length >= config.minValidationSample ||
+            split.holdout.length >= config.minHoldoutSample) {
+          final existingRhos = existingChallengers
+              .map((c) => (c['weights'] as Map?)?['rho'])
+              .whereType<num>()
+              .map((rho) => rho.toDouble())
+              .toSet();
+          for (final rho in DixonColesEngine.rhoCandidates) {
+            if (existingRhos.contains(rho)) continue;
+            final challengerIndex = await registry.nextChallengerIndex(
+              leagueId: leagueId,
+              market: market.key,
+              generation: generation,
+            );
+            final dixonColesChallenger =
+                await registry.createOrReuseDixonColesChallenger(
+              leagueId: leagueId,
+              market: market,
+              rho: rho,
+              generation: generation,
+              challengerIndex: challengerIndex,
+              sampleSize: eligibleSampleSize,
+              parentModelId: championId,
+              trainingStart:
+                  split.training.isEmpty ? null : split.training.first.kickoff,
+              trainingEnd:
+                  split.training.isEmpty ? null : split.training.last.kickoff,
+              trainingCount: split.training.length,
+              validationCount: split.validation.length,
+              holdoutCount: split.holdout.length,
+            );
+            challengersCreated += 1;
+
+            await database.addLearningCandidate(
+              learningRunId: runId,
+              modelVersionId: dixonColesChallenger.id,
+              leagueId: leagueId,
+              market: market.key,
+            );
+
+            if (split.validation.isNotEmpty) {
+              await _persistComparison(
+                comparison: ChampionChallengerComparison.compare(
+                  market: market,
+                  leagueId: leagueId,
+                  scopeSamples: split.validation,
+                  championEngine: championEngine,
+                  challengerEngine: dixonColesChallenger.engine,
+                  config: config,
+                ),
+                evaluationType: 'walk_forward',
+                championModelId: championId,
+                challengerModelId: dixonColesChallenger.id,
+              );
+            }
+            if (split.holdout.isNotEmpty) {
+              await _persistComparison(
+                comparison: ChampionChallengerComparison.compare(
+                  market: market,
+                  leagueId: leagueId,
+                  scopeSamples: split.holdout,
+                  championEngine: championEngine,
+                  challengerEngine: dixonColesChallenger.engine,
+                  config: config,
+                ),
+                evaluationType: 'holdout',
+                championModelId: championId,
+                challengerModelId: dixonColesChallenger.id,
               );
             }
           }
