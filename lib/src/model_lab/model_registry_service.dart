@@ -5,6 +5,7 @@ import 'engine_replica.dart';
 import 'global_goals_v1_engine.dart';
 import 'global_market_engine.dart';
 import 'learning_market.dart';
+import 'team_strength_engine.dart';
 import 'weight_config.dart';
 
 /// Section 12/59/60: Model Registry. Verwaltet unveränderliche
@@ -577,6 +578,76 @@ class ModelRegistryService {
         'readableVersion': readableVersion,
         'engineVersion': DixonColesEngine.version,
         'rho': rho,
+        'sampleSize': sampleSize,
+      },
+    );
+
+    return (id: id, engine: engine);
+  }
+
+  /// Erzeugt (oder findet die bereits existierende) Team-Stärke-Challenger-
+  /// Version für eine Liga x Markt-Kombination aus einem VORHER (einmal pro
+  /// Liga) gefitteten [TeamStrengthFit] (siehe `TeamStrengthEngine.fit`,
+  /// `learning_run_service.dart` fittet einmal pro Liga und nutzt denselben
+  /// Fit über alle Märkte hinweg wieder). Live gegen PHÖNIX-Daten getestet
+  /// (Plan "wild-cuddling-hoare", Phase 2): auf 9 Ligen deutlich besser als
+  /// der einfache Durchschnitt (Ø Brier -7,3%), aber weiterhin reiner
+  /// Model-Lab-Schatten-Challenger - keine automatische Beförderung.
+  Future<({int id, ModelEngine engine})> createOrReuseTeamStrengthChallenger({
+    required String? leagueId,
+    required LearningMarket market,
+    required TeamStrengthFit fit,
+    required int generation,
+    required int challengerIndex,
+    required int sampleSize,
+    required int parentModelId,
+    DateTime? trainingStart,
+    DateTime? trainingEnd,
+    required int trainingCount,
+    required int validationCount,
+    required int holdoutCount,
+  }) async {
+    final engine = ModelEngine.teamStrength(fit);
+    final readableVersion = 'V$generation-C$challengerIndex-TS';
+    final id = await database.insertModelVersion(
+      readableVersion: readableVersion,
+      parentModelId: parentModelId,
+      generation: generation,
+      leagueId: leagueId,
+      market: market.key,
+      modelType: 'weight_variant',
+      featureConfig: {
+        'features': 'teamStrength',
+        'engineFamily': TeamStrengthEngine.version,
+        'fitTeamCount': fit.attack.length,
+        'fitConverged': fit.converged,
+        'fitIterations': fit.iterations,
+        'note':
+            'IPF-Angriff/Abwehr-Team-Rating (Maher-Modell), einmal pro Liga aus der Trainingshistorie gefittet, ueber alle Maerkte wiederverwendet.',
+      },
+      weights: engine.toJson(),
+      trainingStart: trainingStart,
+      trainingEnd: trainingEnd,
+      trainingCount: trainingCount,
+      validationCount: validationCount,
+      holdoutCount: holdoutCount,
+      shadowCount: 0,
+      status: 'challenger',
+      configHash: fit.configHash(),
+      codeSchemaVersion: codeSchemaVersion,
+    );
+
+    await database.insertModelLabAuditLog(
+      action: 'challenger_created',
+      actor: 'system',
+      modelVersionId: id,
+      leagueId: leagueId,
+      market: market.key,
+      details: {
+        'readableVersion': readableVersion,
+        'engineVersion': TeamStrengthEngine.version,
+        'fitTeamCount': fit.attack.length,
+        'fitConverged': fit.converged,
         'sampleSize': sampleSize,
       },
     );

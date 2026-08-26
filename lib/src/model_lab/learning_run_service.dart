@@ -10,6 +10,7 @@ import 'learning_market.dart';
 import 'learning_sample.dart';
 import 'league_market_status.dart';
 import 'model_registry_service.dart';
+import 'team_strength_engine.dart';
 import 'walk_forward_evaluator.dart';
 import 'weight_config.dart';
 
@@ -217,6 +218,17 @@ class LearningRunService {
     var leagueMarketPairsProcessed = 0;
     final processedLeagueIds = <String>{};
     final leagueStatusSummary = <Map<String, Object?>>[];
+
+    // PHÖNIX Engine-Umbau Phase 2 (Plan "wild-cuddling-hoare"): anders als
+    // die übrigen Engine-Kinds wird `TeamStrengthFit` NICHT pro Sample
+    // abgeleitet, sondern EINMAL pro Liga aus der gesamten Trainingshistorie
+    // gefittet (IPF, siehe `TeamStrengthEngine.fit`) und dann über alle 3
+    // Märkte hinweg wiederverwendet - market ist die äußere, league die
+    // innere Schleife unten, ein Cache verhindert also ein erneutes Fitting
+    // derselben Liga bei jedem Markt-Durchlauf. `null` bedeutet: für diese
+    // Liga wurde bereits versucht zu fitten, aber zu wenig Historie
+    // vorhanden (Cache verhindert wiederholte erfolglose Versuche).
+    final teamStrengthFitsByLeague = <String, TeamStrengthFit?>{};
 
     // Section 65 Fortsetzung: Position, an der der letzte (verwaiste)
     // Versuch unterbrochen wurde. Vollständig abgeschlossene Märkte
@@ -631,6 +643,103 @@ class LearningRunService {
           }
         }
 
+        // PHÖNIX Engine-Umbau Phase 2 (Plan "wild-cuddling-hoare", Live-
+        // Backtest mit Shrinkage-Regularisierung: 9 Ligen, Ø Brier -7,3%
+        // gegen den einfachen Durchschnitt): IPF-Team-Stärke-Challenger.
+        // Der Fit selbst passiert nur EINMAL pro Liga (Cache oben), hier
+        // wird er nur noch als Challenger für DIESEN Markt registriert -
+        // eigenes, unabhängiges Budget (max. 1 pro Liga x Markt), läuft
+        // unabhängig vom attackWeight-Gitter-Budget unten.
+        final hasTeamStrengthChallenger = existingChallengers.any(
+          (c) =>
+              (c['weights'] as Map?)?['engineVersion'] ==
+              TeamStrengthEngine.version,
+        );
+        if (!hasTeamStrengthChallenger) {
+          final teamStrengthFit = await _teamStrengthFitFor(
+            leagueId: leagueId,
+            split: split,
+            cache: teamStrengthFitsByLeague,
+          );
+          // Nur mit konvergiertem Fit als Challenger anlegen - ein
+          // nicht-konvergierter Fit ist nicht vertrauenswürdig (live
+          // beobachtet: ohne Regularisierung 6 von 9 Ligen ohne Konvergenz,
+          // deutlich schlechter als der einfache Durchschnitt).
+          if (teamStrengthFit != null && teamStrengthFit.converged) {
+            final teamStrengthValidation = split.validation
+                .where((s) => s.hasGlobalMarketData)
+                .toList();
+            final teamStrengthHoldout =
+                split.holdout.where((s) => s.hasGlobalMarketData).toList();
+            if (teamStrengthValidation.length >= config.minValidationSample ||
+                teamStrengthHoldout.length >= config.minHoldoutSample) {
+              final challengerIndex = await registry.nextChallengerIndex(
+                leagueId: leagueId,
+                market: market.key,
+                generation: generation,
+              );
+              final teamStrengthChallenger =
+                  await registry.createOrReuseTeamStrengthChallenger(
+                leagueId: leagueId,
+                market: market,
+                fit: teamStrengthFit,
+                generation: generation,
+                challengerIndex: challengerIndex,
+                sampleSize: eligibleSampleSize,
+                parentModelId: championId,
+                trainingStart: split.training.isEmpty
+                    ? null
+                    : split.training.first.kickoff,
+                trainingEnd: split.training.isEmpty
+                    ? null
+                    : split.training.last.kickoff,
+                trainingCount: split.training.length,
+                validationCount: teamStrengthValidation.length,
+                holdoutCount: teamStrengthHoldout.length,
+              );
+              challengersCreated += 1;
+
+              await database.addLearningCandidate(
+                learningRunId: runId,
+                modelVersionId: teamStrengthChallenger.id,
+                leagueId: leagueId,
+                market: market.key,
+              );
+
+              if (teamStrengthValidation.isNotEmpty) {
+                await _persistComparison(
+                  comparison: ChampionChallengerComparison.compare(
+                    market: market,
+                    leagueId: leagueId,
+                    scopeSamples: teamStrengthValidation,
+                    championEngine: championEngine,
+                    challengerEngine: teamStrengthChallenger.engine,
+                    config: config,
+                  ),
+                  evaluationType: 'walk_forward',
+                  championModelId: championId,
+                  challengerModelId: teamStrengthChallenger.id,
+                );
+              }
+              if (teamStrengthHoldout.isNotEmpty) {
+                await _persistComparison(
+                  comparison: ChampionChallengerComparison.compare(
+                    market: market,
+                    leagueId: leagueId,
+                    scopeSamples: teamStrengthHoldout,
+                    championEngine: championEngine,
+                    challengerEngine: teamStrengthChallenger.engine,
+                    config: config,
+                  ),
+                  evaluationType: 'holdout',
+                  championModelId: championId,
+                  challengerModelId: teamStrengthChallenger.id,
+                );
+              }
+            }
+          }
+        }
+
         final grid = ChallengerGenerator.candidateAttackWeights(config);
         // Die Challenger-Obergrenze ist ein echter Sicherheitsmechanismus,
         // keine reine Konfigurations-Dokumentation. Ohne sie erzeugte jeder
@@ -962,6 +1071,70 @@ class LearningRunService {
     }
 
     return created;
+  }
+
+  /// Fittet Team-Stärke (`TeamStrengthEngine`) EINMAL pro Liga aus echten,
+  /// abgerechneten Ergebnissen VOR dem Beginn von Validation/Holdout
+  /// (Leakage-Sicherheit) - unabhängig von `LearningSample`/Phase-2-
+  /// Snapshot-Abdeckung (`database.footballSettledMatchesForLeague`,
+  /// dieselbe Begründung wie im Backtest-Skript: die Snapshot-Abdeckung ist
+  /// für ein verlässliches Team-Rating-Fitting zu lückenhaft). Ergebnis wird
+  /// in [cache] für die Dauer des Laufs abgelegt (auch `null`, wenn zu wenig
+  /// Historie vorhanden ist - verhindert wiederholte erfolglose Versuche
+  /// bei jedem der 3 Märkte).
+  Future<TeamStrengthFit?> _teamStrengthFitFor({
+    required String leagueId,
+    required ChronologicalSplit split,
+    required Map<String, TeamStrengthFit?> cache,
+  }) async {
+    if (cache.containsKey(leagueId)) return cache[leagueId];
+
+    final evaluatedSamples =
+        split.validation.isNotEmpty ? split.validation : split.holdout;
+    if (evaluatedSamples.isEmpty) {
+      cache[leagueId] = null;
+      return null;
+    }
+    final boundary = evaluatedSamples.first.kickoff;
+
+    final rawMatches = await database.footballSettledMatchesForLeague(
+      leagueId: leagueId,
+    );
+    final trainingMatches = rawMatches.where((row) {
+      final kickoff = row['kickoff_utc'];
+      if (kickoff is! DateTime) return false;
+      return kickoff.isBefore(boundary);
+    }).toList();
+
+    // Dieselbe Mindestmenge wie der Live-Backtest (Plan "wild-cuddling-
+    // hoare"): darunter ist selbst mit Shrinkage-Regularisierung kein
+    // verlässlicher Fit zu erwarten (live getestet: bei 40 hatten nur 4 von
+    // 1233 Ligen genug Historie, 25 ist der bewusste Kompromiss).
+    const minimumTrainingMatches = 25;
+    if (trainingMatches.length < minimumTrainingMatches) {
+      cache[leagueId] = null;
+      return null;
+    }
+
+    final matchResults = trainingMatches
+        .map((row) => MatchResult(
+              homeTeamId: row['home_team_id']?.toString() ?? '',
+              awayTeamId: row['away_team_id']?.toString() ?? '',
+              homeGoals: _parseGoals(row['home_goals']),
+              awayGoals: _parseGoals(row['away_goals']),
+            ))
+        .where((m) => m.homeTeamId.isNotEmpty && m.awayTeamId.isNotEmpty)
+        .toList();
+
+    final fit = TeamStrengthEngine.fit(matchResults);
+    cache[leagueId] = fit;
+    return fit;
+  }
+
+  int _parseGoals(Object? value) {
+    if (value is int) return value;
+    if (value is num) return value.round();
+    return int.tryParse(value?.toString() ?? '') ?? 0;
   }
 
   Future<void> _persistComparison({

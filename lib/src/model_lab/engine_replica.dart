@@ -4,6 +4,7 @@ import 'global_market_engine.dart';
 import 'learning_market.dart';
 import 'learning_sample.dart';
 import 'poisson_math.dart';
+import 'team_strength_engine.dart';
 import 'weight_config.dart';
 
 /// Ergebnis einer Model-Lab-Wahrscheinlichkeitsberechnung für EIN Match und
@@ -346,6 +347,7 @@ enum _ModelEngineKind {
   globalGoalsV1,
   globalMarket,
   dixonColes,
+  teamStrength,
 }
 
 /// Welche Formel ein konkretes Model verwendet, um aus einem [LearningSample]
@@ -364,12 +366,22 @@ enum _ModelEngineKind {
 ///   Torerwartungen wie der globale Champion (attackWeight 0.5) - `rho` ist
 ///   die einzige Testvariable (Section 4: gemeinsame Score-Verteilung statt
 ///   unabhängiger Markt-Formeln).
+/// - `teamStrength`: nutzt ein VORHER (einmal pro Liga, aus der gesamten
+///   verfügbaren Spielhistorie) gefittetes `TeamStrengthFit`
+///   (`TeamStrengthEngine`, IPF-Angriff/Abwehr-Modell) statt Torquoten aus
+///   `sample.features` abzuleiten - architektonisch anders als die übrigen
+///   Kinds: das Fit-Objekt kommt von außen (siehe `learning_run_service.
+///   dart`, ein Fit pro Liga wird über alle Märkte hinweg wiederverwendet),
+///   nicht aus dem einzelnen Sample. Live gegen PHÖNIX-Daten getestet
+///   (Plan "wild-cuddling-hoare", Phase 2, Backtest mit Shrinkage-
+///   Regularisierung): auf 9 Ligen/98 Holdout-Spielen deutlich besser als
+///   der einfache Durchschnitt (Ø Brier -7,3%).
 ///
-/// `globalGoalsV1` und `globalMarket` liefern `null` aus [evaluate], wenn für
-/// das Sample kein leakage-sicherer Phase-2-Snapshot vorhanden ist - die
-/// attackWeight-Formel (und damit auch `dixonColes`, die dieselben
-/// Torerwartungen nutzt) hat immer einen neutralen Fallback und liefert nie
-/// `null`.
+/// `globalGoalsV1`, `globalMarket` und `teamStrength` liefern `null` aus
+/// [evaluate], wenn für das Sample kein leakage-sicherer Phase-2-Snapshot
+/// (Team-IDs) vorhanden ist - die attackWeight-Formel (und damit auch
+/// `dixonColes`, die dieselben Torerwartungen nutzt) hat immer einen
+/// neutralen Fallback und liefert nie `null`.
 class ModelEngine {
   const ModelEngine.attackWeightBlend(EngineWeightConfig weights)
       : _kind = _ModelEngineKind.attackWeightBlend,
@@ -377,7 +389,8 @@ class ModelEngine {
         _globalMarketFamily = null,
         _globalMarketWeights = null,
         _globalMarketHypothesis = null,
-        _dixonColesRho = null;
+        _dixonColesRho = null,
+        _teamStrengthFit = null;
 
   const ModelEngine.globalGoalsV1()
       : _kind = _ModelEngineKind.globalGoalsV1,
@@ -385,7 +398,8 @@ class ModelEngine {
         _globalMarketFamily = null,
         _globalMarketWeights = null,
         _globalMarketHypothesis = null,
-        _dixonColesRho = null;
+        _dixonColesRho = null,
+        _teamStrengthFit = null;
 
   /// [hypothesis] `null` bedeutet: der Basis-Preset der Marktfamilie (der
   /// Champion selbst), sonst eine benannte, abweichende Gewichts-Variante.
@@ -399,7 +413,8 @@ class ModelEngine {
             ? GlobalMarketWeights.presets[family]!
             : hypothesis.apply(GlobalMarketWeights.presets[family]!),
         _globalMarketHypothesis = hypothesis,
-        _dixonColesRho = null;
+        _dixonColesRho = null,
+        _teamStrengthFit = null;
 
   /// [rho] siehe `DixonColesEngine.rhoCandidates`/`PoissonMath.dixonColesTau`.
   const ModelEngine.dixonColes(double rho)
@@ -408,7 +423,20 @@ class ModelEngine {
         _globalMarketFamily = null,
         _globalMarketWeights = null,
         _globalMarketHypothesis = null,
-        _dixonColesRho = rho;
+        _dixonColesRho = rho,
+        _teamStrengthFit = null;
+
+  /// [fit] muss vorher einmal pro Liga berechnet werden (siehe
+  /// `TeamStrengthEngine.fit`) - dieser Konstruktor führt selbst kein
+  /// Fitting durch.
+  const ModelEngine.teamStrength(TeamStrengthFit fit)
+      : _kind = _ModelEngineKind.teamStrength,
+        _attackWeightConfig = null,
+        _globalMarketFamily = null,
+        _globalMarketWeights = null,
+        _globalMarketHypothesis = null,
+        _dixonColesRho = null,
+        _teamStrengthFit = fit;
 
   final _ModelEngineKind _kind;
   final EngineWeightConfig? _attackWeightConfig;
@@ -416,10 +444,12 @@ class ModelEngine {
   final double? _dixonColesRho;
   final GlobalMarketWeights? _globalMarketWeights;
   final GlobalMarketHypothesis? _globalMarketHypothesis;
+  final TeamStrengthFit? _teamStrengthFit;
 
   bool get isGlobalGoalsV1 => _kind == _ModelEngineKind.globalGoalsV1;
   bool get isGlobalMarket => _kind == _ModelEngineKind.globalMarket;
   bool get isDixonColes => _kind == _ModelEngineKind.dixonColes;
+  bool get isTeamStrength => _kind == _ModelEngineKind.teamStrength;
 
   EngineReplicaOutput? evaluate({
     required LearningMarket market,
@@ -465,6 +495,17 @@ class ModelEngine {
           weights: EngineWeightConfig.global,
           rho: _dixonColesRho!,
         );
+      case _ModelEngineKind.teamStrength:
+        if (!sample.hasGlobalMarketData) return null;
+        final goals = TeamStrengthEngine.expectedGoals(
+          fit: _teamStrengthFit!,
+          homeTeamId: sample.globalMarketHomeTeamId!,
+          awayTeamId: sample.globalMarketAwayTeamId!,
+        );
+        return EngineReplica.evaluateGoals(
+          market: market,
+          goals: (home: goals.home, away: goals.away, usedFallback: false),
+        );
     }
   }
 
@@ -483,6 +524,17 @@ class ModelEngine {
         return {
           'engineVersion': DixonColesEngine.version,
           'rho': _dixonColesRho,
+        };
+      case _ModelEngineKind.teamStrength:
+        final fit = _teamStrengthFit!;
+        return {
+          'engineVersion': TeamStrengthEngine.version,
+          'homeAdvantage': fit.homeAdvantage,
+          'fitConverged': fit.converged,
+          'fitIterations': fit.iterations,
+          'teamCount': fit.attack.length,
+          'attack': fit.attack,
+          'defense': fit.defense,
         };
     }
   }

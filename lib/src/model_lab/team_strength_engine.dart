@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'package:crypto/crypto.dart';
+
 /// PHÖNIX Engine-Umbau, Phase 2 (Plan "wild-cuddling-hoare"): der laut Plan
 /// größte Hebel - Team-Stärke-Ratings statt roher Saison-Torschnitte.
 ///
@@ -66,10 +69,40 @@ class TeamStrengthFit {
 
   double attackOf(String teamId) => attack[teamId] ?? neutralStrength;
   double defenseOf(String teamId) => defense[teamId] ?? neutralStrength;
+
+  /// Deterministischer Hash über die tatsächlich gefitteten Werte -
+  /// verhindert Duplikate über den bestehenden Unique-Index auf
+  /// `(market, league_id, config_hash)`, dasselbe Muster wie
+  /// `EngineWeightConfig.configHash()`/`GlobalMarketEngine.configHash()`.
+  /// Ändert sich automatisch, sobald ein neuer Learning-Run mit mehr/
+  /// anderen Trainingsdaten einen anderen Fit produziert - ein
+  /// unveränderter Fit (gleiche Trainingsdaten) erzeugt denselben Hash und
+  /// wird deshalb nicht erneut als "neuer" Challenger angelegt.
+  String configHash() {
+    final sortedAttack = Map.fromEntries(
+      attack.entries.toList()..sort((a, b) => a.key.compareTo(b.key)),
+    );
+    final sortedDefense = Map.fromEntries(
+      defense.entries.toList()..sort((a, b) => a.key.compareTo(b.key)),
+    );
+    final canonical = jsonEncode({
+      'engineVersion': 'TEAM_STRENGTH_IPF_V1',
+      'homeAdvantage': double.parse(homeAdvantage.toStringAsFixed(6)),
+      'attack': sortedAttack.map(
+        (k, v) => MapEntry(k, double.parse(v.toStringAsFixed(6))),
+      ),
+      'defense': sortedDefense.map(
+        (k, v) => MapEntry(k, double.parse(v.toStringAsFixed(6))),
+      ),
+    });
+    return sha256.convert(utf8.encode(canonical)).toString();
+  }
 }
 
 class TeamStrengthEngine {
   const TeamStrengthEngine._();
+
+  static const String version = 'TEAM_STRENGTH_IPF_V1';
 
   /// Fittet Angriff/Abwehr/Heimvorteil aus einer Liste bereits abgerechneter
   /// Spiele EINER Liga via Iterative Proportional Fitting.
