@@ -6450,6 +6450,61 @@ class PhoenixDatabase {
     };
   }
 
+  /// Gebündelte Version von [footballLeagueGoalContext] für mehrere Ligen in
+  /// einer einzigen Abfrage - ein Tagesscan verarbeitet ~20-50 Ligen
+  /// gleichzeitig, eine Query pro Liga wäre unnötig viele Round-Trips
+  /// (PHÖNIX Engine-Umbau Phase 1 Spur B, Plan "wild-cuddling-hoare").
+  /// Ligen ohne Treffer im 400-Tage-Fenster fehlen im Ergebnis-Map
+  /// vollständig (nicht als Eintrag mit `sampleSize: 0`) - Aufrufer müssen
+  /// dieselbe Fallback-Logik wie bei einem fehlenden Key anwenden.
+  Future<Map<String, Map<String, Object?>>> footballLeagueGoalContextBatch({
+    required List<String> leagueIds,
+  }) async {
+    final ids = leagueIds
+        .map((id) => id.trim())
+        .where((id) => id.isNotEmpty)
+        .toSet()
+        .toList(growable: false);
+    if (ids.isEmpty) return const <String, Map<String, Object?>>{};
+
+    final db = await connection();
+    final rows = await db.execute(
+      Sql.named('''
+        SELECT
+          league_id,
+          COUNT(*) AS sample_size,
+          AVG(home_goals) AS avg_home_goals,
+          AVG(away_goals) AS avg_away_goals
+        FROM football_matches
+        WHERE league_id = ANY(@league_ids)
+          AND home_goals IS NOT NULL
+          AND away_goals IS NOT NULL
+          AND kickoff_utc >= NOW() - INTERVAL '400 days'
+        GROUP BY league_id
+      '''),
+      parameters: {'league_ids': ids},
+    );
+
+    final result = <String, Map<String, Object?>>{};
+    for (final row in rows) {
+      final map = row.toColumnMap();
+      final leagueId = map['league_id']?.toString() ?? '';
+      if (leagueId.isEmpty) continue;
+      final sampleSize =
+          int.tryParse(map['sample_size']?.toString() ?? '') ?? 0;
+      result[leagueId] = {
+        'sampleSize': sampleSize,
+        'avgHomeGoalsPerGame': sampleSize == 0
+            ? null
+            : double.tryParse(map['avg_home_goals'].toString()),
+        'avgAwayGoalsPerGame': sampleSize == 0
+            ? null
+            : double.tryParse(map['avg_away_goals'].toString()),
+      };
+    }
+    return result;
+  }
+
   /// Für den GLOBAL_GOALS_V1-Vergleich (Model Lab, rein lesend): liefert den
   /// zuletzt gespeicherten Availability-Snapshot eines Spiels plus die
   /// Team-IDs aus `football_matches` (Availability selbst enthält keine

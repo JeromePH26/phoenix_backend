@@ -89,4 +89,53 @@ void main() {
       expect(shrunk, 1.35);
     });
   });
+
+  // Engine-Umbau Phase 1 Spur B (Plan "wild-cuddling-hoare", 2026-08-26):
+  // statt immer Richtung des EINEN festen globalen Werts zu glätten, zuerst
+  // Richtung eines liga-eigenen Normalwerts, der selbst wieder Richtung des
+  // globalen Werts geglättet ist, solange die Liga wenig eigene Historie hat.
+  group('FootballEngineInputService.leagueAwareBaseline', () {
+    test('falls back to exactly the global baseline when the league has no '
+        'matches in the 400-day window (regression safety)', () {
+      expect(
+        FootballEngineInputService.leagueAwareBaseline(
+          globalBaseline: 1.35,
+          leagueAvg: null,
+          leagueContextSampleSize: 0,
+        ),
+        1.35,
+      );
+    });
+
+    test('a league with a thin sample stays close to the global baseline '
+        'even if its own average is very different', () {
+      final shrunk = FootballEngineInputService.leagueAwareBaseline(
+        globalBaseline: 1.35,
+        leagueAvg: 2.5,
+        leagueContextSampleSize: 3,
+      );
+      expect(shrunk, lessThan(1.6));
+    });
+
+    test('a league with a large, well-established sample shifts '
+        'substantially towards its own average', () {
+      final shrunk = FootballEngineInputService.leagueAwareBaseline(
+        globalBaseline: 1.35,
+        leagueAvg: 1.9,
+        leagueContextSampleSize: 400,
+      );
+      expect(shrunk, greaterThan(1.7));
+    });
+
+    test('sample size at exactly leagueBaselineShrinkageK halves the '
+        'distance to the global baseline', () {
+      final shrunk = FootballEngineInputService.leagueAwareBaseline(
+        globalBaseline: 1.35,
+        leagueAvg: 1.9,
+        leagueContextSampleSize:
+            FootballEngineInputService.leagueBaselineShrinkageK,
+      );
+      expect(shrunk, closeTo(1.35 + 0.5 * (1.9 - 1.35), 0.001));
+    });
+  });
 }

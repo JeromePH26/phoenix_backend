@@ -10,7 +10,7 @@ class FootballEngineInputService {
   // "gemini_context" bewusst entfernt: der KI-Kontext-Schritt ist
   // deaktiviert, dieser Dienst fällt immer auf die statistische Basis
   // zurück (siehe _normalize weiter unten).
-  static const modelVersion = 'goal_rate_normalization_v5_sample_size_shrinkage';
+  static const modelVersion = 'goal_rate_normalization_v6_league_aware_baseline';
 
   // Bei sampleSize == k ist der Kandidat genau zur Hälfte Richtung Baseline
   // geglättet (n / (n + k) = 0.5). 8 Spiele als Halbwertspunkt heißt: eine
@@ -21,6 +21,14 @@ class FootballEngineInputService {
   // weight_config.dart), nur mit einem eigenen, für Torraten (statt eines
   // 0-1-Gewichts) sinnvollen k.
   static const sampleSizeShrinkageK = 8;
+
+  // Liga-Ebene braucht eine deutlich größere Stichprobe als die
+  // Team-Ebene, bevor der eigene Durchschnitt vertrauenswürdiger ist als
+  // der feste globale Wert - eine echte Top-Liga spielt in 400 Tagen
+  // mehrere hundert Spiele, eine frisch beobachtete Kleinliga (data_pool)
+  // dagegen anfangs nur wenige. Eigene, größere Shrinkage-Konstante als
+  // `sampleSizeShrinkageK` (Team-Ebene, ~8 Spiele), gleiche Formel.
+  static const leagueBaselineShrinkageK = 50;
 
   Future<Map<String, Object?>> prepare({
     int? phaseTwoScanRunId,
@@ -38,19 +46,34 @@ class FootballEngineInputService {
       includeBackground: includeBackground,
     );
 
+    // PHÖNIX Engine-Umbau Phase 1 Spur B (Plan "wild-cuddling-hoare"):
+    // Liga-Kontext für alle betroffenen Ligen in EINER Abfrage vorab laden
+    // statt pro Spiel einzeln - ein Tagesscan verarbeitet ~20-50 Ligen
+    // gleichzeitig.
+    final leagueIds = rows
+        .map((row) => _string(row['league_id']))
+        .where((id) => id.isNotEmpty)
+        .toSet()
+        .toList(growable: false);
+    final leagueContexts = await database.footballLeagueGoalContextBatch(
+      leagueIds: leagueIds,
+    );
+
     final results = <Map<String, Object?>>[];
     for (final row in rows) {
       final fixtureId = _string(row['fixture_id']);
       if (fixtureId.isEmpty) continue;
 
+      final leagueId = _string(row['league_id']);
       final normalized = _normalize(
         fixtureId: fixtureId,
-        leagueId: _string(row['league_id']),
+        leagueId: leagueId,
         season: _int(row['season']),
         dataQuality: _int(row['data_quality']),
         availability: _map(row['availability']),
         payload: _map(row['payload']),
         contextResult: _jsonMap(row['context_result']),
+        leagueContext: leagueContexts[leagueId],
       );
 
       await database.saveFootballEngineInput(
@@ -82,6 +105,7 @@ class FootballEngineInputService {
     required Map<String, Object?> availability,
     required Map<String, Object?> payload,
     required Map<String, Object?> contextResult,
+    Map<String, Object?>? leagueContext,
   }) {
     final homeFor = _number(availability['homeGoalsForAverageHome']);
     final homeAgainst = _number(availability['homeGoalsAgainstAverageHome']);
@@ -92,6 +116,30 @@ class FootballEngineInputService {
     final calculatedAway = _averageAvailable(awayFor, homeAgainst);
     final usesFallback = calculatedHome == null || calculatedAway == null;
 
+    // PHÖNIX Engine-Umbau Phase 1 Spur B (Plan "wild-cuddling-hoare"): statt
+    // immer Richtung eines EINZIGEN festen globalen Werts (1.35/1.10) zu
+    // glätten, zuerst Richtung eines liga-eigenen Normalwerts (400-Tage-
+    // Rolling-Average dieser Liga) glätten, der selbst wieder Richtung des
+    // globalen Werts geglättet ist, wenn die Liga noch wenig eigene Historie
+    // hat. Jede Liga bekommt so ihren eigenen, aber nie extremen Normalwert
+    // (z.B. eine torreiche Liga zieht Richtung "mehr Tore als 1.35/1.10"
+    // statt eines universellen Werts). `leagueContext == null` (Liga ohne
+    // Treffer im 400-Tage-Fenster) verhält sich exakt wie vorher.
+    final leagueSampleSize = _int(leagueContext?['sampleSize']);
+    final leagueAvgHome = _number(leagueContext?['avgHomeGoalsPerGame']);
+    final leagueAvgAway = _number(leagueContext?['avgAwayGoalsPerGame']);
+    final leagueBaselineHome = leagueAwareBaseline(
+      globalBaseline: 1.35,
+      leagueAvg: leagueAvgHome,
+      leagueContextSampleSize: leagueSampleSize,
+    );
+    final leagueBaselineAway = leagueAwareBaseline(
+      globalBaseline: 1.10,
+      leagueAvg: leagueAvgAway,
+      leagueContextSampleSize: leagueSampleSize,
+    );
+    final leagueContextApplied = leagueAvgHome != null && leagueAvgAway != null;
+
     // Claude AN2.txt Section 3 ("SAMPLE-SIZE-LOGIK"): eine Torquote aus
     // wenigen Spielen ist kein stabiler Wert - live beobachtet an einem
     // Heimsieg-Tipp mit 83% Wahrscheinlichkeit, der aus goalExpectations
@@ -99,12 +147,12 @@ class FootballEngineInputService {
     // gegen eine dünne Stichprobe. `goalAverageIfPlayed` (football_service.
     // dart) unterscheidet zwar bereits "0 Spiele" von "0.0 Tore", behandelt
     // aber 2-3 Spiele identisch zuverlässig wie 25 - genau die in Section 3
-    // beschriebene Lücke. Empirical-Bayes-Shrinkage Richtung neutraler
-    // Baseline (1.35/1.10, dieselben Werte wie der bisherige Nulldaten-
-    // Fallback), Stärke abhängig von der kleineren der beiden je Seite
-    // eingehenden Spielanzahlen (Heimteam zuhause, Auswärtsteam auswärts) -
-    // dieselbe Formel (n / (n + k)) wie das bereits produktive
-    // EngineWeightConfig.shrunkTowardsGlobal (model_lab/weight_config.dart).
+    // beschriebene Lücke. Empirical-Bayes-Shrinkage Richtung des (jetzt
+    // liga-bewussten statt fest globalen) Normalwerts, Stärke abhängig von
+    // der kleineren der beiden je Seite eingehenden Spielanzahlen
+    // (Heimteam zuhause, Auswärtsteam auswärts) - dieselbe Formel
+    // (n / (n + k)) wie das bereits produktive EngineWeightConfig.
+    // shrunkTowardsGlobal (model_lab/weight_config.dart).
     final homePlayedHome = _int(_map(availability['homePlayed'])['home']);
     final awayPlayedAway = _int(_map(availability['awayPlayed'])['away']);
     final sampleSize = homePlayedHome < awayPlayedAway
@@ -112,13 +160,13 @@ class FootballEngineInputService {
         : awayPlayedAway;
 
     final baseHome = _shrinkTowardsBaseline(
-      calculatedHome ?? 1.35,
-      baseline: 1.35,
+      calculatedHome ?? leagueBaselineHome,
+      baseline: leagueBaselineHome,
       sampleSize: sampleSize,
     );
     final baseAway = _shrinkTowardsBaseline(
-      calculatedAway ?? 1.10,
-      baseline: 1.10,
+      calculatedAway ?? leagueBaselineAway,
+      baseline: leagueBaselineAway,
       sampleSize: sampleSize,
     );
     final thinSample = !usesFallback && sampleSize < sampleSizeShrinkageK;
@@ -181,6 +229,10 @@ class FootballEngineInputService {
         'contextAdjusted': contextApplied && (homeDelta != 0 || awayDelta != 0),
         'sampleSize': sampleSize,
         'sampleSizeShrinkageApplied': thinSample,
+        'leagueBaselineHome': _round(leagueBaselineHome),
+        'leagueBaselineAway': _round(leagueBaselineAway),
+        'leagueContextSampleSize': leagueSampleSize,
+        'leagueContextApplied': leagueContextApplied,
       },
       'aiContext': context,
       // Section 10 (Claude AN2.txt, "KEIN GEMINI"): kein Warnhinweis mehr für
@@ -238,6 +290,27 @@ class FootballEngineInputService {
         baseline: baseline,
         sampleSize: sampleSize,
       );
+
+  /// Öffentlich und statisch (wie [shrinkGoalRateTowardsBaseline]), damit
+  /// die Formel isoliert ohne Datenbank getestet werden kann. Glättet den
+  /// liga-eigenen 400-Tage-Torschnitt Richtung des festen globalen Werts -
+  /// [leagueAvg] `null` (Liga ohne Treffer im 400-Tage-Fenster) liefert
+  /// unverändert [globalBaseline] zurück, exakt das bisherige Verhalten.
+  static double leagueAwareBaseline({
+    required double globalBaseline,
+    double? leagueAvg,
+    required int leagueContextSampleSize,
+  }) {
+    if (leagueAvg == null) return globalBaseline;
+    final safeSampleSize =
+        leagueContextSampleSize < 0 ? 0 : leagueContextSampleSize;
+    final factor =
+        safeSampleSize / (safeSampleSize + leagueBaselineShrinkageK);
+    return double.parse(
+      (globalBaseline + factor * (leagueAvg - globalBaseline))
+          .toStringAsFixed(3),
+    );
+  }
 
   double? _averageAvailable(double? a, double? b) {
     if (a == null && b == null) return null;
