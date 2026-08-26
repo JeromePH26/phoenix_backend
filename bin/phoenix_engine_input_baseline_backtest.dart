@@ -8,7 +8,6 @@ import 'package:phoenix_backend/src/model_lab/learning_dataset_builder.dart';
 import 'package:phoenix_backend/src/model_lab/learning_market.dart';
 import 'package:phoenix_backend/src/model_lab/metrics.dart';
 import 'package:phoenix_backend/src/model_lab/walk_forward_evaluator.dart';
-import 'package:phoenix_backend/src/model_lab/weight_config.dart';
 import 'package:phoenix_backend/src/services/football_engine_input_service.dart';
 
 /// Sicherheits-Gate für PHÖNIX Engine-Umbau Phase 1 Spur B (Plan
@@ -22,19 +21,17 @@ import 'package:phoenix_backend/src/services/football_engine_input_service.dart'
 ///
 /// WICHTIGE, bewusste Vereinfachung: `LearningSample`s whitelisted Features
 /// (`FeatureWhitelist`) enthalten keine Spielanzahlen (`homePlayed`/
-/// `awayPlayed`), nur die vier rohen Torquoten - die Team-Ebene-
-/// Stichproben-Glättung (v12, bereits live verifiziert) kann dieser
-/// Backtest deshalb NICHT mit reproduzieren. Er isoliert stattdessen genau
-/// die eine Variable, die Spur B ändert: OB die liga-eigene Torquote statt
-/// des universellen Werts 1.35/1.10 verwendet wird, sobald eine Team-
-/// Torquote fehlt (derselbe Fallback-Fall, den `EngineReplica.
-/// expectedGoals` heute schon kennt) - und zwar mit voller Stärke
-/// (`leagueContextSampleSize` künstlich sehr groß), nicht erst durch die
-/// zusätzliche Stichproben-Glättung abgeschwächt. Hilft die liga-eigene
-/// Torquote nicht einmal in dieser stärksten Form, hilft die live
-/// abgeschwächte Version erst recht nicht - ein konservativer, aber
-/// ehrlicher Vorab-Check (dasselbe Prinzip wie Spur A: "eine Variable
-/// isolieren").
+/// `awayPlayed`), nur die vier rohen Torquoten - die exakte Team-Ebene-
+/// Stichprobengröße (v12, bereits live verifiziert) kann dieser Backtest
+/// deshalb nicht rekonstruieren. Er isoliert stattdessen genau die eine
+/// Variable, die Spur B ändert - fester globaler Wert vs. liga-eigener Wert
+/// als GLÄTTUNGSZIEL - und wendet dieselbe Shrinkage-Formel wie Produktion
+/// (`shrinkGoalRateTowardsBaseline`) mit einer repräsentativen, aus dem
+/// Code selbst stammenden Team-Stichprobengröße
+/// (`sampleSizeShrinkageK`, "Halbwertspunkt") auf JEDES Holdout-Sample mit
+/// leakage-sicherem Liga-Kontext an - nicht nur auf die seltenen Fälle mit
+/// komplett fehlender Team-Torquote (erste Version dieses Skripts fand so
+/// nur 2 vergleichbare Fälle in 89 Ligen - statistisch bedeutungslos).
 Future<void> main() async {
   final databaseUrl = (Platform.environment['DATABASE_PUBLIC_URL'] ??
           Platform.environment['DATABASE_URL'] ??
@@ -59,14 +56,33 @@ Future<void> main() async {
         LearningDatasetBuilder(database: database, config: config);
     final leagues = await database.modelLabWhitelistedLeagues();
 
+    // Section 89-Muster (wie phoenix_model_lab_dry_run.dart): die Whitelist
+    // hat 1200+ Einträge, die meisten davon `data_pool`-Ligen mit faktisch 0
+    // eigenen Spielen - eine Abfrage pro Liga für alle davon wäre bei über
+    // die öffentliche Railway-Proxy-Verbindung schon allein durch die
+    // schiere Anzahl unnötig langsam. `auditEligibility()` liefert die
+    // Zählung in EINER Abfrage vorab; nur Ligen mit tatsächlich
+    // abgerechneten Spielen werden einzeln geladen.
+    final audit = await datasetBuilder.auditEligibility();
+    final eligibleLeagueIds = audit.perLeague
+        .where((c) => c.settled > 0)
+        .map((c) => c.leagueId)
+        .toSet();
+    final leaguesToCheck =
+        leagues.where((l) => eligibleLeagueIds.contains(l['league_id']?.toString())).toList();
+    stdout.writeln(
+        '${leaguesToCheck.length} von ${leagues.length} Whitelist-Ligen haben '
+        'abgerechnete Spiele - nur diese werden geladen.\n');
+
     final fixedAggregate = _AggregateScore();
     final leagueAwareAggregate = _AggregateScore();
     var leaguesWithComparableHoldout = 0;
     final perLeagueReport = <Map<String, Object?>>[];
 
-    for (final league in leagues) {
+    for (final league in leaguesToCheck) {
       final leagueId = league['league_id']?.toString();
       if (leagueId == null) continue;
+      stdout.writeln('-> ${league['league_name']} ($leagueId)');
 
       final samples = await datasetBuilder.buildSamples(leagueId: leagueId);
       if (samples.isEmpty) continue;
@@ -78,22 +94,14 @@ Future<void> main() async {
       final leagueAwareForLeague = _AggregateScore();
 
       for (final sample in split.holdout) {
-        // Nur Fälle relevant, in denen die Baseline überhaupt zum Tragen
-        // kommt: fehlende Team-Torquote (`usedFallback`) UND ein
-        // leakage-sicherer Liga-Kontext ist für dieses historische Sample
-        // vorhanden (`hasGlobalMarketData`, siehe learning_sample.dart) -
-        // ohne beides sind fixed/liga-bewusst identisch und liefern keine
-        // Information für den Vergleich.
+        // Einzige Voraussetzung: ein leakage-sicherer Liga-Kontext ist für
+        // dieses historische Sample vorhanden (`hasGlobalMarketData`, siehe
+        // learning_sample.dart) - ohne den sind fixed/liga-bewusst per
+        // Definition identisch und liefern keine Information.
         if (!sample.hasGlobalMarketData) continue;
         final leagueAvgHome = sample.globalMarketLeagueAvgHomeGoals;
         final leagueAvgAway = sample.globalMarketLeagueAvgAwayGoals;
         if (leagueAvgHome == null || leagueAvgAway == null) continue;
-
-        final fixedGoals = EngineReplica.expectedGoals(
-          features: sample.features,
-          weights: EngineWeightConfig.global,
-        );
-        if (!fixedGoals.usedFallback) continue;
 
         final homeFor = _num(sample.features['raw.homeGoalsForAverageHome']);
         final homeAgainst =
@@ -104,25 +112,51 @@ Future<void> main() async {
         final calculatedHome = _averageAvailable(homeFor, awayAgainst);
         final calculatedAway = _averageAvailable(awayFor, homeAgainst);
 
-        final leagueAwareHome = calculatedHome ??
-            FootballEngineInputService.leagueAwareBaseline(
-              globalBaseline: 1.35,
-              leagueAvg: leagueAvgHome,
-              // Bewusst sehr groß: volle Stärke, siehe Doc-Kommentar oben.
-              leagueContextSampleSize: 1000000,
-            );
-        final leagueAwareAway = calculatedAway ??
-            FootballEngineInputService.leagueAwareBaseline(
-              globalBaseline: 1.10,
-              leagueAvg: leagueAvgAway,
-              leagueContextSampleSize: 1000000,
-            );
+        // Repräsentative Team-Stichprobengröße (siehe Doc-Kommentar oben) -
+        // dieselbe echte Produktionsformel, angewendet auf JEDES Sample mit
+        // Liga-Kontext, nicht nur die seltenen komplett-fehlend-Fälle.
+        const assumedTeamSampleSize =
+            FootballEngineInputService.sampleSizeShrinkageK;
+        const assumedLeagueSampleSize =
+            FootballEngineInputService.leagueBaselineShrinkageK;
+
+        final fixedHome = FootballEngineInputService.shrinkGoalRateTowardsBaseline(
+          calculatedHome ?? 1.35,
+          baseline: 1.35,
+          sampleSize: assumedTeamSampleSize,
+        );
+        final fixedAway = FootballEngineInputService.shrinkGoalRateTowardsBaseline(
+          calculatedAway ?? 1.10,
+          baseline: 1.10,
+          sampleSize: assumedTeamSampleSize,
+        );
+
+        final leagueBaselineHome = FootballEngineInputService.leagueAwareBaseline(
+          globalBaseline: 1.35,
+          leagueAvg: leagueAvgHome,
+          leagueContextSampleSize: assumedLeagueSampleSize,
+        );
+        final leagueBaselineAway = FootballEngineInputService.leagueAwareBaseline(
+          globalBaseline: 1.10,
+          leagueAvg: leagueAvgAway,
+          leagueContextSampleSize: assumedLeagueSampleSize,
+        );
+        final leagueAwareHome = FootballEngineInputService.shrinkGoalRateTowardsBaseline(
+          calculatedHome ?? leagueBaselineHome,
+          baseline: leagueBaselineHome,
+          sampleSize: assumedTeamSampleSize,
+        );
+        final leagueAwareAway = FootballEngineInputService.shrinkGoalRateTowardsBaseline(
+          calculatedAway ?? leagueBaselineAway,
+          baseline: leagueBaselineAway,
+          sampleSize: assumedTeamSampleSize,
+        );
 
         final outcomeIndex = sample.outcomeIndexFor(LearningMarket.oneXTwo);
 
         final fixedOutput = EngineReplica.evaluateGoals(
           market: LearningMarket.oneXTwo,
-          goals: fixedGoals,
+          goals: (home: fixedHome, away: fixedAway, usedFallback: false),
         );
         final leagueAwareOutput = EngineReplica.evaluateGoals(
           market: LearningMarket.oneXTwo,
@@ -174,8 +208,9 @@ Future<void> main() async {
       }
     }
 
-    stdout.writeln('== ERGEBNIS (Markt: 1X2, nur Fälle mit fehlender '
-        'Team-Torquote UND leakage-sicherem Liga-Kontext) ==');
+    stdout.writeln('== ERGEBNIS (Markt: 1X2, alle Holdout-Fälle mit '
+        'leakage-sicherem Liga-Kontext, repräsentative Team-Stichprobe '
+        'sampleSize=${FootballEngineInputService.sampleSizeShrinkageK}) ==');
     stdout.writeln('Ligen mit vergleichbaren Holdout-Fällen: '
         '$leaguesWithComparableHoldout');
     stdout.writeln('Vergleichbare Holdout-Spiele gesamt: '
