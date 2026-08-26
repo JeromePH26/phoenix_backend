@@ -321,8 +321,18 @@ class FootballDailyPipelineService {
         'fairOdds': rawFairOdds,
       };
       final analysisLead = _map(selection['phoenixTip']);
-      final qualifiesForTip = selection['qualifiesForTip'] == true;
-      final phoenixTip = qualifiesForTip ? analysisLead : <String, Object?>{};
+      // Claude AN2.txt (2026-08-26): "jedes Spiel soll einen Tipp haben" -
+      // vorher wurde phoenixTip auf {} zurückgesetzt, sobald der strenge
+      // Publish-Gate (Datenqualität/Vertrauen/68%-Schwelle) nicht erreicht
+      // war, wodurch marketKey/recommendation leer in football_analysis_
+      // history landeten und die Spieleliste "kein Tipp" zeigte, obwohl
+      // eine Analyse (analysisLead) längst vorlag. football_value_service.
+      // dart wendet dasselbe Prinzip schon konsequent an ("Der PHÖNIX-Tipp
+      // ist die Modellaussage und darf nicht verschwinden") - hier jetzt
+      // nachgezogen. qualifiesForTip bleibt unverändert die Schwelle für
+      // Value-Tipp/Wettfreigabe und assignedUnits (ROI), nur die Sichtbarkeit
+      // der reinen Modellaussage ist nicht mehr daran gekoppelt.
+      final phoenixTip = analysisLead;
       final trust = _map(selection['trust']);
       final aiContext = _map(simulation['aiContext']);
 
@@ -335,9 +345,10 @@ class FootballDailyPipelineService {
         100,
       );
 
-      // Eine Markt-Führung bleibt als Analysehinweis erhalten. Als PHÖNIX-Tipp
-      // wird sie jedoch nur veröffentlicht und gespeichert, wenn der strenge
-      // Publish-Gate erfüllt ist. Sonst verfälschen Fallbacks die Trefferquote.
+      // Die Markt-Führung (analysisLead) ist immer der sichtbare PHÖNIX-Tipp.
+      // qualifiesForTip entscheidet nur noch, ob er zusätzlich als
+      // Value-Tipp/Wettempfehlung zählt (assignedUnits/ROI), nicht mehr, ob
+      // überhaupt ein Tipp gezeigt wird.
       final recommendation = _string(phoenixTip['market']);
       final marketKey = _string(phoenixTip['marketKey']);
       final publicSelection = <String, Object?>{
@@ -346,7 +357,7 @@ class FootballDailyPipelineService {
         'phoenixTip': phoenixTip,
         'display': {
           ..._map(selection['display']),
-          'showPhoenixTip': qualifiesForTip,
+          'showPhoenixTip': true,
         },
       };
 

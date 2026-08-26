@@ -424,7 +424,11 @@ class FootballMarketSelectionService {
         'display': {
           'primaryLabel': 'PHÖNIX-TIPP',
           'valueLabel': 'VALUE-TIPP',
-          'showPhoenixTip': qualifiesForTip,
+          // Claude AN2.txt (2026-08-26, "jedes Spiel soll einen Tipp haben"):
+          // der PHÖNIX-Tipp ist die Modellaussage und wird immer gezeigt.
+          // qualifiesForTip/isValueTip bleiben die getrennte Schwelle für
+          // eine echte Wettempfehlung (siehe football_value_service.dart).
+          'showPhoenixTip': true,
           'showValueTip': false,
         },
         // Section 10 (Claude AN2.txt, "KEIN GEMINI"): die beiden
@@ -439,7 +443,7 @@ class FootballMarketSelectionService {
         // fast nie bestätigt) und weiterhin eine echte, nützliche Information.
         'warnings': [
           if (!qualifiesForTip)
-            'Analyse vorhanden, aber kein PHÖNIX-Tipp: Mindestwerte nicht erreicht.',
+            'PHÖNIX-Tipp mit geringerer Sicherheit: Mindestwerte für eine Wettempfehlung nicht erreicht.',
           if (!realXgAvailable) 'Noch keine echten xG/xGA-Daten vorhanden.',
           if (aiContext['lineupStatus'] != 'confirmed')
             'Bestätigte Aufstellung ist noch nicht verfügbar.',

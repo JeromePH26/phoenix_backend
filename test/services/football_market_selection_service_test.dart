@@ -292,8 +292,8 @@ void main() {
     );
 
     test(
-      'keeps a fallback as analysis lead but never publishes it as a '
-      'PHOENIX tip when it misses the 68 percent gate',
+      'keeps a fallback as a visible PHOENIX tip but never qualifies it as '
+      'a value tip when it misses the 68 percent gate',
       () {
         final selection = service.selectForFixture(
           fixtureId: 'fallback-only-fixture',
@@ -317,7 +317,10 @@ void main() {
         expect(selection, isNotNull);
         expect((selection!['phoenixTip'] as Map)['marketKey'], 'bttsYes');
         expect(selection['qualifiesForTip'], isFalse);
-        expect((selection['display'] as Map)['showPhoenixTip'], isFalse);
+        // Claude AN2.txt (2026-08-26, "jedes Spiel soll einen Tipp haben"):
+        // der PHÖNIX-Tipp (Modellaussage) bleibt sichtbar, auch wenn er
+        // nicht als Value-Tipp/Wettempfehlung qualifiziert.
+        expect((selection['display'] as Map)['showPhoenixTip'], isTrue);
       },
     );
 
