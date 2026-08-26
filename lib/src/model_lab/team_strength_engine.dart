@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 import 'package:crypto/crypto.dart';
 
 /// PHÖNIX Engine-Umbau, Phase 2 (Plan "wild-cuddling-hoare"): der laut Plan
@@ -27,12 +28,19 @@ class MatchResult {
     required this.awayTeamId,
     required this.homeGoals,
     required this.awayGoals,
+    this.kickoff,
   });
 
   final String homeTeamId;
   final String awayTeamId;
   final int homeGoals;
   final int awayGoals;
+
+  /// Optional - nur nötig, wenn [TeamStrengthEngine.fit] mit
+  /// `halfLifeDays` (Zeitverfall-Gewichtung, Phase 3) aufgerufen wird.
+  /// `null` bedeutet: dieses Spiel bekommt bei aktiviertem Zeitverfall das
+  /// volle Gewicht 1.0 (kein Datum bekannt, keine Abwertung möglich).
+  final DateTime? kickoff;
 }
 
 class TeamStrengthFit {
@@ -149,6 +157,16 @@ class TeamStrengthEngine {
     // "Durchschnittsteam" statt frei zu driften - stabilisiert sowohl die
     // Konvergenz als auch die Qualität der Schätzung für datenarme Teams.
     double regularizationK = 8,
+    // Phase 3 (Plan "wild-cuddling-hoare", "passt natürlich zu Phase 2"):
+    // exponentieller Zeitverfall statt jedes Trainingsspiel gleich zu
+    // gewichten. `null` (Default) = kein Zeitverfall, identisch zum
+    // bisherigen Verhalten (Regressionsanker). Bei gesetztem [halfLifeDays]
+    // bekommt ein Spiel, das genau [halfLifeDays] Tage vor [asOf] liegt,
+    // die Hälfte des Gewichts eines Spiels von heute; Spiele ohne
+    // [MatchResult.kickoff] bekommen immer volles Gewicht (kein Datum
+    // bekannt, keine Abwertung möglich).
+    double? halfLifeDays,
+    DateTime? asOf,
   }) {
     final teamIds = <String>{};
     for (final match in matches) {
@@ -166,32 +184,58 @@ class TeamStrengthEngine {
       );
     }
 
+    final referenceDate = asOf ?? DateTime.now();
+    double matchWeight(MatchResult match) {
+      if (halfLifeDays == null || halfLifeDays <= 0) return 1.0;
+      final kickoff = match.kickoff;
+      if (kickoff == null) return 1.0;
+      final daysAgo = referenceDate.difference(kickoff).inHours / 24.0;
+      if (daysAgo <= 0) return 1.0;
+      return pow(0.5, daysAgo / halfLifeDays).toDouble();
+    }
+
     final attack = {for (final id in teamIds) id: 1.0};
     final defense = {for (final id in teamIds) id: 1.0};
     var homeAdvantage = 1.0;
+
+    // Bei aktiviertem Zeitverfall (`halfLifeDays`) ist [matchWeights] pro
+    // Spiel < 1.0 statt immer 1.0 - fließt in JEDE Summe unten ein (Tore,
+    // "effektive" Spielanzahl für die Regularisierung, Heimvorteil). Ohne
+    // Zeitverfall bleibt hier alles exakt wie vorher (Regressionsanker).
+    final matchWeights = [for (final match in matches) matchWeight(match)];
 
     final totalGoalsFor = <String, double>{for (final id in teamIds) id: 0};
     final totalGoalsAgainst = <String, double>{
       for (final id in teamIds) id: 0,
     };
-    final matchCount = <String, int>{for (final id in teamIds) id: 0};
+    // "Effektive" Spielanzahl (Summe der Gewichte, nicht die rohe Anzahl) -
+    // ein Team mit vielen, aber lange zurückliegenden Spielen soll für die
+    // Regularisierung unten wie ein Team mit WENIGEN Spielen behandelt
+    // werden.
+    final effectiveMatchCount = <String, double>{
+      for (final id in teamIds) id: 0,
+    };
     var totalHomeGoals = 0.0;
-    for (final match in matches) {
+    for (var i = 0; i < matches.length; i++) {
+      final match = matches[i];
+      final w = matchWeights[i];
       totalGoalsFor[match.homeTeamId] =
-          totalGoalsFor[match.homeTeamId]! + match.homeGoals;
+          totalGoalsFor[match.homeTeamId]! + match.homeGoals * w;
       totalGoalsFor[match.awayTeamId] =
-          totalGoalsFor[match.awayTeamId]! + match.awayGoals;
+          totalGoalsFor[match.awayTeamId]! + match.awayGoals * w;
       totalGoalsAgainst[match.homeTeamId] =
-          totalGoalsAgainst[match.homeTeamId]! + match.awayGoals;
+          totalGoalsAgainst[match.homeTeamId]! + match.awayGoals * w;
       totalGoalsAgainst[match.awayTeamId] =
-          totalGoalsAgainst[match.awayTeamId]! + match.homeGoals;
-      matchCount[match.homeTeamId] = matchCount[match.homeTeamId]! + 1;
-      matchCount[match.awayTeamId] = matchCount[match.awayTeamId]! + 1;
-      totalHomeGoals += match.homeGoals;
+          totalGoalsAgainst[match.awayTeamId]! + match.homeGoals * w;
+      effectiveMatchCount[match.homeTeamId] =
+          effectiveMatchCount[match.homeTeamId]! + w;
+      effectiveMatchCount[match.awayTeamId] =
+          effectiveMatchCount[match.awayTeamId]! + w;
+      totalHomeGoals += match.homeGoals * w;
     }
 
     double shrinkTowardsNeutral(double rawTarget, String teamId) {
-      final n = matchCount[teamId]!;
+      final n = effectiveMatchCount[teamId]!;
       final factor = n / (n + regularizationK);
       return TeamStrengthFit.neutralStrength +
           factor * (rawTarget - TeamStrengthFit.neutralStrength);
@@ -209,11 +253,13 @@ class TeamStrengthEngine {
       final attackDenominator = <String, double>{
         for (final id in teamIds) id: 0,
       };
-      for (final match in matches) {
+      for (var i = 0; i < matches.length; i++) {
+        final match = matches[i];
+        final w = matchWeights[i];
         attackDenominator[match.homeTeamId] = attackDenominator[match.homeTeamId]! +
-            defense[match.awayTeamId]! * homeAdvantage;
+            defense[match.awayTeamId]! * homeAdvantage * w;
         attackDenominator[match.awayTeamId] =
-            attackDenominator[match.awayTeamId]! + defense[match.homeTeamId]!;
+            attackDenominator[match.awayTeamId]! + defense[match.homeTeamId]! * w;
       }
       for (final id in teamIds) {
         final denominator = attackDenominator[id]!;
@@ -228,11 +274,13 @@ class TeamStrengthEngine {
       final defenseDenominator = <String, double>{
         for (final id in teamIds) id: 0,
       };
-      for (final match in matches) {
-        defenseDenominator[match.homeTeamId] =
-            defenseDenominator[match.homeTeamId]! + attack[match.awayTeamId]!;
+      for (var i = 0; i < matches.length; i++) {
+        final match = matches[i];
+        final w = matchWeights[i];
+        defenseDenominator[match.homeTeamId] = defenseDenominator[match.homeTeamId]! +
+            attack[match.awayTeamId]! * w;
         defenseDenominator[match.awayTeamId] = defenseDenominator[match.awayTeamId]! +
-            attack[match.homeTeamId]! * homeAdvantage;
+            attack[match.homeTeamId]! * homeAdvantage * w;
       }
       for (final id in teamIds) {
         final denominator = defenseDenominator[id]!;
@@ -245,8 +293,11 @@ class TeamStrengthEngine {
 
       // Schritt 3: Heimvorteil.
       var expectedHomeGoals = 0.0;
-      for (final match in matches) {
-        expectedHomeGoals += attack[match.homeTeamId]! * defense[match.awayTeamId]!;
+      for (var i = 0; i < matches.length; i++) {
+        final match = matches[i];
+        final w = matchWeights[i];
+        expectedHomeGoals +=
+            attack[match.homeTeamId]! * defense[match.awayTeamId]! * w;
       }
       if (expectedHomeGoals > 0) {
         final target = totalHomeGoals / expectedHomeGoals;

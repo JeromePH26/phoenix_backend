@@ -158,6 +158,103 @@ void main() {
     });
   });
 
+  // PHÖNIX Engine-Umbau Phase 3 (Plan "wild-cuddling-hoare"): exponentieller
+  // Zeitverfall statt Gleichgewichtung aller Trainingsspiele.
+  group('TeamStrengthEngine.fit with halfLifeDays (time decay)', () {
+    test('halfLifeDays: null (default) behaves identically to no decay - '
+        'regression anchor', () {
+      final asOf = DateTime.utc(2026, 1, 1);
+      final matches = [
+        for (var i = 0; i < 8; i++)
+          MatchResult(
+            homeTeamId: 'A',
+            awayTeamId: 'opp$i',
+            homeGoals: 3,
+            awayGoals: 0,
+            kickoff: asOf.subtract(Duration(days: i * 30)),
+          ),
+        for (var i = 0; i < 8; i++)
+          MatchResult(
+            homeTeamId: 'opp$i',
+            awayTeamId: 'A',
+            homeGoals: 0,
+            awayGoals: 3,
+            kickoff: asOf.subtract(Duration(days: i * 30 + 10)),
+          ),
+      ];
+      final withoutDates = matches
+          .map((m) => MatchResult(
+                homeTeamId: m.homeTeamId,
+                awayTeamId: m.awayTeamId,
+                homeGoals: m.homeGoals,
+                awayGoals: m.awayGoals,
+              ))
+          .toList();
+
+      final fitWithDatesNoDecay = TeamStrengthEngine.fit(matches);
+      final fitWithoutDates = TeamStrengthEngine.fit(withoutDates);
+      expect(fitWithDatesNoDecay.attackOf('A'), closeTo(fitWithoutDates.attackOf('A'), 1e-9));
+    });
+
+    test('a recent hot streak outweighs an older cold streak when decay is '
+        'active, but is balanced out (not fully ignored) without decay', () {
+      final asOf = DateTime.utc(2026, 1, 1);
+      // A: 4 alte Spiele (1 Jahr her) mit schwachem Ergebnis (0:2), dann 4
+      // ganz aktuelle Spiele (letzte Woche) mit starkem Ergebnis (3:0).
+      final matches = [
+        for (var i = 0; i < 4; i++)
+          MatchResult(
+            homeTeamId: 'A',
+            awayTeamId: 'old_opp$i',
+            homeGoals: 0,
+            awayGoals: 2,
+            kickoff: asOf.subtract(const Duration(days: 365)),
+          ),
+        for (var i = 0; i < 4; i++)
+          MatchResult(
+            homeTeamId: 'A',
+            awayTeamId: 'new_opp$i',
+            homeGoals: 3,
+            awayGoals: 0,
+            kickoff: asOf.subtract(const Duration(days: 3)),
+          ),
+      ];
+
+      final withDecay = TeamStrengthEngine.fit(
+        matches,
+        halfLifeDays: 60,
+        asOf: asOf,
+      );
+      final withoutDecay = TeamStrengthEngine.fit(matches, asOf: asOf);
+
+      // Mit kurzer Halbwertszeit (60 Tage) sind die 1 Jahr alten Spiele
+      // praktisch gewichtslos -> attack naeher an "nur die starken neuen
+      // Spiele zaehlen" als ohne Zeitverfall (wo alte und neue Spiele gleich
+      // stark in den Rohdurchschnitt eingehen).
+      expect(withDecay.attackOf('A'), greaterThan(withoutDecay.attackOf('A')));
+    });
+
+    test('a match without a kickoff date always gets full weight, even '
+        'with decay active', () {
+      final matches = [
+        const MatchResult(
+          homeTeamId: 'A',
+          awayTeamId: 'B',
+          homeGoals: 3,
+          awayGoals: 0,
+          // kein kickoff gesetzt
+        ),
+      ];
+      // Sollte nicht abstuerzen und das Spiel trotzdem voll gewichten.
+      final fit = TeamStrengthEngine.fit(
+        matches,
+        halfLifeDays: 30,
+        asOf: DateTime.utc(2026, 1, 1),
+      );
+      expect(fit.converged, isTrue);
+    });
+  });
+
   group('TeamStrengthEngine.expectedGoals', () {
     test('an unknown (cold-start) team on both sides yields exactly '
         'homeAdvantage/1.0 - the neutral "average vs average" case', () {
