@@ -24,8 +24,17 @@ class FootballDailyPipelineService {
   // "gemini" bewusst NICHT mehr im Namen: der KI-Kontext-Schritt ist
   // deaktiviert (siehe Kommentar weiter unten), diese Version rechnet rein
   // statistisch. Ein Name mit "gemini" würde live KI-Beteiligung vortäuschen.
+  //
+  // v10 -> v11 (2026-08-26, "jedes Spiel soll einen Tipp haben"-Fix): analyses
+  // und football_analysis_history sind bewusst pro (fixture, model_version)
+  // eingefroren, damit ein veröffentlichter Tipp nicht nachträglich verändert
+  // wird (siehe Kommentare unten). Dieselbe Versionierung ist deshalb auch
+  // der vorgesehene Weg, um bereits vor dem Fix veröffentlichte Analysen
+  // (leerer marketKey) durch einen frischen Lauf zu ersetzen, statt die
+  // Sperre zu umgehen. Alte v10-Zeilen bleiben unverändert als Historie
+  // stehen (assignedUnits war dort ohnehin 0, kein ROI-Effekt).
   static const publishedModelVersion =
-      'phoenix_daily_pipeline_v10_stat_all_matches_100k';
+      'phoenix_daily_pipeline_v11_visible_tip_fix';
 
   Future<void> run({
     required int jobId,
