@@ -219,16 +219,28 @@ class LearningRunService {
     final processedLeagueIds = <String>{};
     final leagueStatusSummary = <Map<String, Object?>>[];
 
-    // PHÖNIX Engine-Umbau Phase 2 (Plan "wild-cuddling-hoare"): anders als
+    // PHÖNIX Engine-Umbau Phase 2/3 (Plan "wild-cuddling-hoare"): anders als
     // die übrigen Engine-Kinds wird `TeamStrengthFit` NICHT pro Sample
-    // abgeleitet, sondern EINMAL pro Liga aus der gesamten Trainingshistorie
-    // gefittet (IPF, siehe `TeamStrengthEngine.fit`) und dann über alle 3
-    // Märkte hinweg wiederverwendet - market ist die äußere, league die
-    // innere Schleife unten, ein Cache verhindert also ein erneutes Fitting
-    // derselben Liga bei jedem Markt-Durchlauf. `null` bedeutet: für diese
-    // Liga wurde bereits versucht zu fitten, aber zu wenig Historie
-    // vorhanden (Cache verhindert wiederholte erfolglose Versuche).
-    final teamStrengthFitsByLeague = <String, TeamStrengthFit?>{};
+    // abgeleitet, sondern EINMAL pro Liga (und pro getesteter Halbwertszeit,
+    // Phase 3) aus der gesamten Trainingshistorie gefittet (IPF, siehe
+    // `TeamStrengthEngine.fit`) und dann über alle 3 Märkte hinweg
+    // wiederverwendet - market ist die äußere, league die innere Schleife
+    // unten, Caches verhindern also ein erneutes Laden/Fitten derselben
+    // Liga bei jedem Markt-Durchlauf. `null` bedeutet: für diese Liga wurde
+    // bereits versucht zu fitten, aber zu wenig Historie vorhanden (Cache
+    // verhindert wiederholte erfolglose Versuche).
+    final teamStrengthTrainingDataByLeague =
+        <String, ({List<MatchResult> matches, DateTime asOf})?>{};
+    final teamStrengthFitsByLeagueAndHalfLife = <String, TeamStrengthFit?>{};
+    // Live gegen PHÖNIX-Daten getestet (Halbwertszeit-Grid-Search, 9
+    // Ligen/98 Holdout-Spiele): klarer, monotoner - aber kleiner - Trend
+    // Richtung "kürzere Halbwertszeit ist etwas besser" (30 Tage: Ø Brier
+    // -0,4% ggü. keinem Verfall). Zu klein/zu wenig Daten für eine feste
+    // Entscheidung direkt in Produktion - deshalb hier als zweiter,
+    // benannter Challenger neben dem Kontrollwert (kein Verfall) getestet,
+    // über die richtige Walk-Forward/Paired-Bootstrap-Auswertung statt aus
+    // einem einzelnen Backtest übernommen.
+    const teamStrengthHalfLifeCandidates = <double?>[null, 30.0];
 
     // Section 65 Fortsetzung: Position, an der der letzte (verwaiste)
     // Versuch unterbrochen wurde. Vollständig abgeschlossene Märkte
@@ -643,100 +655,108 @@ class LearningRunService {
           }
         }
 
-        // PHÖNIX Engine-Umbau Phase 2 (Plan "wild-cuddling-hoare", Live-
-        // Backtest mit Shrinkage-Regularisierung: 9 Ligen, Ø Brier -7,3%
-        // gegen den einfachen Durchschnitt): IPF-Team-Stärke-Challenger.
-        // Der Fit selbst passiert nur EINMAL pro Liga (Cache oben), hier
-        // wird er nur noch als Challenger für DIESEN Markt registriert -
-        // eigenes, unabhängiges Budget (max. 1 pro Liga x Markt), läuft
+        // PHÖNIX Engine-Umbau Phase 2/3 (Plan "wild-cuddling-hoare", Live-
+        // Backtests: Team-Stärke mit Shrinkage-Regularisierung 9 Ligen,
+        // Ø Brier -7,3% ggü. einfachem Durchschnitt; Zeitverfall-
+        // Halbwertszeit-Grid-Search auf denselben Daten zeigte einen
+        // kleinen, aber sauber monotonen Vorteil für kürzere Halbwertszeiten
+        // - zu klein für eine feste Entscheidung, deshalb hier als eigener,
+        // benannter Challenger neben dem Kontrollwert getestet statt
+        // übernommen). Eigenes, unabhängiges Budget (max.
+        // `teamStrengthHalfLifeCandidates.length` pro Liga x Markt), läuft
         // unabhängig vom attackWeight-Gitter-Budget unten.
-        final hasTeamStrengthChallenger = existingChallengers.any(
-          (c) =>
-              (c['weights'] as Map?)?['engineVersion'] ==
-              TeamStrengthEngine.version,
-        );
-        if (!hasTeamStrengthChallenger) {
+        final existingTeamStrengthHalfLives = existingChallengers
+            .where((c) =>
+                (c['weights'] as Map?)?['engineVersion'] ==
+                TeamStrengthEngine.version)
+            .map((c) => (c['feature_config'] as Map?)?['halfLifeDays'])
+            .toSet();
+        for (final halfLifeDays in teamStrengthHalfLifeCandidates) {
+          if (existingTeamStrengthHalfLives.contains(halfLifeDays)) continue;
+
           final teamStrengthFit = await _teamStrengthFitFor(
             leagueId: leagueId,
             split: split,
-            cache: teamStrengthFitsByLeague,
+            halfLifeDays: halfLifeDays,
+            trainingDataCache: teamStrengthTrainingDataByLeague,
+            fitCache: teamStrengthFitsByLeagueAndHalfLife,
           );
           // Nur mit konvergiertem Fit als Challenger anlegen - ein
           // nicht-konvergierter Fit ist nicht vertrauenswürdig (live
           // beobachtet: ohne Regularisierung 6 von 9 Ligen ohne Konvergenz,
           // deutlich schlechter als der einfache Durchschnitt).
-          if (teamStrengthFit != null && teamStrengthFit.converged) {
-            final teamStrengthValidation = split.validation
-                .where((s) => s.hasGlobalMarketData)
-                .toList();
-            final teamStrengthHoldout =
-                split.holdout.where((s) => s.hasGlobalMarketData).toList();
-            if (teamStrengthValidation.length >= config.minValidationSample ||
-                teamStrengthHoldout.length >= config.minHoldoutSample) {
-              final challengerIndex = await registry.nextChallengerIndex(
-                leagueId: leagueId,
-                market: market.key,
-                generation: generation,
-              );
-              final teamStrengthChallenger =
-                  await registry.createOrReuseTeamStrengthChallenger(
-                leagueId: leagueId,
+          if (teamStrengthFit == null || !teamStrengthFit.converged) continue;
+
+          final teamStrengthValidation =
+              split.validation.where((s) => s.hasGlobalMarketData).toList();
+          final teamStrengthHoldout =
+              split.holdout.where((s) => s.hasGlobalMarketData).toList();
+          if (teamStrengthValidation.length < config.minValidationSample &&
+              teamStrengthHoldout.length < config.minHoldoutSample) {
+            continue;
+          }
+
+          final challengerIndex = await registry.nextChallengerIndex(
+            leagueId: leagueId,
+            market: market.key,
+            generation: generation,
+          );
+          final teamStrengthChallenger =
+              await registry.createOrReuseTeamStrengthChallenger(
+            leagueId: leagueId,
+            market: market,
+            fit: teamStrengthFit,
+            halfLifeDays: halfLifeDays,
+            generation: generation,
+            challengerIndex: challengerIndex,
+            sampleSize: eligibleSampleSize,
+            parentModelId: championId,
+            trainingStart:
+                split.training.isEmpty ? null : split.training.first.kickoff,
+            trainingEnd:
+                split.training.isEmpty ? null : split.training.last.kickoff,
+            trainingCount: split.training.length,
+            validationCount: teamStrengthValidation.length,
+            holdoutCount: teamStrengthHoldout.length,
+          );
+          challengersCreated += 1;
+
+          await database.addLearningCandidate(
+            learningRunId: runId,
+            modelVersionId: teamStrengthChallenger.id,
+            leagueId: leagueId,
+            market: market.key,
+          );
+
+          if (teamStrengthValidation.isNotEmpty) {
+            await _persistComparison(
+              comparison: ChampionChallengerComparison.compare(
                 market: market,
-                fit: teamStrengthFit,
-                generation: generation,
-                challengerIndex: challengerIndex,
-                sampleSize: eligibleSampleSize,
-                parentModelId: championId,
-                trainingStart: split.training.isEmpty
-                    ? null
-                    : split.training.first.kickoff,
-                trainingEnd: split.training.isEmpty
-                    ? null
-                    : split.training.last.kickoff,
-                trainingCount: split.training.length,
-                validationCount: teamStrengthValidation.length,
-                holdoutCount: teamStrengthHoldout.length,
-              );
-              challengersCreated += 1;
-
-              await database.addLearningCandidate(
-                learningRunId: runId,
-                modelVersionId: teamStrengthChallenger.id,
                 leagueId: leagueId,
-                market: market.key,
-              );
-
-              if (teamStrengthValidation.isNotEmpty) {
-                await _persistComparison(
-                  comparison: ChampionChallengerComparison.compare(
-                    market: market,
-                    leagueId: leagueId,
-                    scopeSamples: teamStrengthValidation,
-                    championEngine: championEngine,
-                    challengerEngine: teamStrengthChallenger.engine,
-                    config: config,
-                  ),
-                  evaluationType: 'walk_forward',
-                  championModelId: championId,
-                  challengerModelId: teamStrengthChallenger.id,
-                );
-              }
-              if (teamStrengthHoldout.isNotEmpty) {
-                await _persistComparison(
-                  comparison: ChampionChallengerComparison.compare(
-                    market: market,
-                    leagueId: leagueId,
-                    scopeSamples: teamStrengthHoldout,
-                    championEngine: championEngine,
-                    challengerEngine: teamStrengthChallenger.engine,
-                    config: config,
-                  ),
-                  evaluationType: 'holdout',
-                  championModelId: championId,
-                  challengerModelId: teamStrengthChallenger.id,
-                );
-              }
-            }
+                scopeSamples: teamStrengthValidation,
+                championEngine: championEngine,
+                challengerEngine: teamStrengthChallenger.engine,
+                config: config,
+              ),
+              evaluationType: 'walk_forward',
+              championModelId: championId,
+              challengerModelId: teamStrengthChallenger.id,
+            );
+          }
+          if (teamStrengthHoldout.isNotEmpty) {
+            await _persistComparison(
+              comparison: ChampionChallengerComparison.compare(
+                market: market,
+                leagueId: leagueId,
+                scopeSamples: teamStrengthHoldout,
+                championEngine: championEngine,
+                challengerEngine: teamStrengthChallenger.engine,
+                config: config,
+              ),
+              evaluationType: 'holdout',
+              championModelId: championId,
+              challengerModelId: teamStrengthChallenger.id,
+            );
           }
         }
 
@@ -1082,10 +1102,15 @@ class LearningRunService {
   /// in [cache] für die Dauer des Laufs abgelegt (auch `null`, wenn zu wenig
   /// Historie vorhanden ist - verhindert wiederholte erfolglose Versuche
   /// bei jedem der 3 Märkte).
-  Future<TeamStrengthFit?> _teamStrengthFitFor({
+  /// Lädt/bereitet die Trainingsspiele EINER Liga für das Team-Stärke-
+  /// Fitting vor (leakage-sicher: nur Spiele vor Beginn von Validation/
+  /// Holdout) - einmal pro Liga, unabhängig von der Halbwertszeit, damit
+  /// mehrere Halbwertszeit-Kandidaten (siehe [_teamStrengthFitFor]) sich
+  /// dieselbe Datenbank-Abfrage teilen statt sie zu wiederholen.
+  Future<({List<MatchResult> matches, DateTime asOf})?> _teamStrengthTrainingDataFor({
     required String leagueId,
     required ChronologicalSplit split,
-    required Map<String, TeamStrengthFit?> cache,
+    required Map<String, ({List<MatchResult> matches, DateTime asOf})?> cache,
   }) async {
     if (cache.containsKey(leagueId)) return cache[leagueId];
 
@@ -1122,12 +1147,47 @@ class LearningRunService {
               awayTeamId: row['away_team_id']?.toString() ?? '',
               homeGoals: _parseGoals(row['home_goals']),
               awayGoals: _parseGoals(row['away_goals']),
+              kickoff: row['kickoff_utc'] as DateTime?,
             ))
         .where((m) => m.homeTeamId.isNotEmpty && m.awayTeamId.isNotEmpty)
         .toList();
 
-    final fit = TeamStrengthEngine.fit(matchResults);
-    cache[leagueId] = fit;
+    final result = (matches: matchResults, asOf: boundary);
+    cache[leagueId] = result;
+    return result;
+  }
+
+  /// Fittet Team-Stärke für eine bestimmte Halbwertszeit (`null` = kein
+  /// Zeitverfall) - cached separat je (Liga, Halbwertszeit), teilt sich
+  /// aber die vorbereiteten Trainingsspiele über [_teamStrengthTrainingDataFor]
+  /// mit allen anderen Halbwertszeit-Kandidaten derselben Liga.
+  Future<TeamStrengthFit?> _teamStrengthFitFor({
+    required String leagueId,
+    required ChronologicalSplit split,
+    double? halfLifeDays,
+    required Map<String, ({List<MatchResult> matches, DateTime asOf})?>
+        trainingDataCache,
+    required Map<String, TeamStrengthFit?> fitCache,
+  }) async {
+    final cacheKey = '$leagueId|${halfLifeDays ?? "none"}';
+    if (fitCache.containsKey(cacheKey)) return fitCache[cacheKey];
+
+    final trainingData = await _teamStrengthTrainingDataFor(
+      leagueId: leagueId,
+      split: split,
+      cache: trainingDataCache,
+    );
+    if (trainingData == null) {
+      fitCache[cacheKey] = null;
+      return null;
+    }
+
+    final fit = TeamStrengthEngine.fit(
+      trainingData.matches,
+      halfLifeDays: halfLifeDays,
+      asOf: trainingData.asOf,
+    );
+    fitCache[cacheKey] = fit;
     return fit;
   }
 

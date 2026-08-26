@@ -597,6 +597,7 @@ class ModelRegistryService {
     required String? leagueId,
     required LearningMarket market,
     required TeamStrengthFit fit,
+    double? halfLifeDays,
     required int generation,
     required int challengerIndex,
     required int sampleSize,
@@ -608,7 +609,9 @@ class ModelRegistryService {
     required int holdoutCount,
   }) async {
     final engine = ModelEngine.teamStrength(fit);
-    final readableVersion = 'V$generation-C$challengerIndex-TS';
+    final readableVersion = halfLifeDays == null
+        ? 'V$generation-C$challengerIndex-TS'
+        : 'V$generation-C$challengerIndex-TS-HL${halfLifeDays.toStringAsFixed(0)}';
     final id = await database.insertModelVersion(
       readableVersion: readableVersion,
       parentModelId: parentModelId,
@@ -619,6 +622,7 @@ class ModelRegistryService {
       featureConfig: {
         'features': 'teamStrength',
         'engineFamily': TeamStrengthEngine.version,
+        'halfLifeDays': halfLifeDays,
         'fitTeamCount': fit.attack.length,
         'fitConverged': fit.converged,
         'fitIterations': fit.iterations,
@@ -646,6 +650,7 @@ class ModelRegistryService {
       details: {
         'readableVersion': readableVersion,
         'engineVersion': TeamStrengthEngine.version,
+        'halfLifeDays': halfLifeDays,
         'fitTeamCount': fit.attack.length,
         'fitConverged': fit.converged,
         'sampleSize': sampleSize,
