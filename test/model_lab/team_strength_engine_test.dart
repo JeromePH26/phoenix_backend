@@ -45,8 +45,12 @@ void main() {
 
     test('a clearly stronger team ends up with attack > 1 and defense < 1', () {
       // A schiesst konstant 3, kassiert konstant 0 gegen B/C/D. B/C/D sind
-      // untereinander ausgeglichen (1:1).
-      final matches = <MatchResult>[
+      // untereinander ausgeglichen (1:1). 6 Runden (statt 1), damit jedes
+      // Team genug Spiele hat, dass die Shrinkage-Regularisierung (siehe
+      // TeamStrengthEngine.fit) das klare Signal nicht dominiert - mit nur
+      // 3 Spielen je Team waere selbst ein extremes Ergebnis stark Richtung
+      // neutral geglaettet, was hier nicht getestet werden soll.
+      final singleRound = <MatchResult>[
         const MatchResult(homeTeamId: 'A', awayTeamId: 'B', homeGoals: 3, awayGoals: 0),
         const MatchResult(homeTeamId: 'B', awayTeamId: 'A', homeGoals: 0, awayGoals: 3),
         const MatchResult(homeTeamId: 'A', awayTeamId: 'C', homeGoals: 3, awayGoals: 0),
@@ -59,6 +63,9 @@ void main() {
         const MatchResult(homeTeamId: 'D', awayTeamId: 'B', homeGoals: 1, awayGoals: 1),
         const MatchResult(homeTeamId: 'C', awayTeamId: 'D', homeGoals: 1, awayGoals: 1),
         const MatchResult(homeTeamId: 'D', awayTeamId: 'C', homeGoals: 1, awayGoals: 1),
+      ];
+      final matches = [
+        for (var round = 0; round < 6; round++) ...singleRound,
       ];
 
       final fit = TeamStrengthEngine.fit(matches);
@@ -91,6 +98,37 @@ void main() {
       final fit = TeamStrengthEngine.fit(matches);
       expect(fit.converged, isTrue);
       expect(fit.homeAdvantage, greaterThan(1.3));
+    });
+
+    test('a team with very few matches stays close to neutral even with an '
+        'extreme record, while a well-established team with the same '
+        'record does not (empirical-Bayes shrinkage towards neutral)', () {
+      // "Sparse" (E) hat nur EIN Spiel: 5:0-Sieg gegen einen ausgeglichenen
+      // Gegner-Pool. "Established" (A) hat denselben 5:0-Torschnitt, aber
+      // ueber viele Spiele hinweg belegt - beide "verdienen" sich rechnerisch
+      // dieselbe Rohquote, sollen aber unterschiedlich stark geglaettet
+      // werden.
+      final matches = <MatchResult>[
+        // A (etabliert): 6x 5:0 gegen wechselnde Gegner.
+        for (var i = 0; i < 6; i++)
+          MatchResult(homeTeamId: 'A', awayTeamId: 'opp$i', homeGoals: 5, awayGoals: 0),
+        // E (datenarm): nur 1x 5:0.
+        const MatchResult(homeTeamId: 'E', awayTeamId: 'opp99', homeGoals: 5, awayGoals: 0),
+        // Ausgeglichene Gegner-Basis, damit das Modell insgesamt identifizierbar bleibt.
+        for (var i = 0; i < 6; i++)
+          MatchResult(homeTeamId: 'opp$i', awayTeamId: 'opp${(i + 1) % 6}', homeGoals: 1, awayGoals: 1),
+        const MatchResult(homeTeamId: 'opp99', awayTeamId: 'opp0', homeGoals: 1, awayGoals: 1),
+      ];
+
+      final fit = TeamStrengthEngine.fit(matches);
+      final distanceFromNeutralA = (fit.attackOf('A') - 1.0).abs();
+      final distanceFromNeutralE = (fit.attackOf('E') - 1.0).abs();
+      // Beide Teams weichen wegen desselben 5:0-Rohsignals in dieselbe
+      // Richtung ab (attack > 1) - aber A (6 Spiele) darf sich weiter von
+      // neutral entfernen duerfen als E (1 Spiel).
+      expect(fit.attackOf('A'), greaterThan(1.0));
+      expect(fit.attackOf('E'), greaterThan(1.0));
+      expect(distanceFromNeutralA, greaterThan(distanceFromNeutralE));
     });
 
     test('converges within the default iteration budget for a realistic '

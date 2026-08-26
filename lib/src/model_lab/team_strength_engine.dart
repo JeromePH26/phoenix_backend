@@ -103,6 +103,19 @@ class TeamStrengthEngine {
     // je Iteration übernehmen) ist die Standardlösung für genau dieses
     // Oszillationsproblem bei IPF-artigen Fixpunktverfahren.
     double dampingFactor = 0.5,
+    // Live gegen PHÖNIX-Daten getestet: selbst mit Dämpfung konvergierten
+    // Ligen mit vielen Teams und wenigen Spielen pro Team (z.B. Allsvenskan,
+    // EFL Cup - oft nur 1-3 Spiele je Team) nicht zuverlässig, und lieferten
+    // deutlich schlechtere Vorhersagen als der einfache Durchschnitt -
+    // typisches Identifizierbarkeitsproblem bei zu wenig Beobachtungen pro
+    // Parameter. Empirical-Bayes-Shrinkage Richtung neutral (1.0) IN JEDER
+    // Iteration, abhängig von der bisherigen Spielanzahl des Teams -
+    // dieselbe `n / (n + k)`-Formel wie `FootballEngineInputService.
+    // shrinkGoalRateTowardsBaseline`/`leagueAwareBaseline`, jetzt auf
+    // Team-Parameter-Ebene. Ein Team mit wenigen Spielen bleibt so nahe an
+    // "Durchschnittsteam" statt frei zu driften - stabilisiert sowohl die
+    // Konvergenz als auch die Qualität der Schätzung für datenarme Teams.
+    double regularizationK = 8,
   }) {
     final teamIds = <String>{};
     for (final match in matches) {
@@ -128,6 +141,7 @@ class TeamStrengthEngine {
     final totalGoalsAgainst = <String, double>{
       for (final id in teamIds) id: 0,
     };
+    final matchCount = <String, int>{for (final id in teamIds) id: 0};
     var totalHomeGoals = 0.0;
     for (final match in matches) {
       totalGoalsFor[match.homeTeamId] =
@@ -138,7 +152,16 @@ class TeamStrengthEngine {
           totalGoalsAgainst[match.homeTeamId]! + match.awayGoals;
       totalGoalsAgainst[match.awayTeamId] =
           totalGoalsAgainst[match.awayTeamId]! + match.homeGoals;
+      matchCount[match.homeTeamId] = matchCount[match.homeTeamId]! + 1;
+      matchCount[match.awayTeamId] = matchCount[match.awayTeamId]! + 1;
       totalHomeGoals += match.homeGoals;
+    }
+
+    double shrinkTowardsNeutral(double rawTarget, String teamId) {
+      final n = matchCount[teamId]!;
+      final factor = n / (n + regularizationK);
+      return TeamStrengthFit.neutralStrength +
+          factor * (rawTarget - TeamStrengthFit.neutralStrength);
     }
 
     var iterations = 0;
@@ -162,7 +185,8 @@ class TeamStrengthEngine {
       for (final id in teamIds) {
         final denominator = attackDenominator[id]!;
         if (denominator > 0) {
-          final target = totalGoalsFor[id]! / denominator;
+          final rawTarget = totalGoalsFor[id]! / denominator;
+          final target = shrinkTowardsNeutral(rawTarget, id);
           attack[id] = attack[id]! + dampingFactor * (target - attack[id]!);
         }
       }
@@ -180,7 +204,8 @@ class TeamStrengthEngine {
       for (final id in teamIds) {
         final denominator = defenseDenominator[id]!;
         if (denominator > 0) {
-          final target = totalGoalsAgainst[id]! / denominator;
+          final rawTarget = totalGoalsAgainst[id]! / denominator;
+          final target = shrinkTowardsNeutral(rawTarget, id);
           defense[id] = defense[id]! + dampingFactor * (target - defense[id]!);
         }
       }
