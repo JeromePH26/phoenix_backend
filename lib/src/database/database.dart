@@ -6446,6 +6446,33 @@ class PhoenixDatabase {
         .toList();
   }
 
+  /// Wie [footballSettledMatchesForLeague], aber über MEHRERE Ligen in
+  /// einer Abfrage gepoolt (Nutzerkorrektur 2026-08-27: ein globaler
+  /// Team-Stärke-Fit über alle Ligen zusammen statt 1233 einzelner
+  /// Datenbank-Roundtrips). Deckt sofort jedes Team ab; die bestehende
+  /// PRO-LIGA-Variante bleibt daneben bestehen und "veredelt" automatisch
+  /// jede Liga, sobald sie für sich genug eigene Historie hat.
+  Future<List<Map<String, Object?>>> footballSettledMatchesForLeagues({
+    required List<String> leagueIds,
+  }) async {
+    if (leagueIds.isEmpty) return const [];
+    final db = await connection();
+    final rows = await db.execute(
+      Sql.named('''
+        SELECT home_team_id, away_team_id, home_goals, away_goals, kickoff_utc, league_id
+        FROM football_matches
+        WHERE league_id = ANY(@league_ids)
+          AND home_goals IS NOT NULL
+          AND away_goals IS NOT NULL
+        ORDER BY kickoff_utc
+      '''),
+      parameters: {'league_ids': leagueIds},
+    );
+    return rows
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
   /// "Liga-/Tor-Kontext"-Feature für [GlobalGoalsV1Engine]: durchschnittliche
   /// Heim-/Auswärtstore je Spiel dieser Liga über die letzten 400 Tage.
   /// `football_matches` hat keine `season`-Spalte (bekannte Lücke) - ein

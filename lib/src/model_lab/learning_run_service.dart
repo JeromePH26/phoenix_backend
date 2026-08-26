@@ -247,6 +247,11 @@ class LearningRunService {
     final teamStrengthTrainingDataByLeague =
         <String, ({List<MatchResult> matches, DateTime asOf})?>{};
     final teamStrengthFitsByLeagueAndHalfLife = <String, TeamStrengthFit?>{};
+    // Nutzerkorrektur (2026-08-27): analoge Caches für den gepoolten
+    // GLOBALEN Team-Stärke-Fit (siehe _ensurePooledTeamStrengthChallenger) -
+    // einmal pro Halbwertszeit für den GANZEN Lauf, nicht pro Liga.
+    final pooledTeamStrengthTrainingDataCache = <String, Object?>{};
+    final pooledTeamStrengthFitCache = <double?, TeamStrengthFit?>{};
     // Live gegen PHÖNIX-Daten getestet (Halbwertszeit-Grid-Search, 9
     // Ligen/98 Holdout-Spiele): klarer, monotoner - aber kleiner - Trend
     // Richtung "kürzere Halbwertszeit ist etwas besser" (30 Tage: Ø Brier
@@ -318,6 +323,23 @@ class LearningRunService {
         samplesByLeague: samplesByLeague,
         registry: registry,
         runId: runId,
+      );
+      challengersCreated += await _ensurePooledDixonColesChallengers(
+        market: market,
+        leagues: leagues,
+        samplesByLeague: samplesByLeague,
+        registry: registry,
+        runId: runId,
+      );
+      challengersCreated += await _ensurePooledTeamStrengthChallenger(
+        market: market,
+        leagues: leagues,
+        samplesByLeague: samplesByLeague,
+        registry: registry,
+        runId: runId,
+        fitCache: pooledTeamStrengthFitCache,
+        trainingDataCache: pooledTeamStrengthTrainingDataCache,
+        halfLifeCandidates: teamStrengthHalfLifeCandidates,
       );
 
       if (resumeMarketIndex >= 0 && marketIndex < resumeMarketIndex) {
@@ -1106,6 +1128,353 @@ class LearningRunService {
     }
 
     return created;
+  }
+
+  /// Wie [_ensurePooledGlobalGoalsV1Challenger]/[_ensurePooledGlobalMarketChallengers],
+  /// aber für Dixon-Coles (Section 4/10-12, Claude AN2.txt). Ursprünglich
+  /// (Plan "wild-cuddling-hoare" Phase 1) rein PRO LIGA angelegt - bei nur
+  /// ~570 leakage-sicheren Samples über 1233 Ligen verteilt erreichte
+  /// praktisch keine einzelne Liga die nötige Stichprobe (live beobachtet:
+  /// `challengers_created: 0` über drei aufeinanderfolgende Learning Runs).
+  /// Nutzerkorrektur (2026-08-27): erst GLOBAL (Liga-Feld = null, über alle
+  /// Ligen gepoolt, exakt wie die beiden Methoden oben) testen, damit sofort
+  /// jedes Spiel abgedeckt ist. Die bereits bestehende PRO-LIGA-Variante
+  /// weiter unten in der Liga-Schleife bleibt UNVERÄNDERT bestehen und
+  /// "veredelt" automatisch jede Liga zu einer eigenen Engine, sobald sie
+  /// für sich genug eigene Historie hat - kein Widerspruch, beide laufen
+  /// nebeneinander.
+  Future<int> _ensurePooledDixonColesChallengers({
+    required LearningMarket market,
+    required List<Map<String, Object?>> leagues,
+    required Map<String, List<LearningSample>> samplesByLeague,
+    required ModelRegistryService registry,
+    required int runId,
+  }) async {
+    final existingGlobalChallengers = await registry.currentChallengers(
+      leagueId: null,
+      market: market.key,
+    );
+    final existingRhos = existingGlobalChallengers
+        .where((c) =>
+            (c['weights'] as Map?)?['engineVersion'] ==
+            DixonColesEngine.version)
+        .map((c) => (c['weights'] as Map?)?['rho'])
+        .whereType<num>()
+        .map((rho) => rho.toDouble())
+        .toSet();
+    if (DixonColesEngine.rhoCandidates.every(existingRhos.contains)) return 0;
+
+    final pooled = <LearningSample>[
+      for (final league in leagues)
+        ...?samplesByLeague[league['league_id']?.toString()],
+    ]..sort((a, b) => a.kickoff.compareTo(b.kickoff));
+
+    final split = ChronologicalSplit.split(pooled, config);
+    if (split.validation.length < config.minValidationSample &&
+        split.holdout.length < config.minHoldoutSample) {
+      return 0;
+    }
+
+    final globalChampionModel =
+        await database.championModel(leagueId: null, market: market.key);
+    if (globalChampionModel == null) return 0;
+    final globalChampionId = globalChampionModel['id'] as int;
+    final globalChampionEngine = registry.modelEngine(globalChampionModel);
+
+    final generation =
+        await registry.nextGeneration(leagueId: null, market: market.key);
+
+    var created = 0;
+    for (final rho in DixonColesEngine.rhoCandidates) {
+      if (existingRhos.contains(rho)) continue;
+
+      final challengerIndex = await registry.nextChallengerIndex(
+        leagueId: null,
+        market: market.key,
+        generation: generation,
+      );
+      final challenger = await registry.createOrReuseDixonColesChallenger(
+        leagueId: null,
+        market: market,
+        rho: rho,
+        generation: generation,
+        challengerIndex: challengerIndex,
+        sampleSize: pooled.length,
+        parentModelId: globalChampionId,
+        trainingStart:
+            split.training.isEmpty ? null : split.training.first.kickoff,
+        trainingEnd:
+            split.training.isEmpty ? null : split.training.last.kickoff,
+        trainingCount: split.training.length,
+        validationCount: split.validation.length,
+        holdoutCount: split.holdout.length,
+      );
+      created += 1;
+
+      await database.addLearningCandidate(
+        learningRunId: runId,
+        modelVersionId: challenger.id,
+        leagueId: null,
+        market: market.key,
+      );
+
+      if (split.validation.isNotEmpty) {
+        await _persistComparison(
+          comparison: ChampionChallengerComparison.compare(
+            market: market,
+            leagueId: null,
+            scopeSamples: split.validation,
+            championEngine: globalChampionEngine,
+            challengerEngine: challenger.engine,
+            config: config,
+          ),
+          evaluationType: 'walk_forward',
+          championModelId: globalChampionId,
+          challengerModelId: challenger.id,
+        );
+      }
+      if (split.holdout.isNotEmpty) {
+        await _persistComparison(
+          comparison: ChampionChallengerComparison.compare(
+            market: market,
+            leagueId: null,
+            scopeSamples: split.holdout,
+            championEngine: globalChampionEngine,
+            challengerEngine: challenger.engine,
+            config: config,
+          ),
+          evaluationType: 'holdout',
+          championModelId: globalChampionId,
+          challengerModelId: challenger.id,
+        );
+      }
+    }
+    return created;
+  }
+
+  /// Wie [_ensurePooledDixonColesChallengers], aber für Team-Stärke
+  /// (`TeamStrengthEngine`). Fittet EIN gemeinsames Angriff/Abwehr-Rating
+  /// über ALLE Ligen zusammen (jedes Team bekommt sofort ein Rating, auch
+  /// ohne eigene ausreichende Liga-Historie - dünn besetzte Teams werden
+  /// von der bestehenden Shrinkage-Regularisierung in
+  /// `TeamStrengthEngine.fit` automatisch Richtung neutral(1.0) gezogen,
+  /// exakt dasselbe Sicherheitsnetz wie beim Pro-Liga-Fit). Die bestehende
+  /// PRO-LIGA-Variante bleibt unverändert bestehen und ersetzt diesen
+  /// globalen Fallback automatisch, sobald eine Liga für sich genug eigene
+  /// Historie hat (eigener, spezifischerer `config_hash`/`league_id` -
+  /// beide können nebeneinander als separate Challenger existieren).
+  Future<int> _ensurePooledTeamStrengthChallenger({
+    required LearningMarket market,
+    required List<Map<String, Object?>> leagues,
+    required Map<String, List<LearningSample>> samplesByLeague,
+    required ModelRegistryService registry,
+    required int runId,
+    required Map<double?, TeamStrengthFit?> fitCache,
+    required Map<String, Object?> trainingDataCache,
+    required List<double?> halfLifeCandidates,
+  }) async {
+    final existingGlobalChallengers = await registry.currentChallengers(
+      leagueId: null,
+      market: market.key,
+    );
+    final existingHalfLives = existingGlobalChallengers
+        .where((c) =>
+            (c['weights'] as Map?)?['engineVersion'] ==
+            TeamStrengthEngine.version)
+        .map((c) => (c['feature_config'] as Map?)?['halfLifeDays'])
+        .toSet();
+
+    final pooled = <LearningSample>[
+      for (final league in leagues)
+        ...?samplesByLeague[league['league_id']?.toString()],
+    ]..sort((a, b) => a.kickoff.compareTo(b.kickoff));
+
+    var created = 0;
+    for (final halfLifeDays in halfLifeCandidates) {
+      if (existingHalfLives.contains(halfLifeDays)) continue;
+
+      final split = ChronologicalSplit.split(pooled, config);
+      final fit = await _pooledTeamStrengthFitFor(
+        leagues: leagues,
+        split: split,
+        halfLifeDays: halfLifeDays,
+        trainingDataCache: trainingDataCache,
+        fitCache: fitCache,
+      );
+      if (fit == null || !fit.converged) continue;
+
+      final teamStrengthValidation =
+          split.validation.where((s) => s.hasGlobalMarketData).toList();
+      final teamStrengthHoldout =
+          split.holdout.where((s) => s.hasGlobalMarketData).toList();
+      if (teamStrengthValidation.length < config.minValidationSample &&
+          teamStrengthHoldout.length < config.minHoldoutSample) {
+        continue;
+      }
+
+      final globalChampionModel =
+          await database.championModel(leagueId: null, market: market.key);
+      if (globalChampionModel == null) continue;
+      final globalChampionId = globalChampionModel['id'] as int;
+      final globalChampionEngine = registry.modelEngine(globalChampionModel);
+
+      final generation =
+          await registry.nextGeneration(leagueId: null, market: market.key);
+      final challengerIndex = await registry.nextChallengerIndex(
+        leagueId: null,
+        market: market.key,
+        generation: generation,
+      );
+      final challenger = await registry.createOrReuseTeamStrengthChallenger(
+        leagueId: null,
+        market: market,
+        fit: fit,
+        halfLifeDays: halfLifeDays,
+        generation: generation,
+        challengerIndex: challengerIndex,
+        sampleSize: pooled.length,
+        parentModelId: globalChampionId,
+        trainingStart:
+            split.training.isEmpty ? null : split.training.first.kickoff,
+        trainingEnd:
+            split.training.isEmpty ? null : split.training.last.kickoff,
+        trainingCount: split.training.length,
+        validationCount: teamStrengthValidation.length,
+        holdoutCount: teamStrengthHoldout.length,
+      );
+      created += 1;
+
+      await database.addLearningCandidate(
+        learningRunId: runId,
+        modelVersionId: challenger.id,
+        leagueId: null,
+        market: market.key,
+      );
+
+      if (teamStrengthValidation.isNotEmpty) {
+        await _persistComparison(
+          comparison: ChampionChallengerComparison.compare(
+            market: market,
+            leagueId: null,
+            scopeSamples: teamStrengthValidation,
+            championEngine: globalChampionEngine,
+            challengerEngine: challenger.engine,
+            config: config,
+          ),
+          evaluationType: 'walk_forward',
+          championModelId: globalChampionId,
+          challengerModelId: challenger.id,
+        );
+      }
+      if (teamStrengthHoldout.isNotEmpty) {
+        await _persistComparison(
+          comparison: ChampionChallengerComparison.compare(
+            market: market,
+            leagueId: null,
+            scopeSamples: teamStrengthHoldout,
+            championEngine: globalChampionEngine,
+            challengerEngine: challenger.engine,
+            config: config,
+          ),
+          evaluationType: 'holdout',
+          championModelId: globalChampionId,
+          challengerModelId: challenger.id,
+        );
+      }
+    }
+    return created;
+  }
+
+  /// Wie [_teamStrengthTrainingDataFor], aber über ALLE Ligen gepoolt
+  /// (`database.footballSettledMatchesForLeagues`, EIN Datenbank-Roundtrip
+  /// statt 1233). Ergebnis wird in [trainingDataCache] unter dem festen
+  /// Schlüssel `'__GLOBAL__'` für die Dauer des Laufs abgelegt, exakt
+  /// dasselbe Cache-Prinzip wie pro Liga.
+  Future<({List<MatchResult> matches, DateTime asOf})?>
+      _pooledTeamStrengthTrainingData({
+    required List<Map<String, Object?>> leagues,
+    required ChronologicalSplit split,
+    required Map<String, Object?> trainingDataCache,
+  }) async {
+    const cacheKey = '__GLOBAL__';
+    if (trainingDataCache.containsKey(cacheKey)) {
+      return trainingDataCache[cacheKey]
+          as ({List<MatchResult> matches, DateTime asOf})?;
+    }
+
+    final evaluatedSamples =
+        split.validation.isNotEmpty ? split.validation : split.holdout;
+    if (evaluatedSamples.isEmpty) {
+      trainingDataCache[cacheKey] = null;
+      return null;
+    }
+    final boundary = evaluatedSamples.first.kickoff;
+
+    final leagueIds = leagues
+        .map((l) => l['league_id']?.toString())
+        .whereType<String>()
+        .toList();
+    final rawMatches = await database.footballSettledMatchesForLeagues(
+      leagueIds: leagueIds,
+    );
+    final trainingMatches = rawMatches.where((row) {
+      final kickoff = row['kickoff_utc'];
+      if (kickoff is! DateTime) return false;
+      return kickoff.isBefore(boundary);
+    }).toList();
+
+    // Gepoolt über alle Ligen ist eine deutlich niedrigere Mindestmenge als
+    // die 25 der Pro-Liga-Variante nicht nötig, aber dieselbe Grundregel
+    // (kein Fit auf einer Mini-Stichprobe) gilt weiterhin.
+    const minimumTrainingMatches = 25;
+    if (trainingMatches.length < minimumTrainingMatches) {
+      trainingDataCache[cacheKey] = null;
+      return null;
+    }
+
+    final matchResults = trainingMatches
+        .map((row) => MatchResult(
+              homeTeamId: row['home_team_id']?.toString() ?? '',
+              awayTeamId: row['away_team_id']?.toString() ?? '',
+              homeGoals: _parseGoals(row['home_goals']),
+              awayGoals: _parseGoals(row['away_goals']),
+              kickoff: row['kickoff_utc'] as DateTime?,
+            ))
+        .where((m) => m.homeTeamId.isNotEmpty && m.awayTeamId.isNotEmpty)
+        .toList();
+
+    final result = (matches: matchResults, asOf: boundary);
+    trainingDataCache[cacheKey] = result;
+    return result;
+  }
+
+  /// Wie [_teamStrengthFitFor], aber für den gepoolten globalen Fit.
+  Future<TeamStrengthFit?> _pooledTeamStrengthFitFor({
+    required List<Map<String, Object?>> leagues,
+    required ChronologicalSplit split,
+    double? halfLifeDays,
+    required Map<String, Object?> trainingDataCache,
+    required Map<double?, TeamStrengthFit?> fitCache,
+  }) async {
+    if (fitCache.containsKey(halfLifeDays)) return fitCache[halfLifeDays];
+
+    final trainingData = await _pooledTeamStrengthTrainingData(
+      leagues: leagues,
+      split: split,
+      trainingDataCache: trainingDataCache,
+    );
+    if (trainingData == null) {
+      fitCache[halfLifeDays] = null;
+      return null;
+    }
+
+    final fit = TeamStrengthEngine.fit(
+      trainingData.matches,
+      halfLifeDays: halfLifeDays,
+      asOf: trainingData.asOf,
+    );
+    fitCache[halfLifeDays] = fit;
+    return fit;
   }
 
   /// Fittet Team-Stärke (`TeamStrengthEngine`) EINMAL pro Liga aus echten,
