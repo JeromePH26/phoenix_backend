@@ -34,6 +34,21 @@ class LearningRunService {
 
   static const String lockName = 'learning_run';
 
+  /// Eigene, kleinere Mindest-Stichprobe für Dixon-Coles/Team-Stärke-
+  /// Challenger. `config.minValidationSample`/`minHoldoutSample` (Default 40)
+  /// sind für die ÄLTEREN, global gepoolten Engines kalibriert - Dixon-Coles
+  /// und Team-Stärke rechnen bewusst PRO LIGA (Kern des Engine-Umbaus, Plan
+  /// "wild-cuddling-hoare"), wo 40 Holdout-Spiele praktisch unerreichbar sind
+  /// (live beobachtet: selbst die datenreichste Liga im Backtest hatte nur 27
+  /// Holdout-Spiele, `bin/phoenix_team_strength_decay_search.dart`). Ohne
+  /// diese eigene Schwelle wird für diese beiden Engines NIE ein Challenger
+  /// angelegt - bestätigt durch drei aufeinanderfolgende Learning Runs mit
+  /// `challengers_created: 0`. Identisch zur bereits live validierten
+  /// Backtest-Schwelle. Betrifft NUR die Challenger-ERSTELLUNG - die
+  /// unveränderte, deutlich höhere `minPromotionSample` (Default 120)
+  /// entscheidet weiterhin allein über eine tatsächliche Beförderung.
+  static const int perLeagueEngineMinSample = 5;
+
   Future<Map<String, Object?>> run({required String triggerType}) async {
     // Ein abgebrochener oder noch gesperrter Learning-Run darf die
     // Initialisierung neuer, bereits produktiv verfügbarer Markt-Familien
@@ -582,8 +597,8 @@ class LearningRunService {
         // unabhängig vom attackWeight-Gitter-Budget unten. Bleibt reiner
         // Model-Lab-Schatten-Betrieb (PHOENIX_MODEL_PROMOTION_ENABLED),
         // portiert NICHT die produktive Simulation.
-        if (split.validation.length >= config.minValidationSample ||
-            split.holdout.length >= config.minHoldoutSample) {
+        if (split.validation.length >= perLeagueEngineMinSample ||
+            split.holdout.length >= perLeagueEngineMinSample) {
           final existingRhos = existingChallengers
               .map((c) => (c['weights'] as Map?)?['rho'])
               .whereType<num>()
@@ -691,8 +706,8 @@ class LearningRunService {
               split.validation.where((s) => s.hasGlobalMarketData).toList();
           final teamStrengthHoldout =
               split.holdout.where((s) => s.hasGlobalMarketData).toList();
-          if (teamStrengthValidation.length < config.minValidationSample &&
-              teamStrengthHoldout.length < config.minHoldoutSample) {
+          if (teamStrengthValidation.length < perLeagueEngineMinSample &&
+              teamStrengthHoldout.length < perLeagueEngineMinSample) {
             continue;
           }
 
