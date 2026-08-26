@@ -41,7 +41,10 @@ Future<void> main() async {
   final database = PhoenixDatabase(databaseUrl);
   final config = ModelLabConfig.fromEnvironment();
 
-  const minimumTrainingMatches = 40;
+  // Live gegen PHÖNIX-Daten getestet: bei 40 hatten nur 4 von 1233 Ligen
+  // genug Historie. 25 ist ein bewusster Kompromiss - noch genug Spiele für
+  // ein paar Iterationen des Fits, aber deutlich mehr Ligen im Sample.
+  const minimumTrainingMatches = 25;
   const minimumHoldoutMatches = 5;
 
   try {

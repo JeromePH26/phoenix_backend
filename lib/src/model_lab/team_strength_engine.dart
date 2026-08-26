@@ -93,8 +93,16 @@ class TeamStrengthEngine {
   /// innerhalb weniger Iterationen.
   static TeamStrengthFit fit(
     List<MatchResult> matches, {
-    int maxIterations = 100,
+    int maxIterations = 200,
     double convergenceTolerance = 1e-6,
+    // Live gegen PHÖNIX-Daten getestet (Plan "wild-cuddling-hoare", Phase
+    // 2): bei kleinen/ungleich verteilten Ligen (wenige Spiele pro Team)
+    // schwingt das ungedämpfte Fixpunktverfahren, statt zu konvergieren
+    // (100 Iterationen ohne Konvergenz beobachtet, z.B. MLS mit nur ~2-3
+    // Spielen pro Team). Unterrelaxation (nur ein Bruchteil des Schritts
+    // je Iteration übernehmen) ist die Standardlösung für genau dieses
+    // Oszillationsproblem bei IPF-artigen Fixpunktverfahren.
+    double dampingFactor = 0.5,
   }) {
     final teamIds = <String>{};
     for (final match in matches) {
@@ -138,6 +146,8 @@ class TeamStrengthEngine {
 
     for (; iterations < maxIterations; iterations++) {
       final previousAttack = Map<String, double>.from(attack);
+      final previousDefense = Map<String, double>.from(defense);
+      final previousHomeAdvantage = homeAdvantage;
 
       // Schritt 1: attack.
       final attackDenominator = <String, double>{
@@ -152,7 +162,8 @@ class TeamStrengthEngine {
       for (final id in teamIds) {
         final denominator = attackDenominator[id]!;
         if (denominator > 0) {
-          attack[id] = totalGoalsFor[id]! / denominator;
+          final target = totalGoalsFor[id]! / denominator;
+          attack[id] = attack[id]! + dampingFactor * (target - attack[id]!);
         }
       }
 
@@ -169,7 +180,8 @@ class TeamStrengthEngine {
       for (final id in teamIds) {
         final denominator = defenseDenominator[id]!;
         if (denominator > 0) {
-          defense[id] = totalGoalsAgainst[id]! / denominator;
+          final target = totalGoalsAgainst[id]! / denominator;
+          defense[id] = defense[id]! + dampingFactor * (target - defense[id]!);
         }
       }
 
@@ -179,7 +191,8 @@ class TeamStrengthEngine {
         expectedHomeGoals += attack[match.homeTeamId]! * defense[match.awayTeamId]!;
       }
       if (expectedHomeGoals > 0) {
-        homeAdvantage = totalHomeGoals / expectedHomeGoals;
+        final target = totalHomeGoals / expectedHomeGoals;
+        homeAdvantage = homeAdvantage + dampingFactor * (target - homeAdvantage);
       }
 
       // Schritt 4: Renormierung (Interpretierbarkeit, ändert keine
@@ -193,10 +206,16 @@ class TeamStrengthEngine {
         }
       }
 
-      var maxDelta = 0.0;
+      // Konvergenz braucht ALLE drei Parametergruppen, nicht nur attack -
+      // sonst kann die Schleife fälschlich abbrechen, während defense/
+      // homeAdvantage noch spürbar wandern (live an PHÖNIX-Daten
+      // beobachtet: attack stabilisierte sich früher als homeAdvantage).
+      var maxDelta = (homeAdvantage - previousHomeAdvantage).abs();
       for (final id in teamIds) {
-        final delta = (attack[id]! - previousAttack[id]!).abs();
-        if (delta > maxDelta) maxDelta = delta;
+        final attackDelta = (attack[id]! - previousAttack[id]!).abs();
+        if (attackDelta > maxDelta) maxDelta = attackDelta;
+        final defenseDelta = (defense[id]! - previousDefense[id]!).abs();
+        if (defenseDelta > maxDelta) maxDelta = defenseDelta;
       }
       if (maxDelta < convergenceTolerance) {
         converged = true;

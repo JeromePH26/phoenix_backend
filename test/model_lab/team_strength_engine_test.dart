@@ -116,7 +116,7 @@ void main() {
 
       final fit = TeamStrengthEngine.fit(matches);
       expect(fit.converged, isTrue);
-      expect(fit.iterations, lessThan(100));
+      expect(fit.iterations, lessThan(200));
     });
   });
 
