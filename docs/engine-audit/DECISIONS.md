@@ -21,6 +21,28 @@ is the checklist M11 works from — update the Status column as items land.
 | `simulations` param disagreement (cron 10k / route default 100k / DB `.clamp(100000,100000)`) | **Collapse to one constant** | M8 | Three layers disagree; the clamp wins — dead config surface (audit 05). | open |
 | `draw_no_bet_*` encoded 3-class in the Lab (byte-identical to 1x2), 2-class conditional live | **Frozen to 2-class conditional both sides** | **M0 — done** | Live and Lab scored a different quantity under the same name; Brier ≈ 0.63 was the 3-class-sum artefact (audit 04). | **done (this commit)** |
 
+## M2 (Learning Dataset Pipeline)
+
+- **M2a** (`b8fe376`): `phoenix_learning_dataset` table + `LearningDatasetClassifier`
+  + `bin/phoenix_{classify_dataset,dataset_report}.dart`. Every stored
+  `(fixture, market)` gets a `data_class` (production / learning / research /
+  quarantine) with an `excluded_reason` and `leakage_result` — the §49 audit
+  ledger. Populated in prod: 23,596 rows / 1,388 fixtures (prod 290, learn 345,
+  research 252, quarantine 501 — 481 of them `snapshot_after_kickoff`).
+- **M2b** (`14f0517` + fix `835bbdf`): `LearningRunService.run()` classifies the
+  dataset as a head step; `modelLabRawDataset` filters on
+  `data_class IN ('production','learning')` (with a "table empty" fallback);
+  `buildSamples*` pass the flag; the missing in-code `snapshot < kickoff` guard
+  added to `_phaseTwoDataByFixture`.
+- **M2c**: `database.settledShadowPredictions` now defaults to
+  `predicted_before_kickoff = TRUE` only — the ~9,400 post-hoc backfill rows
+  (already flagged FALSE at insert by `upsertSettledShadowPrediction`) no longer
+  pollute the monthly-review shadow-diff pool or the `/shadow-performance`
+  numbers. One-off prod UPDATE fixed 51 rows that were mis-flagged `TRUE`
+  (predicted after kickoff, still unsettled). `includePostHoc` param kept for a
+  deliberate raw view. Genuine pre-kickoff settled shadow predictions in prod:
+  ~915.
+
 ## M0 changes made in this commit
 
 **DNB definition freeze** — `draw_no_bet_home` / `draw_no_bet_away` are now a

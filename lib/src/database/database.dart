@@ -8768,14 +8768,24 @@ class PhoenixDatabase {
     );
   }
 
+  /// Gesettelte Shadow Predictions eines Modells. M2c: standardmäßig NUR
+  /// echte Vorab-Vorhersagen (`predicted_before_kickoff = TRUE`) - die
+  /// nachträglich per Backfill erzeugten Zeilen (live in Prod ~9.400) dürfen
+  /// nie in Promotion-Metriken oder die Shadow-Performance-Anzeige einfließen
+  /// (docs/engine-audit/02). `includePostHoc` nur für eine bewusste
+  /// Roh-Ansicht.
   Future<List<Map<String, Object?>>> settledShadowPredictions({
     required int modelVersionId,
+    bool includePostHoc = false,
   }) async {
     final db = await connection();
+    final beforeKickoffFilter =
+        includePostHoc ? '' : 'AND predicted_before_kickoff = TRUE';
     final result = await db.execute(
       Sql.named('''
         SELECT * FROM phoenix_shadow_predictions
         WHERE model_version_id = @model_version_id AND settled = TRUE
+          $beforeKickoffFilter
         ORDER BY kickoff ASC
       '''),
       parameters: {'model_version_id': modelVersionId},
