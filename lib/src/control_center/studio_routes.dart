@@ -437,6 +437,22 @@ class StudioRoutes {
       'divider',
       'spacer'
     };
+    const tones = {
+      'brand',
+      'teal',
+      'blue',
+      'green',
+      'amber',
+      'red',
+      'slate',
+      'white'
+    };
+    const surfaces = {'transparent', 'surface', 'dark', 'brand'};
+    const sizes = {'small', 'medium', 'large'};
+    const weights = {'regular', 'medium', 'bold'};
+    const paddings = {'none', 'small', 'medium', 'large'};
+    const radii = {'small', 'medium', 'large', 'pill'};
+    const borders = {'none', 'subtle', 'strong'};
     final cleaned = <Map<String, Object?>>[];
     for (final item in blocks) {
       if (item is! Map) return null;
@@ -450,6 +466,13 @@ class StudioRoutes {
       if (text.length > 300) return null;
       final align = props['align']?.toString();
       final spacing = props['spacing']?.toString();
+      final tone = props['tone']?.toString();
+      final surface = props['surface']?.toString();
+      final textSize = props['textSize']?.toString();
+      final textWeight = props['textWeight']?.toString();
+      final padding = props['padding']?.toString();
+      final radius = props['radius']?.toString();
+      final border = props['border']?.toString();
       cleaned.add({
         'id': id,
         'type': type,
@@ -462,6 +485,13 @@ class StudioRoutes {
           'spacing': const {'small', 'medium', 'large'}.contains(spacing)
               ? spacing
               : 'medium',
+          'tone': tones.contains(tone) ? tone : 'brand',
+          'surface': surfaces.contains(surface) ? surface : 'surface',
+          'textSize': sizes.contains(textSize) ? textSize : 'medium',
+          'textWeight': weights.contains(textWeight) ? textWeight : 'regular',
+          'padding': paddings.contains(padding) ? padding : 'medium',
+          'radius': radii.contains(radius) ? radius : 'medium',
+          'border': borders.contains(border) ? border : 'subtle',
         },
       });
     }
