@@ -4527,7 +4527,24 @@ class PhoenixDatabase {
             OR last_detail.created_at < NOW()
               - make_interval(hours => l.detail_refresh_hours)
           )
+          -- Ein Fixture ohne jede vorherige Anreicherung ist NUR vor dem
+          -- Anpfiff sinnvoll: der erste Snapshot nach Anpfiff ist fuer das
+          -- Model Lab leakage-behaftet (created_at >= kickoff_utc ->
+          -- timestamp_invalid, dauerhaft unbrauchbar) und fuer alles andere
+          -- wertlos, kostet aber ein API-Budget. Nach Anpfiff daher nur noch
+          -- echte Detail-Refreshes bereits angereicherter Spiele zulassen.
+          -- Live bestaetigt: 151 sonst verwertbare, abgerechnete Fixtures
+          -- gingen genau so verloren (ihr einziger Snapshot lag 1h-7d nach
+          -- Anpfiff, kein einziges hatte einen frueheren gueltigen).
+          AND (
+            m.kickoff_utc > NOW()
+            OR last_detail.created_at IS NOT NULL
+          )
         ORDER BY
+          -- Bevorstehende Anpfiffe zuerst: das feste Tagesbudget soll dahin,
+          -- wo noch ein gueltiger Pre-Match-Snapshot entstehen kann, bevor
+          -- das Spiel beginnt.
+          CASE WHEN m.kickoff_utc > NOW() THEN 0 ELSE 1 END,
           CASE l.collection_tier WHEN 'watchlist' THEN 1 ELSE 2 END,
           last_detail_at ASC,
           m.kickoff_utc ASC
@@ -4536,7 +4553,10 @@ class PhoenixDatabase {
       parameters: {
         'from_date': anchorDate.toUtc().subtract(const Duration(days: 7)),
         'until_date': anchorDate.toUtc().add(const Duration(days: 3)),
-        'limit': limit.clamp(1, 100),
+        // Deckt die vom Aufrufer uebergebenen maxFixtures (200 seit
+        // 2026-08-25) tatsaechlich ab; die alte Obergrenze 100 hat die
+        // Budget-Erhoehung stillschweigend halbiert.
+        'limit': limit.clamp(1, 300),
       },
     );
     return result
