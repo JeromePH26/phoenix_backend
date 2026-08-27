@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import '../database/database.dart';
+import '../model_lab/phoenix_global_engine.dart';
 
 class FootballEngineInputService {
   FootballEngineInputService({required this.database});
@@ -10,7 +11,7 @@ class FootballEngineInputService {
   // "gemini_context" bewusst entfernt: der KI-Kontext-Schritt ist
   // deaktiviert, dieser Dienst fällt immer auf die statistische Basis
   // zurück (siehe _normalize weiter unten).
-  static const modelVersion = 'goal_rate_normalization_v6_league_aware_baseline';
+  static const modelVersion = PhoenixGlobalEngine.version;
 
   // Bei sampleSize == k ist der Kandidat genau zur Hälfte Richtung Baseline
   // geglättet (n / (n + k) = 0.5). 8 Spiele als Halbwertspunkt heißt: eine
@@ -155,9 +156,8 @@ class FootballEngineInputService {
     // shrunkTowardsGlobal (model_lab/weight_config.dart).
     final homePlayedHome = _int(_map(availability['homePlayed'])['home']);
     final awayPlayedAway = _int(_map(availability['awayPlayed'])['away']);
-    final sampleSize = homePlayedHome < awayPlayedAway
-        ? homePlayedHome
-        : awayPlayedAway;
+    final sampleSize =
+        homePlayedHome < awayPlayedAway ? homePlayedHome : awayPlayedAway;
 
     final baseHome = _shrinkTowardsBaseline(
       calculatedHome ?? leagueBaselineHome,
@@ -183,8 +183,24 @@ class FootballEngineInputService {
         ? (_number(context['awayGoalDelta']) ?? 0).clamp(-0.15, 0.15).toDouble()
         : 0.0;
 
-    final expectedHome = (baseHome + homeDelta).clamp(0.20, 3.80).toDouble();
-    final expectedAway = (baseAway + awayDelta).clamp(0.20, 3.80).toDouble();
+    // Eine globale Engine erzeugt pro Spiel genau eine Torverteilung. Alle
+    // späteren Märkte entstehen ausschließlich daraus in der Simulation.
+    // Der frühere normalisierte Torwert bleibt nur als stabiler Fallback,
+    // wenn aus dem gespeicherten Pre-Match-Snapshot gar kein Global-Feature
+    // berechnet werden kann.
+    final globalEngine = PhoenixGlobalEngine.compute(
+      availability: availability,
+      homeTeamId: _string(payload['homeTeamId']),
+      awayTeamId: _string(payload['awayTeamId']),
+      safeHomeFallback: baseHome,
+      safeAwayFallback: baseAway,
+      leagueAvgHomeGoalsPerGame: leagueBaselineHome,
+      leagueAvgAwayGoalsPerGame: leagueBaselineAway,
+      homeContextDelta: homeDelta,
+      awayContextDelta: awayDelta,
+    );
+    final expectedHome = globalEngine.expectedHome;
+    final expectedAway = globalEngine.expectedAway;
 
     return {
       'fixtureId': fixtureId,
@@ -202,11 +218,7 @@ class FootballEngineInputService {
       'awayLogo': _string(payload['awayLogo']),
       'dataQuality': dataQuality,
       'modelVersion': modelVersion,
-      'sourceType': usesFallback
-          ? 'safe_baseline_fallback'
-          : thinSample
-              ? 'goal_rates_not_xg_thin_sample_shrunk'
-              : 'goal_rates_not_xg',
+      'sourceType': globalEngine.source,
       'realXgAvailable': availability['realXgAvailable'] == true,
       'raw': {
         'homeGoalsForAverageHome': homeFor,
@@ -216,11 +228,13 @@ class FootballEngineInputService {
       },
       'normalized': {
         'homeAttackStrength': _relativeStrength(homeFor, 1.35) ?? 1.0,
-        'homeDefenseStrength': _inverseRelativeStrength(homeAgainst, 1.35) ?? 1.0,
+        'homeDefenseStrength':
+            _inverseRelativeStrength(homeAgainst, 1.35) ?? 1.0,
         'awayAttackStrength': _relativeStrength(awayFor, 1.15) ?? 1.0,
-        'awayDefenseStrength': _inverseRelativeStrength(awayAgainst, 1.35) ?? 1.0,
-        'baseGoalRateExpectedHome': _round(baseHome),
-        'baseGoalRateExpectedAway': _round(baseAway),
+        'awayDefenseStrength':
+            _inverseRelativeStrength(awayAgainst, 1.35) ?? 1.0,
+        'baseGoalRateExpectedHome': _round(globalEngine.baseHome),
+        'baseGoalRateExpectedAway': _round(globalEngine.baseAway),
         'geminiHomeGoalDelta': _round(homeDelta),
         'geminiAwayGoalDelta': _round(awayDelta),
         'goalRateExpectedHome': _round(expectedHome),
@@ -233,6 +247,12 @@ class FootballEngineInputService {
         'leagueBaselineAway': _round(leagueBaselineAway),
         'leagueContextSampleSize': leagueSampleSize,
         'leagueContextApplied': leagueContextApplied,
+        'globalEngine': {
+          'version': PhoenixGlobalEngine.version,
+          'usesGlobalFeatures': globalEngine.usesGlobalFeatures,
+          'homeFeatureCoverage': globalEngine.homeFeatureCoverage,
+          'awayFeatureCoverage': globalEngine.awayFeatureCoverage,
+        },
       },
       'aiContext': context,
       // Section 10 (Claude AN2.txt, "KEIN GEMINI"): kein Warnhinweis mehr für
@@ -243,10 +263,14 @@ class FootballEngineInputService {
       // bestehen, falls ein kompatibler Kontext-Dienst künftig wieder
       // angebunden wird.
       'warnings': [
-        if (usesFallback) 'Torwerte fehlen teilweise; PHÖNIX nutzt eine neutrale Basis.',
+        if (usesFallback)
+          'Torwerte fehlen teilweise; PHÖNIX nutzt eine neutrale Basis.',
         if (thinSample)
           'Nur $sampleSize gespielte Partien als Datenbasis; Torerwartung wurde Richtung Liga-Normalwert geglättet.',
-        if (availability['realXgAvailable'] != true) 'Keine echten xG/xGA-Daten vorhanden.',
+        if (!globalEngine.usesGlobalFeatures)
+          'Globale Feature-Engine hatte keine ausreichenden Eingabedaten; PHÖNIX nutzt den stabilen Fallback.',
+        if (availability['realXgAvailable'] != true)
+          'Keine echten xG/xGA-Daten vorhanden.',
       ],
       'engineReady': true,
     };
@@ -277,7 +301,8 @@ class FootballEngineInputService {
   }) {
     final safeSampleSize = sampleSize < 0 ? 0 : sampleSize;
     final factor = safeSampleSize / (safeSampleSize + sampleSizeShrinkageK);
-    return double.parse((baseline + factor * (raw - baseline)).toStringAsFixed(3));
+    return double.parse(
+        (baseline + factor * (raw - baseline)).toStringAsFixed(3));
   }
 
   double _shrinkTowardsBaseline(
@@ -304,8 +329,7 @@ class FootballEngineInputService {
     if (leagueAvg == null) return globalBaseline;
     final safeSampleSize =
         leagueContextSampleSize < 0 ? 0 : leagueContextSampleSize;
-    final factor =
-        safeSampleSize / (safeSampleSize + leagueBaselineShrinkageK);
+    final factor = safeSampleSize / (safeSampleSize + leagueBaselineShrinkageK);
     return double.parse(
       (globalBaseline + factor * (leagueAvg - globalBaseline))
           .toStringAsFixed(3),
