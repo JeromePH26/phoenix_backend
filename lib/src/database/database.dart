@@ -2834,8 +2834,13 @@ class PhoenixDatabase {
       for (var i = start; i < end; i++) {
         final j = i - start;
         final r = rows[i];
-        valueClauses.add('(@f$j, @m$j, @s$j, @dc$j, @fc$j, @lc$j, @lr$j, '
-            '@sr$j, @dq$j, @cup$j, @er$j, @lg$j, @ko$j)');
+        // Explizite Casts nötig: bei durchgängig NULL-Spalten (z. B.
+        // feature_completeness in M2) kann Postgres den Typ sonst nicht
+        // ableiten und nimmt `text` an.
+        valueClauses.add('(@f$j::text, @m$j::text, @s$j::text, @dc$j::text, '
+            '@fc$j::double precision, @lc$j::boolean, @lr$j::text, '
+            '@sr$j::text, @dq$j::integer, @cup$j::boolean, @er$j::text, '
+            '@lg$j::text, @ko$j::timestamptz)');
         params['f$j'] = r.fixtureId;
         params['m$j'] = r.market;
         params['s$j'] = r.source;
