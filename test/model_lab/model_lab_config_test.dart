@@ -11,9 +11,10 @@ void main() {
       expect(config.promotionEnabled, isFalse);
     });
 
-    test('data quality minimum defaults to 50 (Section 23)', () {
+    test('data quality minimum defaults to 40 (Section 23; lowered 2026-08-27)',
+        () {
       final config = ModelLabConfig.fromEnvironment();
-      expect(config.minDataQuality, 50);
+      expect(config.minDataQuality, 40);
     });
 
     test('learning day defaults to Tuesday (Section 45)', () {

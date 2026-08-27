@@ -152,7 +152,13 @@ class ModelLabConfig {
       // Section 53: Default FALSE - keine Promotion ohne explizites Opt-in.
       promotionEnabled:
           readBool('PHOENIX_MODEL_PROMOTION_ENABLED', false),
-      minDataQuality: readInt('PHOENIX_MODEL_LAB_MIN_DATA_QUALITY', 50),
+      // Gesenkt 2026-08-27 von 50 auf 40: die Eligibility-Analyse gegen die
+      // Produktionsdaten zeigte 98 sonst voll verwertbare, abgerechnete
+      // Spiele mit Pre-Match-Snapshot im Bereich data_quality 40-49
+      // (Histogramm: darunter fällt es schnell ab, die 30 Spiele bei 0-9
+      // sind echter Datenmüll). 40 holt den knapp-drunter-Bereich rein,
+      // ohne die klar unbrauchbaren Snapshots aufzunehmen.
+      minDataQuality: readInt('PHOENIX_MODEL_LAB_MIN_DATA_QUALITY', 40),
       minLearningEligibleSamples:
           readInt('PHOENIX_MODEL_LAB_MIN_ELIGIBLE_SAMPLES', 50),
       leagueAdaptationSampleThreshold:
