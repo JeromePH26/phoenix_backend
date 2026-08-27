@@ -3,6 +3,7 @@ import 'global_goals_v1_engine.dart';
 import 'global_market_engine.dart';
 import 'learning_market.dart';
 import 'learning_sample.dart';
+import 'match_state.dart';
 import 'poisson_math.dart';
 import 'team_strength_engine.dart';
 import 'weight_config.dart';
@@ -497,14 +498,30 @@ class ModelEngine {
         );
       case _ModelEngineKind.teamStrength:
         if (!sample.hasGlobalMarketData) return null;
-        final goals = TeamStrengthEngine.expectedGoals(
+        // M3c: auch der Team-Stärke-Pfad läuft jetzt durch das gemeinsame
+        // MatchState-Objekt. Die Score-Matrix bleibt weiterhin die einzige
+        // Quelle für alle Marktwahrscheinlichkeiten; MatchState trägt nur
+        // die nachvollziehbaren Inputs und die Fallback-/Unsicherheitsdaten.
+        final matchState = MatchStateBuilder.fromTeamStrength(
           fit: _teamStrengthFit!,
           homeTeamId: sample.globalMarketHomeTeamId!,
           awayTeamId: sample.globalMarketAwayTeamId!,
+          leagueBaselineHome: sample.globalMarketLeagueAvgHomeGoals ?? 1.35,
+          leagueBaselineAway: sample.globalMarketLeagueAvgAwayGoals ?? 1.10,
+          // Das Fit wurde ausschließlich auf dem Trainingsfenster erstellt.
+          // Seine Teamanzahl ist der hier verfügbare, konservative Proxy für
+          // die effektive Stichprobe; M6 ersetzt das durch geeichte Intervalle.
+          effectiveSampleSize: _teamStrengthFit.attack.length.toDouble(),
+          coverage: sample.dataQuality.clamp(0, 100) / 100.0,
+          eloCoverage: _teamStrengthFit.priors.isNotEmpty,
         );
         return EngineReplica.evaluateGoals(
           market: market,
-          goals: (home: goals.home, away: goals.away, usedFallback: false),
+          goals: (
+            home: matchState.expectedGoalsHome,
+            away: matchState.expectedGoalsAway,
+            usedFallback: matchState.uncertainty.usedFallbackBaseline,
+          ),
         );
     }
   }
