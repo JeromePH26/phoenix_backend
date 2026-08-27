@@ -4988,17 +4988,37 @@ class PhoenixDatabase {
     );
   }
 
-  /// Analysierte, aber noch nicht final abgerechnete Spiele: Phase-2-Daten
-  /// liegen vor, der Anstoß ist alt genug für ein Endergebnis, und der
-  /// gespeicherte Status ist noch nicht final. Dieselbe Abfrage bedient sowohl
-  /// den einmaligen Backfill als auch den wiederkehrenden Tages-Check, damit
-  /// beide denselben "offen"-Begriff verwenden (Status, nicht Tore-NULL -
-  /// ein 0:0-Endstand hat sonst fälschlich weiter als offen gegolten).
-  /// Section 11: "Vor Start Kandidatenzahl ... zeigen" - dieselbe
-  /// WHERE-Klausel wie [footballMatchResultCandidates], nur als reine
-  /// COUNT-Abfrage ohne LIMIT, damit die UI vor dem Start weiß, wie viele
-  /// Spiele (und damit ungefähr wie viele Provider-Anfragen) ein Lauf
-  /// betreffen würde.
+  /// Gemeinsame WHERE-Klausel für [footballMatchResultCandidates] und
+  /// [footballMatchResultCandidateCount] - beide MÜSSEN denselben "offen"-
+  /// Begriff verwenden (Status, nicht Tore-NULL - ein 0:0-Endstand hat sonst
+  /// fälschlich weiter als offen gegolten).
+  ///
+  /// Ein Kandidat ist ein Spiel, dessen Anstoß alt genug für ein Endergebnis
+  /// ist, dessen gespeicherter Status noch nicht final ist, UND das PHÖNIX
+  /// überhaupt verfolgt - entweder über eine volle Phase-2-Detailanalyse
+  /// (`raw_json ? 'phaseTwo'`, der öffentliche Tipp-Pfad) ODER über einen
+  /// Model-Lab-Pre-Match-Snapshot (`football_engine_inputs`, den auch
+  /// Beobachtungs-/Datenpool-Ligen ohne Detailscan bekommen). Vorher fehlte
+  /// der zweite Zweig: Model-Lab-Fixtures ohne `phaseTwo` wurden nie
+  /// abgerechnet und blieben dauerhaft auf `NS` stehen - live bestätigt:
+  /// 325 solcher Spiele mit längst vergangenem Anpfiff, unsichtbar für das
+  /// Settlement, die dem Learning-Datensatz als `outcome_missing` fehlten.
+  static const _footballMatchResultCandidateWhere = '''
+    id <> ''
+    AND kickoff_utc <= NOW() - make_interval(hours => @hours)
+    AND status NOT IN ('FT','AET','PEN','AWD','WO','CANC','ABD')
+    AND (
+      raw_json ? 'phaseTwo'
+      OR EXISTS (
+        SELECT 1 FROM football_engine_inputs ei
+        WHERE ei.fixture_id = football_matches.id
+      )
+    )
+  ''';
+
+  /// Section 11: "Vor Start Kandidatenzahl ... zeigen" - reine COUNT-Abfrage
+  /// ohne LIMIT, damit die UI vor dem Start weiß, wie viele Spiele (und damit
+  /// ungefähr wie viele Provider-Anfragen) ein Lauf betreffen würde.
   Future<int> footballMatchResultCandidateCount({
     required int minHoursSinceKickoff,
   }) async {
@@ -5007,10 +5027,7 @@ class PhoenixDatabase {
       Sql.named('''
         SELECT COUNT(*) AS total
         FROM football_matches
-        WHERE raw_json ? 'phaseTwo'
-          AND id <> ''
-          AND kickoff_utc <= NOW() - make_interval(hours => @hours)
-          AND status NOT IN ('FT','AET','PEN','AWD','WO','CANC','ABD')
+        WHERE $_footballMatchResultCandidateWhere
       '''),
       parameters: {'hours': minHoursSinceKickoff.clamp(0, 24 * 30)},
     );
@@ -5027,11 +5044,8 @@ class PhoenixDatabase {
       Sql.named('''
         SELECT id, status
         FROM football_matches
-        WHERE raw_json ? 'phaseTwo'
-          AND id <> ''
-          AND kickoff_utc <= NOW() - make_interval(hours => @hours)
-          AND status NOT IN ('FT','AET','PEN','AWD','WO','CANC','ABD')
-        ORDER BY kickoff_utc ASC
+        WHERE $_footballMatchResultCandidateWhere
+        ORDER BY kickoff_utc DESC
         LIMIT @limit
       '''),
       parameters: {
