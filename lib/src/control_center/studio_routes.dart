@@ -19,6 +19,8 @@ class StudioRoutes {
 
   final PhoenixDatabase database;
   final ControlCenterAuthGuard guard;
+  bool _schemaReady = false;
+  Future<void>? _schemaInitializing;
 
   Router get router {
     final router = Router();
@@ -288,9 +290,15 @@ class StudioRoutes {
     return employee;
   }
 
-  Future<void> _ensureSchema() async {
-    final db = await database.connection();
-    await db.execute('''
+  Future<void> _ensureSchema() {
+    if (_schemaReady) return Future.value();
+    return _schemaInitializing ??= _createSchema();
+  }
+
+  Future<void> _createSchema() async {
+    try {
+      final db = await database.connection();
+      await db.execute('''
       CREATE TABLE IF NOT EXISTS studio_sections (
         section_key TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -303,7 +311,7 @@ class StudioRoutes {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     ''');
-    await db.execute('''
+      await db.execute('''
       CREATE TABLE IF NOT EXISTS studio_drafts (
         section_key TEXT PRIMARY KEY REFERENCES studio_sections(section_key) ON DELETE CASCADE,
         document JSONB NOT NULL,
@@ -311,7 +319,7 @@ class StudioRoutes {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     ''');
-    await db.execute('''
+      await db.execute('''
       CREATE TABLE IF NOT EXISTS studio_versions (
         id BIGSERIAL PRIMARY KEY,
         section_key TEXT NOT NULL REFERENCES studio_sections(section_key) ON DELETE CASCADE,
@@ -323,44 +331,53 @@ class StudioRoutes {
         UNIQUE(section_key, version_number)
       )
     ''');
-    await db.execute('''
+      await db.execute('''
       CREATE INDEX IF NOT EXISTS idx_studio_versions_section_version
       ON studio_versions (section_key, version_number DESC)
     ''');
-    const sections = [
-      (
-        'lineup',
-        'Aufstellung',
-        'Voraussichtliche oder bestätigte Teamaufstellungen.',
-        10
-      ),
-      (
-        'match_detail',
-        'Spielübersicht',
-        'Kopfbereich und Kerndaten eines Spiels.',
-        20
-      ),
-      ('form', 'Form', 'Formkurven und jüngste Spiele der Teams.', 30),
-      ('h2h', 'Direkter Vergleich', 'Vergangene Duelle der beiden Teams.', 40),
-      (
-        'historical_twins',
-        'Historische Zwillinge',
-        'Ähnliche historische Spielprofile.',
-        50
-      ),
-      ('injuries', 'Ausfälle', 'Verletzte und gesperrte Spieler.', 60),
-    ];
-    for (final section in sections) {
-      await db.execute(Sql.named('''
+      const sections = [
+        (
+          'lineup',
+          'Aufstellung',
+          'Voraussichtliche oder bestätigte Teamaufstellungen.',
+          10
+        ),
+        (
+          'match_detail',
+          'Spielübersicht',
+          'Kopfbereich und Kerndaten eines Spiels.',
+          20
+        ),
+        ('form', 'Form', 'Formkurven und jüngste Spiele der Teams.', 30),
+        (
+          'h2h',
+          'Direkter Vergleich',
+          'Vergangene Duelle der beiden Teams.',
+          40
+        ),
+        (
+          'historical_twins',
+          'Historische Zwillinge',
+          'Ähnliche historische Spielprofile.',
+          50
+        ),
+        ('injuries', 'Ausfälle', 'Verletzte und gesperrte Spieler.', 60),
+      ];
+      for (final section in sections) {
+        await db.execute(Sql.named('''
         INSERT INTO studio_sections (section_key, name, description, sort_order)
         VALUES (@key, @name, @description, @sort)
         ON CONFLICT (section_key) DO NOTHING
       '''), parameters: {
-        'key': section.$1,
-        'name': section.$2,
-        'description': section.$3,
-        'sort': section.$4,
-      });
+          'key': section.$1,
+          'name': section.$2,
+          'description': section.$3,
+          'sort': section.$4,
+        });
+      }
+      _schemaReady = true;
+    } finally {
+      if (!_schemaReady) _schemaInitializing = null;
     }
   }
 
