@@ -2662,26 +2662,92 @@ class PhoenixDatabase {
     );
   }
 
-  /// Batch-Upsert normalisierter Team-Aliase.
+  /// Batch-Upsert von `football_teams`-Zeilen (Multi-Row VALUES, 500er-
+  /// Batches) - für den einmaligen Backfill aus `football_matches`, sonst
+  /// 4500+ einzelne Roundtrips gegen die entfernte DB (Timeout).
+  Future<int> upsertFootballTeamsBatch(
+    List<({String teamId, String canonicalName, String country})> teams,
+  ) async {
+    if (teams.isEmpty) return 0;
+    final db = await connection();
+    var written = 0;
+    const batchSize = 500;
+    for (var start = 0; start < teams.length; start += batchSize) {
+      final end =
+          start + batchSize < teams.length ? start + batchSize : teams.length;
+      final valueClauses = <String>[];
+      final params = <String, Object?>{};
+      for (var i = start; i < end; i++) {
+        final j = i - start;
+        valueClauses.add('(@id$j::text, @name$j::text, @country$j::text)');
+        params['id$j'] = teams[i].teamId;
+        params['name$j'] = teams[i].canonicalName;
+        params['country$j'] = teams[i].country;
+      }
+      await db.execute(
+        Sql.named('''
+          INSERT INTO football_teams (team_id, canonical_name, country, last_seen)
+          SELECT v.id, v.name, v.country, NOW()
+          FROM (VALUES ${valueClauses.join(', ')}) AS v(id, name, country)
+          ON CONFLICT (team_id) DO UPDATE
+          SET canonical_name = EXCLUDED.canonical_name,
+              country = CASE WHEN EXCLUDED.country <> '' THEN EXCLUDED.country
+                             ELSE football_teams.country END,
+              last_seen = NOW()
+        '''),
+        parameters: params,
+      );
+      written += end - start;
+    }
+    return written;
+  }
+
+  /// Batch-Upsert normalisierter Team-Aliase. Innerhalb eines Laufs kann
+  /// derselbe normalisierte Name auf mehrere `team_id`s zeigen (z. B. mehrere
+  /// "Arsenal"). Solche mehrdeutigen Aliase werden verworfen (kein Raten),
+  /// eindeutige dedupliziert - `ON CONFLICT DO UPDATE` verträgt keinen
+  /// doppelten Konflikt-Key im selben Statement.
   Future<int> upsertTeamAliases(
     List<({String aliasNorm, String teamId, double confidence})> aliases, {
     required String source,
   }) async {
     if (aliases.isEmpty) return 0;
+    final teamByNorm = <String, String?>{}; // null = mehrdeutig
+    final confByNorm = <String, double>{};
+    for (final a in aliases) {
+      if (teamByNorm.containsKey(a.aliasNorm)) {
+        if (teamByNorm[a.aliasNorm] != a.teamId) teamByNorm[a.aliasNorm] = null;
+      } else {
+        teamByNorm[a.aliasNorm] = a.teamId;
+        confByNorm[a.aliasNorm] = a.confidence;
+      }
+    }
+    final deduped = <({String aliasNorm, String teamId, double confidence})>[
+      for (final e in teamByNorm.entries)
+        if (e.value != null)
+          (
+            aliasNorm: e.key,
+            teamId: e.value!,
+            confidence: confByNorm[e.key] ?? 1.0,
+          ),
+    ];
+    if (deduped.isEmpty) return 0;
+
     final db = await connection();
     var written = 0;
     const batchSize = 500;
-    for (var start = 0; start < aliases.length; start += batchSize) {
-      final end =
-          start + batchSize < aliases.length ? start + batchSize : aliases.length;
+    for (var start = 0; start < deduped.length; start += batchSize) {
+      final end = start + batchSize < deduped.length
+          ? start + batchSize
+          : deduped.length;
       final valueClauses = <String>[];
       final params = <String, Object?>{'src': source};
       for (var i = start; i < end; i++) {
         final j = i - start;
         valueClauses.add('(@a$j::text, @t$j::text, @c$j::double precision)');
-        params['a$j'] = aliases[i].aliasNorm;
-        params['t$j'] = aliases[i].teamId;
-        params['c$j'] = aliases[i].confidence;
+        params['a$j'] = deduped[i].aliasNorm;
+        params['t$j'] = deduped[i].teamId;
+        params['c$j'] = deduped[i].confidence;
       }
       await db.execute(
         Sql.named('''

@@ -46,8 +46,8 @@ Future<void> main(List<String> args) async {
       if (c.isNotEmpty) country.putIfAbsent(id, () => c);
     }
 
-    var teamsWritten = 0;
-    var aliasesWritten = 0;
+    final teamBatch =
+        <({String teamId, String canonicalName, String country})>[];
     final aliasBatch =
         <({String aliasNorm, String teamId, double confidence})>[];
 
@@ -56,14 +56,11 @@ Future<void> main(List<String> args) async {
       final canonical = entry.value.entries
           .reduce((a, b) => a.value >= b.value ? a : b)
           .key;
-      if (write) {
-        await database.upsertFootballTeam(
-          teamId: teamId,
-          canonicalName: canonical,
-          country: country[teamId] ?? '',
-        );
-      }
-      teamsWritten++;
+      teamBatch.add((
+        teamId: teamId,
+        canonicalName: canonical,
+        country: country[teamId] ?? '',
+      ));
       // Ein Selbst-Alias pro beobachteter Namensvariante.
       for (final name in entry.value.keys) {
         final norm = TeamNameResolver.normalize(name);
@@ -72,13 +69,14 @@ Future<void> main(List<String> args) async {
       }
     }
 
-    if (write && aliasBatch.isNotEmpty) {
+    var teamsWritten = teamBatch.length;
+    var aliasesWritten = aliasBatch.length;
+    if (write) {
+      teamsWritten = await database.upsertFootballTeamsBatch(teamBatch);
       aliasesWritten = await database.upsertTeamAliases(
         aliasBatch,
         source: 'football_matches',
       );
-    } else {
-      aliasesWritten = aliasBatch.length;
     }
 
     stdout.writeln('== football_teams-Backfill ==');
