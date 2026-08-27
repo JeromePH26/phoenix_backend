@@ -84,23 +84,31 @@ class StudioRoutes {
       '''), parameters: {'id': section['active_version_id']});
       return jsonResponse({
         'section': _sectionSummary(section),
-        'draft': draftResult.isEmpty ? null : {
-          'document': _document(draftResult.first.toColumnMap()['document']),
-          'updatedAt': draftResult.first.toColumnMap()['updated_at'],
-          'updatedBy': draftResult.first.toColumnMap()['updated_by'],
-        },
-        'published': published.isEmpty ? null : {
-          'document': _document(published.first.toColumnMap()['document']),
-          'version': published.first.toColumnMap()['version_number'],
-          'createdAt': published.first.toColumnMap()['created_at'],
-          'createdBy': published.first.toColumnMap()['created_by'],
-        },
+        'draft': draftResult.isEmpty
+            ? null
+            : {
+                'document':
+                    _document(draftResult.first.toColumnMap()['document']),
+                'updatedAt':
+                    _timestamp(draftResult.first.toColumnMap()['updated_at']),
+                'updatedBy': draftResult.first.toColumnMap()['updated_by'],
+              },
+        'published': published.isEmpty
+            ? null
+            : {
+                'document':
+                    _document(published.first.toColumnMap()['document']),
+                'version': published.first.toColumnMap()['version_number'],
+                'createdAt':
+                    _timestamp(published.first.toColumnMap()['created_at']),
+                'createdBy': published.first.toColumnMap()['created_by'],
+              },
         'versions': versions.map((row) {
           final item = row.toColumnMap();
           return {
             'id': item['id'],
             'version': item['version_number'],
-            'createdAt': item['created_at'],
+            'createdAt': _timestamp(item['created_at']),
             'createdBy': item['created_by'],
             'note': item['change_note'],
           };
@@ -119,7 +127,8 @@ class StudioRoutes {
       final body = await _body(request);
       if (body == null) return _badRequest('Ungültige Eingabe.');
       final status = body['status']?.toString() ?? '';
-      if (!const {'active', 'disabled', 'draft', 'published'}.contains(status)) {
+      if (!const {'active', 'disabled', 'draft', 'published'}
+          .contains(status)) {
         return _badRequest('Bitte einen gültigen Bereichsstatus wählen.');
       }
       final previous = await _section(key);
@@ -129,8 +138,11 @@ class StudioRoutes {
         UPDATE studio_sections SET status = @status, updated_at = NOW()
         WHERE section_key = @key
       '''), parameters: {'status': status, 'key': key});
-      await _audit(actor, action: 'studio.section_status_changed', key: key,
-          previous: {'status': previous['status']}, next: {'status': status});
+      await _audit(actor,
+          action: 'studio.section_status_changed',
+          key: key,
+          previous: {'status': previous['status']},
+          next: {'status': status});
       return _sectionDetail(request, key);
     } catch (error) {
       return _error(error);
@@ -146,7 +158,8 @@ class StudioRoutes {
       final body = await _body(request);
       if (body == null) return _badRequest('Ungültige Eingabe.');
       final document = _validatedDocument(body['document']);
-      if (document == null) return _badRequest('Der Entwurf enthält ungültige Bausteine.');
+      if (document == null)
+        return _badRequest('Der Entwurf enthält ungültige Bausteine.');
       final db = await database.connection();
       await db.execute(Sql.named('''
         INSERT INTO studio_drafts (section_key, document, updated_by, updated_at)
@@ -165,9 +178,14 @@ class StudioRoutes {
             updated_at = NOW()
         WHERE section_key = @key
       '''), parameters: {'key': key});
-      await _audit(actor, action: 'studio.draft_saved', key: key,
+      await _audit(actor,
+          action: 'studio.draft_saved',
+          key: key,
           next: {'blockCount': document['blocks'].length});
-      return jsonResponse({'status': 'saved', 'savedAt': DateTime.now().toUtc().toIso8601String()});
+      return jsonResponse({
+        'status': 'saved',
+        'savedAt': DateTime.now().toUtc().toIso8601String()
+      });
     } catch (error) {
       return _error(error);
     }
@@ -184,10 +202,13 @@ class StudioRoutes {
       final draft = await db.execute(Sql.named('''
         SELECT document FROM studio_drafts WHERE section_key = @key
       '''), parameters: {'key': key});
-      if (draft.isEmpty) return _badRequest('Es gibt keinen Entwurf zum Veröffentlichen.');
-      final document = _validatedDocument(_document(draft.first.toColumnMap()['document']));
+      if (draft.isEmpty)
+        return _badRequest('Es gibt keinen Entwurf zum Veröffentlichen.');
+      final document =
+          _validatedDocument(_document(draft.first.toColumnMap()['document']));
       if (document == null || document['blocks'].isEmpty) {
-        return _badRequest('Der Entwurf braucht mindestens einen gültigen Baustein.');
+        return _badRequest(
+            'Der Entwurf braucht mindestens einen gültigen Baustein.');
       }
       final body = await _body(request) ?? const <String, dynamic>{};
       final note = body['note']?.toString().trim();
@@ -196,15 +217,19 @@ class StudioRoutes {
           SELECT COALESCE(MAX(version_number), 0) + 1 AS next_version
           FROM studio_versions WHERE section_key = @key
         '''), parameters: {'key': key});
-        final version = (versionResult.first.toColumnMap()['next_version'] as num).toInt();
+        final version =
+            (versionResult.first.toColumnMap()['next_version'] as num).toInt();
         final inserted = await tx.execute(Sql.named('''
           INSERT INTO studio_versions
             (section_key, version_number, document, created_by, change_note)
           VALUES (@key, @version, CAST(@document AS JSONB), @by, @note)
           RETURNING id
         '''), parameters: {
-          'key': key, 'version': version, 'document': jsonEncode(document),
-          'by': actor.login, 'note': note?.isEmpty == true ? null : note,
+          'key': key,
+          'version': version,
+          'document': jsonEncode(document),
+          'by': actor.login,
+          'note': note?.isEmpty == true ? null : note,
         });
         final id = inserted.first.toColumnMap()['id'];
         await tx.execute(Sql.named('''
@@ -214,15 +239,19 @@ class StudioRoutes {
         '''), parameters: {'id': id, 'key': key});
         return {'id': id, 'version': version};
       });
-      await _audit(actor, action: 'studio.version_published', key: key,
-          previous: {'activeVersionId': section['active_version_id']}, next: result);
+      await _audit(actor,
+          action: 'studio.version_published',
+          key: key,
+          previous: {'activeVersionId': section['active_version_id']},
+          next: result);
       return jsonResponse({'status': 'published', ...result});
     } catch (error) {
       return _error(error);
     }
   }
 
-  Future<Response> _rollback(Request request, String key, String versionText) async {
+  Future<Response> _rollback(
+      Request request, String key, String versionText) async {
     final actor = await _actor(request, permission: 'release.manage');
     if (actor is Response) return actor;
     try {
@@ -241,7 +270,9 @@ class StudioRoutes {
         SET active_version_id = @id, status = 'published', updated_at = NOW()
         WHERE section_key = @key
       '''), parameters: {'id': versionId, 'key': key});
-      await _audit(actor, action: 'studio.version_restored', key: key,
+      await _audit(actor,
+          action: 'studio.version_restored',
+          key: key,
           next: {'version': version});
       return jsonResponse({'status': 'restored', 'version': version});
     } catch (error) {
@@ -297,11 +328,26 @@ class StudioRoutes {
       ON studio_versions (section_key, version_number DESC)
     ''');
     const sections = [
-      ('lineup', 'Aufstellung', 'Voraussichtliche oder bestätigte Teamaufstellungen.', 10),
-      ('match_detail', 'Spielübersicht', 'Kopfbereich und Kerndaten eines Spiels.', 20),
+      (
+        'lineup',
+        'Aufstellung',
+        'Voraussichtliche oder bestätigte Teamaufstellungen.',
+        10
+      ),
+      (
+        'match_detail',
+        'Spielübersicht',
+        'Kopfbereich und Kerndaten eines Spiels.',
+        20
+      ),
       ('form', 'Form', 'Formkurven und jüngste Spiele der Teams.', 30),
       ('h2h', 'Direkter Vergleich', 'Vergangene Duelle der beiden Teams.', 40),
-      ('historical_twins', 'Historische Zwillinge', 'Ähnliche historische Spielprofile.', 50),
+      (
+        'historical_twins',
+        'Historische Zwillinge',
+        'Ähnliche historische Spielprofile.',
+        50
+      ),
       ('injuries', 'Ausfälle', 'Verletzte und gesperrte Spieler.', 60),
     ];
     for (final section in sections) {
@@ -310,8 +356,10 @@ class StudioRoutes {
         VALUES (@key, @name, @description, @sort)
         ON CONFLICT (section_key) DO NOTHING
       '''), parameters: {
-        'key': section.$1, 'name': section.$2,
-        'description': section.$3, 'sort': section.$4,
+        'key': section.$1,
+        'name': section.$2,
+        'description': section.$3,
+        'sort': section.$4,
       });
     }
   }
@@ -326,16 +374,25 @@ class StudioRoutes {
       LEFT JOIN studio_drafts d ON d.section_key = s.section_key
       WHERE s.section_key = @key
     '''), parameters: {'key': key});
-    return result.isEmpty ? null : Map<String, Object?>.from(result.first.toColumnMap());
+    return result.isEmpty
+        ? null
+        : Map<String, Object?>.from(result.first.toColumnMap());
   }
 
   Map<String, Object?> _sectionSummary(Map<String, Object?> row) => {
-    'key': row['section_key'], 'name': row['name'],
-    'description': row['description'], 'status': row['status'],
-    'updatedAt': row['updated_at'], 'draftUpdatedAt': row['draft_updated_at'],
-    'draftUpdatedBy': row['draft_updated_by'], 'publishedVersion': row['published_version'],
-    'publishedAt': row['published_at'],
-  };
+        'key': row['section_key'],
+        'name': row['name'],
+        'description': row['description'],
+        'status': row['status'],
+        'updatedAt': _timestamp(row['updated_at']),
+        'draftUpdatedAt': _timestamp(row['draft_updated_at']),
+        'draftUpdatedBy': row['draft_updated_by'],
+        'publishedVersion': row['published_version'],
+        'publishedAt': _timestamp(row['published_at']),
+      };
+
+  String? _timestamp(Object? value) =>
+      value is DateTime ? value.toUtc().toIso8601String() : value?.toString();
 
   Map<String, dynamic> _document(Object? value) {
     if (value is Map) return Map<String, dynamic>.from(value);
@@ -352,25 +409,42 @@ class StudioRoutes {
     final document = raw is Map ? Map<String, dynamic>.from(raw) : null;
     final blocks = document?['blocks'];
     if (blocks is! List || blocks.length > 40) return null;
-    const allowed = {'heading', 'text', 'card', 'button', 'image', 'team_badge', 'stat_row', 'divider', 'spacer'};
+    const allowed = {
+      'heading',
+      'text',
+      'card',
+      'button',
+      'image',
+      'team_badge',
+      'stat_row',
+      'divider',
+      'spacer'
+    };
     final cleaned = <Map<String, Object?>>[];
     for (final item in blocks) {
       if (item is! Map) return null;
       final type = item['type']?.toString() ?? '';
       final id = item['id']?.toString() ?? '';
       if (!allowed.contains(type) || id.isEmpty || id.length > 80) return null;
-      final props = item['props'] is Map ? Map<String, Object?>.from(item['props'] as Map) : <String, Object?>{};
+      final props = item['props'] is Map
+          ? Map<String, Object?>.from(item['props'] as Map)
+          : <String, Object?>{};
       final text = props['text']?.toString() ?? '';
       if (text.length > 300) return null;
       final align = props['align']?.toString();
       final spacing = props['spacing']?.toString();
       cleaned.add({
-        'id': id, 'type': type,
+        'id': id,
+        'type': type,
         'props': {
           'text': text,
-          'align': const {'left', 'center', 'right'}.contains(align) ? align : 'left',
+          'align': const {'left', 'center', 'right'}.contains(align)
+              ? align
+              : 'left',
           'visible': props['visible'] is bool ? props['visible'] : true,
-          'spacing': const {'small', 'medium', 'large'}.contains(spacing) ? spacing : 'medium',
+          'spacing': const {'small', 'medium', 'large'}.contains(spacing)
+              ? spacing
+              : 'medium',
         },
       });
     }
@@ -381,17 +455,34 @@ class StudioRoutes {
     try {
       final decoded = jsonDecode(await request.readAsString());
       return decoded is Map ? Map<String, dynamic>.from(decoded) : null;
-    } catch (_) { return null; }
+    } catch (_) {
+      return null;
+    }
   }
 
-  Future<void> _audit(dynamic actor, {required String action, required String key,
-      Map<String, Object?>? previous, Map<String, Object?>? next}) =>
-      database.insertAdminAuditLog(employeeId: actor.id, employeeLogin: actor.login,
-        area: 'studio', objectType: 'studio_section', objectId: key,
-        action: action, previousValue: previous, newValue: next);
+  Future<void> _audit(dynamic actor,
+          {required String action,
+          required String key,
+          Map<String, Object?>? previous,
+          Map<String, Object?>? next}) =>
+      database.insertAdminAuditLog(
+          employeeId: actor.id,
+          employeeLogin: actor.login,
+          area: 'studio',
+          objectType: 'studio_section',
+          objectId: key,
+          action: action,
+          previousValue: previous,
+          newValue: next);
 
-  Response _forbidden() => jsonResponse({'error': 'Keine Berechtigung für PHÖNIX Studio.'}, statusCode: 403);
-  Response _notFound() => jsonResponse({'error': 'Studio-Bereich nicht gefunden.'}, statusCode: 404);
-  Response _badRequest(String message) => jsonResponse({'error': message}, statusCode: 400);
-  Response _error(Object error) => jsonResponse({'error': error.toString()}, statusCode: 500);
+  Response _forbidden() =>
+      jsonResponse({'error': 'Keine Berechtigung für PHÖNIX Studio.'},
+          statusCode: 403);
+  Response _notFound() =>
+      jsonResponse({'error': 'Studio-Bereich nicht gefunden.'},
+          statusCode: 404);
+  Response _badRequest(String message) =>
+      jsonResponse({'error': message}, statusCode: 400);
+  Response _error(Object error) =>
+      jsonResponse({'error': error.toString()}, statusCode: 500);
 }
