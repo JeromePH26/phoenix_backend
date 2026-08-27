@@ -1120,6 +1120,7 @@ class PhoenixDatabase {
     await _migrateUserAccounts(db);
     await _migrateFootballAssetsSchema(db);
     await _migrateHistoricalLinkage(db);
+    await _migrateLearningDataset(db);
 
     await db.execute('''
       INSERT INTO app_meta (key, value)
@@ -2756,6 +2757,121 @@ class PhoenixDatabase {
           FROM (VALUES ${valueClauses.join(', ')}) AS v(a, t, c)
           ON CONFLICT (alias_norm, source) DO UPDATE
           SET team_id = EXCLUDED.team_id, confidence = EXCLUDED.confidence
+        '''),
+        parameters: params,
+      );
+      written += end - start;
+    }
+    return written;
+  }
+
+  /// M2 (docs/PHASE1_ENGINE_AUDIT.md, AN2 §24-32): die eine Tabelle, die
+  /// entscheidet, wofür jede `(fixture, market, source)`-Zeile verwendet
+  /// werden darf. Ersetzt die verstreute Inline-SQL-Filterung in
+  /// `modelLabRawDataset()` und speichert - anders als
+  /// `phoenix_match_learning_flags` (nur eligible=true) - AUCH die
+  /// ausgeschlossenen Zeilen mit Grund (§49-Audit). Rein additiv.
+  Future<void> _migrateLearningDataset(Connection db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS phoenix_learning_dataset (
+        fixture_id TEXT NOT NULL,
+        market TEXT NOT NULL,
+        source TEXT NOT NULL DEFAULT 'live',
+        data_class TEXT NOT NULL
+          CHECK (data_class IN ('production','learning','research','quarantine')),
+        feature_completeness DOUBLE PRECISION,
+        leakage_checked BOOLEAN NOT NULL DEFAULT FALSE,
+        leakage_result TEXT,
+        snapshot_ref TEXT,
+        data_quality INTEGER,
+        is_cup BOOLEAN NOT NULL DEFAULT FALSE,
+        excluded_reason TEXT,
+        league_id TEXT,
+        kickoff TIMESTAMPTZ,
+        classified_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (fixture_id, market, source)
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_phoenix_learning_dataset_class
+      ON phoenix_learning_dataset (data_class, market)
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_phoenix_learning_dataset_league
+      ON phoenix_learning_dataset (league_id, data_class)
+    ''');
+  }
+
+  /// Batch-Upsert klassifizierter Dataset-Zeilen (500er-Batches).
+  Future<int> upsertLearningDatasetRows(
+    List<
+            ({
+              String fixtureId,
+              String market,
+              String source,
+              String dataClass,
+              double? featureCompleteness,
+              bool leakageChecked,
+              String? leakageResult,
+              String? snapshotRef,
+              int? dataQuality,
+              bool isCup,
+              String? excludedReason,
+              String? leagueId,
+              DateTime? kickoff,
+            })>
+        rows,
+  ) async {
+    if (rows.isEmpty) return 0;
+    final db = await connection();
+    var written = 0;
+    const batchSize = 500;
+    for (var start = 0; start < rows.length; start += batchSize) {
+      final end =
+          start + batchSize < rows.length ? start + batchSize : rows.length;
+      final valueClauses = <String>[];
+      final params = <String, Object?>{};
+      for (var i = start; i < end; i++) {
+        final j = i - start;
+        final r = rows[i];
+        valueClauses.add('(@f$j, @m$j, @s$j, @dc$j, @fc$j, @lc$j, @lr$j, '
+            '@sr$j, @dq$j, @cup$j, @er$j, @lg$j, @ko$j)');
+        params['f$j'] = r.fixtureId;
+        params['m$j'] = r.market;
+        params['s$j'] = r.source;
+        params['dc$j'] = r.dataClass;
+        params['fc$j'] = r.featureCompleteness;
+        params['lc$j'] = r.leakageChecked;
+        params['lr$j'] = r.leakageResult;
+        params['sr$j'] = r.snapshotRef;
+        params['dq$j'] = r.dataQuality;
+        params['cup$j'] = r.isCup;
+        params['er$j'] = r.excludedReason;
+        params['lg$j'] = r.leagueId;
+        params['ko$j'] = r.kickoff?.toUtc();
+      }
+      await db.execute(
+        Sql.named('''
+          INSERT INTO phoenix_learning_dataset
+            (fixture_id, market, source, data_class, feature_completeness,
+             leakage_checked, leakage_result, snapshot_ref, data_quality,
+             is_cup, excluded_reason, league_id, kickoff, classified_at)
+          SELECT v.f, v.m, v.s, v.dc, v.fc, v.lc, v.lr, v.sr, v.dq, v.cup,
+                 v.er, v.lg, v.ko, NOW()
+          FROM (VALUES ${valueClauses.join(', ')})
+            AS v(f, m, s, dc, fc, lc, lr, sr, dq, cup, er, lg, ko)
+          ON CONFLICT (fixture_id, market, source) DO UPDATE
+          SET data_class = EXCLUDED.data_class,
+              feature_completeness = EXCLUDED.feature_completeness,
+              leakage_checked = EXCLUDED.leakage_checked,
+              leakage_result = EXCLUDED.leakage_result,
+              snapshot_ref = EXCLUDED.snapshot_ref,
+              data_quality = EXCLUDED.data_quality,
+              is_cup = EXCLUDED.is_cup,
+              excluded_reason = EXCLUDED.excluded_reason,
+              league_id = EXCLUDED.league_id,
+              kickoff = EXCLUDED.kickoff,
+              classified_at = NOW()
         '''),
         parameters: params,
       );
