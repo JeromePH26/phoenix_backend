@@ -211,6 +211,7 @@ class MonthlyReviewService {
         best = {
           'challenger': challenger,
           'combinedSample': combinedDifferences.length,
+          'shadowSample': shadowPair.length,
           'uncertainty': uncertainty,
           'holdoutComparison': holdoutComparison,
           'calibrationGate': calibrationGate,
@@ -236,6 +237,7 @@ class MonthlyReviewService {
 
     final bestChallenger = best['challenger'] as Map<String, Object?>;
     final combinedSample = best['combinedSample'] as int;
+    final shadowSample = best['shadowSample'] as int;
     final uncertainty = best['uncertainty'] as PairedUncertaintyResult;
     final calibrationGate = best['calibrationGate'] as _CalibrationPromotionGate;
 
@@ -245,6 +247,10 @@ class MonthlyReviewService {
       recommendation = 'NICHT_GENUG_DATEN';
       reason = 'Sample noch zu klein ($combinedSample von '
           '${config.minPromotionSample} benötigten Out-of-Sample-Matches).';
+    } else if (shadowSample < config.minShadowSample) {
+      recommendation = 'SHADOW_UNZUREICHEND';
+      reason = 'Zu wenige echte Pre-Match-Shadow-Vorhersagen ($shadowSample '
+          'von mindestens ${config.minShadowSample}).';
     } else if (!calibrationGate.isEligible) {
       recommendation = 'KALIBRIERUNG_UNZUREICHEND';
       reason = calibrationGate.reason;
