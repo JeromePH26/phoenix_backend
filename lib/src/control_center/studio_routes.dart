@@ -533,7 +533,9 @@ class StudioRoutes {
         await db.execute(Sql.named('''
         INSERT INTO studio_sections (section_key, name, description, category, app_path, sort_order)
         VALUES (@key, @name, @description, @category, @path, @sort)
-        ON CONFLICT (section_key) DO NOTHING
+        ON CONFLICT (section_key) DO UPDATE SET
+          category = EXCLUDED.category,
+          app_path = EXCLUDED.app_path
       '''), parameters: {
           'key': section.$1,
           'name': section.$2,
