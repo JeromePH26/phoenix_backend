@@ -25,6 +25,7 @@ class StudioRoutes {
   Router get router {
     final router = Router();
     router.get('/sections', _listSections);
+    router.post('/sections', _createSection);
     router.get('/sections/<key>', _sectionDetail);
     router.patch('/sections/<key>', _updateSection);
     router.put('/sections/<key>/draft', _saveDraft);
@@ -40,7 +41,8 @@ class StudioRoutes {
       await _ensureSchema();
       final db = await database.connection();
       final result = await db.execute('''
-        SELECT s.section_key, s.name, s.description, s.status,
+        SELECT s.section_key, s.name, s.description, s.category, s.app_path,
+               s.is_custom, s.status,
                s.updated_at, d.updated_at AS draft_updated_at,
                d.updated_by AS draft_updated_by,
                v.version_number AS published_version,
@@ -56,6 +58,52 @@ class StudioRoutes {
                 _sectionSummary(Map<String, Object?>.from(row.toColumnMap())))
             .toList(),
       });
+    } catch (error) {
+      return _error(error);
+    }
+  }
+
+  Future<Response> _createSection(Request request) async {
+    final actor = await _actor(request, permission: 'appControl.manage');
+    if (actor is Response) return actor;
+    try {
+      await _ensureSchema();
+      final body = await _body(request);
+      if (body == null) return _badRequest('Ungültige Eingabe.');
+      final name = body['name']?.toString().trim() ?? '';
+      final description = body['description']?.toString().trim() ?? '';
+      final category = body['category']?.toString().trim() ?? '';
+      final appPath = body['appPath']?.toString().trim() ?? '';
+      final key = _sectionKey(body['key']?.toString() ?? name);
+      if (name.isEmpty ||
+          name.length > 80 ||
+          description.isEmpty ||
+          description.length > 240 ||
+          category.isEmpty ||
+          key == null) {
+        return _badRequest(
+            'Name, Beschreibung, Kategorie und gültiger Schlüssel sind erforderlich.');
+      }
+      if (await _section(key) != null)
+        return _badRequest('Dieser Bereich existiert bereits.');
+      final db = await database.connection();
+      await db.execute(Sql.named('''
+        INSERT INTO studio_sections
+          (section_key, name, description, category, app_path, is_custom, sort_order)
+        VALUES (@key, @name, @description, @category, @path, TRUE,
+          (SELECT COALESCE(MAX(sort_order), 0) + 10 FROM studio_sections))
+      '''), parameters: {
+        'key': key,
+        'name': name,
+        'description': description,
+        'category': category,
+        'path': appPath.isEmpty ? null : appPath
+      });
+      await _audit(actor,
+          action: 'studio.section_created',
+          key: key,
+          next: {'name': name, 'category': category, 'appPath': appPath});
+      return _sectionDetail(request, key);
     } catch (error) {
       return _error(error);
     }
@@ -303,6 +351,9 @@ class StudioRoutes {
         section_key TEXT PRIMARY KEY,
         name TEXT NOT NULL,
         description TEXT NOT NULL,
+        category TEXT NOT NULL DEFAULT 'Allgemein',
+        app_path TEXT NULL,
+        is_custom BOOLEAN NOT NULL DEFAULT FALSE,
         status TEXT NOT NULL DEFAULT 'disabled'
           CHECK (status IN ('active', 'disabled', 'draft', 'published')),
         sort_order INTEGER NOT NULL DEFAULT 0,
@@ -311,6 +362,12 @@ class StudioRoutes {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     ''');
+      await db.execute(
+          'ALTER TABLE studio_sections ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT \'Allgemein\'');
+      await db.execute(
+          'ALTER TABLE studio_sections ADD COLUMN IF NOT EXISTS app_path TEXT NULL');
+      await db.execute(
+          'ALTER TABLE studio_sections ADD COLUMN IF NOT EXISTS is_custom BOOLEAN NOT NULL DEFAULT FALSE');
       await db.execute('''
       CREATE TABLE IF NOT EXISTS studio_drafts (
         section_key TEXT PRIMARY KEY REFERENCES studio_sections(section_key) ON DELETE CASCADE,
@@ -362,16 +419,127 @@ class StudioRoutes {
           50
         ),
         ('injuries', 'Ausfälle', 'Verletzte und gesperrte Spieler.', 60),
+        (
+          'home_overview',
+          'Startseite',
+          'Karten, Kennzahlen und Einstiegsbereich.',
+          70
+        ),
+        (
+          'games_list',
+          'Spieleübersicht',
+          'Tagesliste, Filter und Spielkarten.',
+          80
+        ),
+        (
+          'live_ticker',
+          'Live-Ticker',
+          'Live-Spiele, Ereignisse und Spielstand.',
+          90
+        ),
+        (
+          'recommendations',
+          'PHÖNIX Empfehlungen',
+          'Top-Tipps und Begründungen.',
+          100
+        ),
+        (
+          'best_markets',
+          'Beste Märkte',
+          'Marktübersicht und Wahrscheinlichkeiten.',
+          110
+        ),
+        (
+          'value_calculator',
+          'Value-Rechner',
+          'Quote, Wahrscheinlichkeit und Einsatz.',
+          120
+        ),
+        (
+          'combo_builder',
+          'Kombi-Builder',
+          'Auswahl und Darstellung einer Kombination.',
+          130
+        ),
+        (
+          'history',
+          'Historie',
+          'Abgerechnete Tipps, Filter und Performance.',
+          140
+        ),
+        (
+          'favorites',
+          'Favoriten',
+          'Favorisierte Spiele, Teams und Ligen.',
+          150
+        ),
+        (
+          'news',
+          'PHÖNIX Berichte',
+          'Eigene Spieltags- und Liga-Berichte.',
+          160
+        ),
+        (
+          'match_analysis',
+          'Spielanalyse',
+          'Analyse-Kopf, Top-Tipp und Märkte.',
+          170
+        ),
+        (
+          'probabilities',
+          '1X2 Wahrscheinlichkeiten',
+          'Wahrscheinlichkeitsbalken für Heim, Remis und Auswärts.',
+          180
+        ),
+        (
+          'team_goals',
+          'Teamtore',
+          'Teambezogene Torwahrscheinlichkeiten.',
+          190
+        ),
+        ('league_table', 'Tabelle', 'Ligatabelle mit Wappen und Form.', 200),
+        (
+          'team_profile',
+          'Teamprofil',
+          'Teamdaten, Kader, Form und nächste Spiele.',
+          210
+        ),
+        (
+          'league_profile',
+          'Ligaprofil',
+          'Ligadaten, Tabelle und kommende Spiele.',
+          220
+        ),
+        (
+          'notifications',
+          'Benachrichtigungen',
+          'Tore, Anstoß, Ergebnisse und News.',
+          230
+        ),
+        (
+          'settings',
+          'Einstellungen',
+          'App-Einstellungen und Darstellungsoptionen.',
+          240
+        ),
+        (
+          'splash',
+          'Startanimation',
+          'Splashscreen, Branding und Ladevorgang.',
+          250
+        ),
       ];
       for (final section in sections) {
         await db.execute(Sql.named('''
-        INSERT INTO studio_sections (section_key, name, description, sort_order)
-        VALUES (@key, @name, @description, @sort)
+        INSERT INTO studio_sections (section_key, name, description, category, app_path, sort_order)
+        VALUES (@key, @name, @description, @category, @path, @sort)
         ON CONFLICT (section_key) DO NOTHING
       '''), parameters: {
           'key': section.$1,
           'name': section.$2,
           'description': section.$3,
+          'category': _seedCategory(section.$1),
+          'path': _seedPath(section.$1),
           'sort': section.$4,
         });
       }
@@ -400,6 +568,9 @@ class StudioRoutes {
         'key': row['section_key'],
         'name': row['name'],
         'description': row['description'],
+        'category': row['category'],
+        'appPath': row['app_path'],
+        'isCustom': row['is_custom'],
         'status': row['status'],
         'updatedAt': _timestamp(row['updated_at']),
         'draftUpdatedAt': _timestamp(row['draft_updated_at']),
@@ -407,6 +578,36 @@ class StudioRoutes {
         'publishedVersion': row['published_version'],
         'publishedAt': _timestamp(row['published_at']),
       };
+
+  String? _sectionKey(String raw) {
+    final key = raw
+        .toLowerCase()
+        .trim()
+        .replaceAll(RegExp('[^a-z0-9]+'), '_')
+        .replaceAll(RegExp(r'^_+|_+$'), '');
+    return key.isEmpty || key.length > 60 ? null : key;
+  }
+
+  String _seedCategory(String key) {
+    if (const {
+      'lineup',
+      'match_detail',
+      'form',
+      'h2h',
+      'historical_twins',
+      'injuries',
+      'match_analysis',
+      'probabilities',
+      'team_goals'
+    }.contains(key)) return 'Spielansicht';
+    if (const {'team_profile', 'league_profile', 'league_table'}.contains(key))
+      return 'Profile & Ligen';
+    if (const {'settings', 'notifications', 'splash'}.contains(key))
+      return 'App & Konto';
+    return 'Start & Navigation';
+  }
+
+  String _seedPath(String key) => '/$key';
 
   String? _timestamp(Object? value) =>
       value is DateTime ? value.toUtc().toIso8601String() : value?.toString();
