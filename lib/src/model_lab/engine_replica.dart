@@ -307,14 +307,15 @@ class EngineReplica {
           goals.away,
           rho: rho,
         );
+        // Zwei Klassen, bedingt auf "kein Remis" (Push): P(Heimsieg | kein
+        // Remis). Identisch zur Live-Engine (football_simulation_service).
+        final nonDrawHome = probabilities.home + probabilities.away;
+        final wonHome =
+            nonDrawHome > 0 ? probabilities.home / nonDrawHome : 0.5;
         return EngineReplicaOutput(
           market: market,
-          classProbabilities: [
-            probabilities.home,
-            probabilities.draw,
-            probabilities.away,
-          ],
-          classLabels: const ['won', 'push', 'lost'],
+          classProbabilities: [wonHome, 1 - wonHome],
+          classLabels: const ['won', 'lost'],
           usedFallbackBaseline: goals.usedFallback,
         );
       case LearningMarket.drawNoBetAway:
@@ -323,14 +324,13 @@ class EngineReplica {
           goals.away,
           rho: rho,
         );
+        final nonDrawAway = probabilities.home + probabilities.away;
+        final wonAway =
+            nonDrawAway > 0 ? probabilities.away / nonDrawAway : 0.5;
         return EngineReplicaOutput(
           market: market,
-          classProbabilities: [
-            probabilities.away,
-            probabilities.draw,
-            probabilities.home,
-          ],
-          classLabels: const ['won', 'push', 'lost'],
+          classProbabilities: [wonAway, 1 - wonAway],
+          classLabels: const ['won', 'lost'],
           usedFallbackBaseline: goals.usedFallback,
         );
     }

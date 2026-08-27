@@ -3,9 +3,14 @@
 /// Jeder Eintrag entspricht einem Markt, den die produktive
 /// Monte-Carlo-Engine tatsächlich berechnet. Damit bekommt z. B. Unter 3,5
 /// seinen eigenen Champion statt stillschweigend von einem BTTS-Champion
-/// beurteilt zu werden. Draw No Bet wird als Drei-Klassen-Markt bewertet
-/// (Gewinn / Push / Verlust), damit Unentschieden nicht fälschlich als
-/// verlorene Wette in das Learning eingeht.
+/// beurteilt zu werden. Draw No Bet ist ein ZWEI-Klassen-Markt, bedingt auf
+/// "kein Unentschieden" (`P(Sieg) / (P(Sieg) + P(Niederlage))`) - identisch
+/// zur Live-Engine (`football_simulation_service.dart`). Unentschieden-Spiele
+/// sind ein Push (Einsatz zurück) und werden über [LearningSample.isVoidOutcomeFor]
+/// / [ShadowPredictionService] komplett aus der DNB-Bewertung ausgefiltert,
+/// nicht als Verlust gezählt. (Früher fälschlich als 3-Klassen-Markt kodiert,
+/// byte-identisch zu 1X2 - eingefroren 2026-08-27, siehe
+/// docs/engine-audit/04-calibration-uncertainty.md.)
 enum LearningMarket {
   oneXTwo('1x2', 'Ergebnis (1X2)'),
   overUnder15('over_under_1_5', 'Über/Unter 1,5 Tore'),
@@ -30,8 +35,15 @@ enum LearningMarket {
   final String key;
   final String label;
 
-  bool get isMultiClass =>
-      this == LearningMarket.oneXTwo ||
+  /// Nur 1X2 wird über drei Klassen (Heim/Remis/Auswärts) bewertet. Draw No
+  /// Bet ist binär (Sieg/Niederlage, bedingt auf "kein Remis") - siehe
+  /// Klassendoku.
+  bool get isMultiClass => this == LearningMarket.oneXTwo;
+
+  /// Märkte mit einem Push-Ausgang (Einsatz zurück), der weder Gewinn noch
+  /// Verlust ist und deshalb aus Training/Bewertung fällt. Aktuell nur Draw
+  /// No Bet bei einem Unentschieden.
+  bool get hasVoidableOutcome =>
       this == LearningMarket.drawNoBetHome ||
       this == LearningMarket.drawNoBetAway;
 

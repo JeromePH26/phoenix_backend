@@ -189,6 +189,32 @@ void main() {
       expect(comparison.challengerAll.sampleSize, 10);
     });
 
+    // 2026-08-27: Draw No Bet ist binär und Push-Ausgänge (Unentschieden)
+    // fallen für BEIDE Seiten aus der Bewertung - kein Verlust, kein
+    // Längen-Mismatch zwischen perSampleBrier und diffs.
+    test('Draw No Bet drops draw (push) samples from both sides and scores on the 0..1 Brier scale', () {
+      // _chronologicalSamples: gerade Indizes 2:0 (Heimsieg), ungerade 1:1
+      // (Unentschieden) -> die Hälfte ist ein DNB-Push.
+      final samples = _chronologicalSamples(60);
+      final comparison = ChampionChallengerComparison.compare(
+        market: LearningMarket.drawNoBetHome,
+        leagueId: '78',
+        scopeSamples: samples,
+        championEngine:
+            const ModelEngine.attackWeightBlend(EngineWeightConfig.global),
+        challengerEngine:
+            const ModelEngine.attackWeightBlend(EngineWeightConfig(attackWeight: 0.6)),
+        config: _config(),
+      );
+
+      expect(comparison.championAll.sampleSize, 30);
+      expect(comparison.challengerAll.sampleSize, 30);
+      // Binärer Brier lebt auf 0..1 - deutlich unter der alten 3-Klassen-
+      // Summenform (~0.63), die byte-identisch zu 1X2 war.
+      expect(comparison.championAll.meanBrier, lessThan(0.6));
+      expect(comparison.championAll.meanBrier, greaterThanOrEqualTo(0.0));
+    });
+
     test('an attackWeight-vs-attackWeight comparison is unaffected by GLOBAL_GOALS_V1 filtering (no samples lost)', () {
       final samples = _chronologicalSamples(20, hasGlobalGoalsV1: (i) => i.isEven);
       final comparison = ChampionChallengerComparison.compare(

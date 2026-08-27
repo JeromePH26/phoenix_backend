@@ -276,6 +276,9 @@ class ShadowPredictionService {
           if (modelId is int) modelsById[modelId] = model;
         }
 
+        // Push-Ausgänge (Draw No Bet bei Unentschieden) sind Einsatz zurück
+        // und fallen aus der Bewertung.
+        if (sample.isVoidOutcomeFor(market)) continue;
         final outcomeIndex = sample.outcomeIndexFor(market);
         for (final model in modelsById.values) {
           final modelId = model['id'] as int;
@@ -342,10 +345,25 @@ class ShadowPredictionService {
       final market = LearningMarket.fromKey(marketKey ?? '');
       if (market == null) continue;
 
+      // Push-Ausgang (Draw No Bet bei Remis): Einsatz zurück, nicht bewertbar.
+      // M2 (Learning Dataset Pipeline) quarantänt diese offenen Zeilen.
+      if (_isVoidOutcome(market, homeGoals, awayGoals)) continue;
+
       final classProbabilitiesRaw = row['class_probabilities'];
       if (classProbabilitiesRaw is! List) continue;
-      final probabilities =
+      var probabilities =
           classProbabilitiesRaw.map((v) => (v as num).toDouble()).toList();
+
+      // Alt-Zeilen: Draw No Bet wurde früher als 3-Klassen-Markt
+      // [Gewinn, Push, Verlust] gespeichert. Auf die eingefrorene
+      // 2-Klassen-Definition (bedingt auf "kein Remis") umrechnen, bevor
+      // binär bewertet wird.
+      if (!market.isMultiClass && probabilities.length >= 3) {
+        final nonDraw = probabilities[0] + probabilities[2];
+        probabilities = nonDraw > 0
+            ? [probabilities[0] / nonDraw, probabilities[2] / nonDraw]
+            : [0.5, 0.5];
+      }
 
       final outcomeIndex = _outcomeIndex(market, homeGoals, awayGoals);
       final brier = market.isMultiClass
@@ -413,15 +431,16 @@ class ShadowPredictionService {
       case LearningMarket.doubleChanceX2:
         return awayGoals >= homeGoals ? 0 : 1;
       case LearningMarket.drawNoBetHome:
-        if (homeGoals > awayGoals) return 0;
-        if (homeGoals == awayGoals) return 1;
-        return 2;
+        // Push (Unentschieden) zuvor über _isVoidOutcome ausgefiltert.
+        return homeGoals > awayGoals ? 0 : 1;
       case LearningMarket.drawNoBetAway:
-        if (awayGoals > homeGoals) return 0;
-        if (homeGoals == awayGoals) return 1;
-        return 2;
+        return awayGoals > homeGoals ? 0 : 1;
     }
   }
+
+  /// Push-Ausgang (Einsatz zurück) - aktuell nur Draw No Bet bei Remis.
+  bool _isVoidOutcome(LearningMarket market, int homeGoals, int awayGoals) =>
+      market.hasVoidableOutcome && homeGoals == awayGoals;
 
   static DateTime? _dateTime(Object? value) {
     if (value is DateTime) return value.toUtc();

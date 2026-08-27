@@ -70,9 +70,19 @@ class LearningSample {
   /// defensiv erneut geprüft (Belt-and-braces).
   bool get hasValidSnapshotTiming => snapshotCreatedAt.isBefore(kickoff);
 
+  /// Ob der Ausgang dieses Spiels für den gegebenen Markt ein Push ist
+  /// (Einsatz zurück, weder Gewinn noch Verlust). Solche Samples MÜSSEN vor
+  /// jeder Bewertung/jedem Training herausgefiltert werden - [outcomeIndexFor]
+  /// liefert für sie keinen sinnvollen Wert. Aktuell nur Draw No Bet bei
+  /// einem Unentschieden.
+  bool isVoidOutcomeFor(LearningMarket market) =>
+      market.hasVoidableOutcome && homeGoals == awayGoals;
+
   /// Index der eingetretenen Klasse für den gegebenen Markt. Für
   /// LearningMarket.oneXTwo: 0=Heimsieg, 1=Unentschieden, 2=Auswärtssieg.
-  /// Für binäre Märkte: 0=positiv (over25/bttsYes), 1=negativ.
+  /// Für binäre Märkte: 0=positiv (over25/bttsYes/DNB-Gewinn), 1=negativ.
+  /// Bei Draw No Bet muss ein Unentschieden zuvor über [isVoidOutcomeFor]
+  /// ausgefiltert sein; wird es doch übergeben, kommt defensiv 1 (Verlust).
   int outcomeIndexFor(LearningMarket market) {
     switch (market) {
       case LearningMarket.oneXTwo:
@@ -108,13 +118,10 @@ class LearningSample {
       case LearningMarket.doubleChanceX2:
         return awayGoals >= homeGoals ? 0 : 1;
       case LearningMarket.drawNoBetHome:
-        if (homeGoals > awayGoals) return 0;
-        if (homeGoals == awayGoals) return 1;
-        return 2;
+        // Push (Unentschieden) muss über isVoidOutcomeFor ausgefiltert sein.
+        return homeGoals > awayGoals ? 0 : 1;
       case LearningMarket.drawNoBetAway:
-        if (awayGoals > homeGoals) return 0;
-        if (homeGoals == awayGoals) return 1;
-        return 2;
+        return awayGoals > homeGoals ? 0 : 1;
     }
   }
 

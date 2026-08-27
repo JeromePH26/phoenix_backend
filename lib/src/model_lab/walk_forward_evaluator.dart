@@ -143,6 +143,9 @@ class MarketEvaluationResult {
     final calibrationSamples = <({double predicted, bool actual})>[];
 
     for (final sample in samples) {
+      // Push-Ausgänge (Draw No Bet bei Unentschieden) sind Einsatz-zurück,
+      // weder Gewinn noch Verlust - sie fallen komplett aus der Bewertung.
+      if (sample.isVoidOutcomeFor(market)) continue;
       // Nur bei GLOBAL_GOALS_V1 ohne passenden Phase-2-Snapshot möglich -
       // `ChampionChallengerComparison.compare` filtert `samples` vorher
       // bereits auf das, was BEIDE verglichenen Engines auswerten können,
@@ -264,6 +267,10 @@ class ChampionChallengerComparison {
     final comparableSamples = scopeSamples
         .where(
           (s) =>
+              // Push-Ausgänge (Draw No Bet bei Unentschieden) fallen für
+              // BEIDE Seiten weg - sonst verschieben sich `perSampleBrier`
+              // und `diffs` unten gegeneinander.
+              !s.isVoidOutcomeFor(market) &&
               championEngine.evaluate(market: market, sample: s) != null &&
               challengerEngine.evaluate(market: market, sample: s) != null,
         )

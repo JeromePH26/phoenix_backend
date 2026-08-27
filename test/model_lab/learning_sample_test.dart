@@ -184,8 +184,25 @@ void main() {
       expect(homeTwo.outcomeIndexFor(LearningMarket.awayTeamUnder25), 0);
       expect(homeTwo.outcomeIndexFor(LearningMarket.doubleChance1x), 0);
       expect(homeTwo.outcomeIndexFor(LearningMarket.doubleChanceX2), 1);
-      expect(draw.outcomeIndexFor(LearningMarket.drawNoBetHome), 1);
-      expect(draw.outcomeIndexFor(LearningMarket.drawNoBetAway), 1);
+
+      // Draw No Bet ist binär (0 = Gewinn, 1 = Verlust). Ein Unentschieden
+      // ist ein Push und wird über isVoidOutcomeFor komplett ausgefiltert -
+      // niemals als Verlust gezählt.
+      expect(draw.isVoidOutcomeFor(LearningMarket.drawNoBetHome), isTrue);
+      expect(draw.isVoidOutcomeFor(LearningMarket.drawNoBetAway), isTrue);
+      expect(homeTwo.isVoidOutcomeFor(LearningMarket.drawNoBetHome), isFalse);
+      expect(homeTwo.isVoidOutcomeFor(LearningMarket.oneXTwo), isFalse);
+      expect(homeTwo.outcomeIndexFor(LearningMarket.drawNoBetHome), 0);
+      expect(homeTwo.outcomeIndexFor(LearningMarket.drawNoBetAway), 1);
+
+      final awayWin = _sample(
+        kickoff: DateTime.utc(2026, 1, 1),
+        snapshotCreatedAt: DateTime.utc(2025, 12, 31),
+        homeGoals: 0,
+        awayGoals: 2,
+      );
+      expect(awayWin.outcomeIndexFor(LearningMarket.drawNoBetHome), 1);
+      expect(awayWin.outcomeIndexFor(LearningMarket.drawNoBetAway), 0);
     });
   });
 

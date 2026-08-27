@@ -415,12 +415,12 @@ class FootballSimulationService {
         probabilities['away'] = value(2);
         return;
       case LearningMarket.drawNoBetHome:
-        final nonDraw = value(0) + value(2);
-        probabilities['dnbHome'] = nonDraw > 0 ? value(0) / nonDraw : 0.0;
+        // EngineReplica liefert Draw No Bet seit 2026-08-27 als 2 Klassen
+        // [Gewinn, Verlust], bereits bedingt auf "kein Remis".
+        probabilities['dnbHome'] = value(0);
         return;
       case LearningMarket.drawNoBetAway:
-        final nonDraw = value(0) + value(2);
-        probabilities['dnbAway'] = nonDraw > 0 ? value(0) / nonDraw : 0.0;
+        probabilities['dnbAway'] = value(0);
         return;
       default:
         for (var index = 0; index < classLabels.length; index++) {

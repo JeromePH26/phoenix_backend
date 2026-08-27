@@ -138,6 +138,48 @@ void main() {
       expect(sum, closeTo(1.0, 1e-6));
     });
 
+    // 2026-08-27: Draw No Bet ist als 2-Klassen-Markt eingefroren (bedingt
+    // auf "kein Remis"), nicht mehr byte-identisch zu 1X2 auf 0..2-Skala.
+    test('Draw No Bet is 2-class, conditional on no draw, distinct from 1X2',
+        () {
+      const features = {
+        'raw.homeGoalsForAverageHome': 2.0,
+        'raw.homeGoalsAgainstAverageHome': 1.0,
+        'raw.awayGoalsForAverageAway': 0.8,
+        'raw.awayGoalsAgainstAverageAway': 1.6,
+      };
+      final oneXTwo = EngineReplica.evaluate(
+        market: LearningMarket.oneXTwo,
+        features: features,
+        weights: EngineWeightConfig.global,
+      );
+      final dnbHome = EngineReplica.evaluate(
+        market: LearningMarket.drawNoBetHome,
+        features: features,
+        weights: EngineWeightConfig.global,
+      );
+      final dnbAway = EngineReplica.evaluate(
+        market: LearningMarket.drawNoBetAway,
+        features: features,
+        weights: EngineWeightConfig.global,
+      );
+
+      expect(dnbHome.classProbabilities, hasLength(2));
+      expect(dnbHome.classLabels, ['won', 'lost']);
+      expect(dnbHome.classProbabilities.reduce((a, b) => a + b),
+          closeTo(1.0, 1e-9));
+      // Bedingt auf "kein Remis": P(Heimsieg) / (P(Heimsieg) + P(Auswärtssieg)).
+      final expectedWon = oneXTwo.classProbabilities[0] /
+          (oneXTwo.classProbabilities[0] + oneXTwo.classProbabilities[2]);
+      expect(dnbHome.classProbabilities[0], closeTo(expectedWon, 1e-9));
+      expect(dnbAway.classProbabilities[0], closeTo(1 - expectedWon, 1e-9));
+      // NICHT die rohe 1X2-Heimwahrscheinlichkeit (die enthält das Remis).
+      expect(dnbHome.classProbabilities[0],
+          isNot(closeTo(oneXTwo.classProbabilities[0], 1e-6)));
+      expect(LearningMarket.drawNoBetHome.isMultiClass, isFalse);
+      expect(LearningMarket.oneXTwo.isMultiClass, isTrue);
+    });
+
     test('every public market family has a normalized Champion baseline', () {
       const features = {
         'raw.homeGoalsForAverageHome': 1.6,
