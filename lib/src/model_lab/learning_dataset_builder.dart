@@ -2,6 +2,8 @@ import '../config/model_lab_config.dart';
 import '../database/database.dart';
 import 'feature_whitelist.dart';
 import 'global_goals_v1_engine.dart';
+import 'learning_dataset_classifier.dart';
+import 'learning_market.dart';
 import 'learning_sample.dart';
 
 /// Baut leakage-sichere Learning-Datensätze aus gespeicherten PHÖNIX-Daten
@@ -12,6 +14,166 @@ class LearningDatasetBuilder {
 
   final PhoenixDatabase database;
   final ModelLabConfig config;
+
+  /// M2 (AN2 §24-32): klassifiziert jeden gespeicherten LIVE-Pre-Match-
+  /// Snapshot x Markt in `phoenix_learning_dataset` (production / learning /
+  /// research / quarantine) und persistiert das Ergebnis. Wird als
+  /// Kopf-Schritt eines Learning Runs aufgerufen, damit `buildSamples*`
+  /// anschließend über `data_class` filtern kann. Idempotent.
+  Future<Map<String, int>> classifyLiveDataset({bool write = true}) async {
+    final classifier = LearningDatasetClassifier(
+      minDataQuality: config.minDataQuality,
+    );
+    final db = await database.connection();
+
+    final rows = await db.execute('''
+      SELECT DISTINCT ON (ei.fixture_id)
+        ei.fixture_id,
+        ei.league_id,
+        ei.data_quality,
+        ei.created_at AS snapshot_created_at,
+        ei.phase_two_scan_run_id,
+        m.kickoff_utc,
+        m.status,
+        m.home_goals,
+        m.away_goals,
+        fl.collection_tier,
+        fl.league_name,
+        fl.competition_level,
+        p2.availability
+      FROM football_engine_inputs ei
+      LEFT JOIN football_matches m ON m.id = ei.fixture_id
+      LEFT JOIN football_leagues fl ON fl.league_id = ei.league_id
+      LEFT JOIN LATERAL (
+        SELECT availability FROM football_phase_two_results r
+        WHERE r.fixture_id = ei.fixture_id
+        ORDER BY r.scan_run_id DESC LIMIT 1
+      ) p2 ON TRUE
+      ORDER BY ei.fixture_id,
+        CASE WHEN m.kickoff_utc IS NOT NULL AND ei.created_at < m.kickoff_utc
+             THEN 0 ELSE 1 END,
+        ei.created_at DESC
+    ''');
+
+    // Pro Liga die grobe Zahl sonst-eligibler Samples (für die
+    // "zu dünne Beobachtungsliga"-Regel).
+    final leagueCounts = <String, int>{};
+    for (final row in rows) {
+      final m = row.toColumnMap();
+      final tier = m['collection_tier']?.toString();
+      final finished = PhoenixDatabase.modelLabFinishedMatchStatuses
+          .contains(m['status']?.toString());
+      final hasGoals = m['home_goals'] != null && m['away_goals'] != null;
+      final ko = m['kickoff_utc'];
+      final snap = m['snapshot_created_at'];
+      final preMatch = ko is DateTime && snap is DateTime && snap.isBefore(ko);
+      final dq = (m['data_quality'] as num?)?.toInt() ?? 0;
+      if ((tier == 'focus' || tier == 'watchlist') &&
+          finished &&
+          hasGoals &&
+          preMatch &&
+          dq >= config.minDataQuality) {
+        final lg = m['league_id']?.toString() ?? '';
+        leagueCounts[lg] = (leagueCounts[lg] ?? 0) + 1;
+      }
+    }
+
+    final now = DateTime.now().toUtc();
+    final classCounts = <String, int>{
+      'production': 0,
+      'learning': 0,
+      'research': 0,
+      'quarantine': 0,
+    };
+    final datasetRows = <LearningDatasetRow>[];
+
+    for (final row in rows) {
+      final m = row.toColumnMap();
+      final fixtureId = m['fixture_id']?.toString();
+      if (fixtureId == null) continue;
+      final leagueId = m['league_id']?.toString();
+      final dq = (m['data_quality'] as num?)?.toInt() ?? 0;
+      final ko = m['kickoff_utc'] is DateTime
+          ? m['kickoff_utc'] as DateTime
+          : null;
+      final snap = m['snapshot_created_at'] is DateTime
+          ? m['snapshot_created_at'] as DateTime
+          : null;
+      final status = m['status']?.toString();
+      final finished =
+          PhoenixDatabase.modelLabFinishedMatchStatuses.contains(status);
+      final hasGoals = m['home_goals'] != null && m['away_goals'] != null;
+      final avail = m['availability'] is Map
+          ? m['availability'] as Map
+          : const <Object?, Object?>{};
+      final hasStandings = avail['standings'] == true ||
+          avail['standings']?.toString() == 'true';
+      final hasUsableTeamStats =
+          avail.containsKey('homeGoalsForAverageHome') &&
+              avail.containsKey('awayGoalsForAverageAway');
+      final isCup = _isCupCompetition(
+        m['league_name']?.toString() ?? '',
+        (m['competition_level'] as num?)?.toInt(),
+      );
+      final scanRunId = m['phase_two_scan_run_id'];
+      final snapshotRef = scanRunId != null ? '$scanRunId:$fixtureId' : null;
+
+      final result = classifier.classifyLive(
+        collectionTier: m['collection_tier']?.toString(),
+        finishedStatus: finished,
+        hasGoals: hasGoals,
+        kickoff: ko,
+        snapshotCreatedAt: snap,
+        dataQuality: dq,
+        isCup: isCup,
+        hasStandings: hasStandings,
+        hasUsableTeamStats: hasUsableTeamStats,
+        leagueEligibleCount: leagueCounts[leagueId ?? ''] ?? 0,
+        now: now,
+      );
+      classCounts[result.dataClass] =
+          (classCounts[result.dataClass] ?? 0) + 1;
+
+      for (final market in LearningMarket.values) {
+        datasetRows.add((
+          fixtureId: fixtureId,
+          market: market.key,
+          source: 'live',
+          dataClass: result.dataClass,
+          featureCompleteness: null,
+          leakageChecked: true,
+          leakageResult: result.leakageResult,
+          snapshotRef: snapshotRef,
+          dataQuality: dq,
+          isCup: isCup,
+          excludedReason: result.excludedReason,
+          leagueId: leagueId,
+          kickoff: ko,
+        ));
+      }
+    }
+
+    if (write) {
+      await database.upsertLearningDatasetRows(datasetRows);
+    }
+    return {
+      'fixtures': rows.length,
+      'rows': datasetRows.length,
+      ...classCounts,
+    };
+  }
+
+  static bool _isCupCompetition(String leagueName, int? competitionLevel) {
+    final n = leagueName.toLowerCase();
+    const patterns = [
+      'cup', 'pokal', 'coupe', 'copa ', 'coppa', 'taça', 'taca', 'beker',
+      'trophy', 'shield', 'supercopa', 'supercoppa', 'super cup', 'supercup',
+      'champions league', 'europa league', 'conference league', 'libertadores',
+      'sudamericana', 'playoff', 'play-off', 'promotion', 'relegation',
+    ];
+    if (patterns.any(n.contains)) return true;
+    return competitionLevel == null || competitionLevel == 0;
+  }
 
   /// Section 19/21: liefert alle leakage-sicheren Samples für eine (optional
   /// auf eine Liga eingeschränkte) Abfrage, chronologisch nach Kickoff
@@ -24,6 +186,7 @@ class LearningDatasetBuilder {
       leagueId: leagueId,
       minDataQuality: config.minDataQuality,
       includeAllTiers: includeAllTiers,
+      useDatasetClassFilter: !includeAllTiers,
     );
     final phaseTwoByFixture =
         await _phaseTwoDataByFixture(includeAllTiers: includeAllTiers);
@@ -44,6 +207,7 @@ class LearningDatasetBuilder {
     final rows = await database.modelLabRawDataset(
       minDataQuality: config.minDataQuality,
       includeAllTiers: includeAllTiers,
+      useDatasetClassFilter: !includeAllTiers,
     );
     final phaseTwoByFixture =
         await _phaseTwoDataByFixture(includeAllTiers: includeAllTiers);
@@ -73,6 +237,14 @@ class LearningDatasetBuilder {
       final fixtureId = row['fixture_id']?.toString();
       final availabilityRaw = row['availability'];
       if (fixtureId == null || availabilityRaw is! Map) continue;
+      // Belt-and-braces: die SQL-Quelle filtert bereits
+      // `p.created_at < m.kickoff_utc`, aber der Phase-2-Pfad (GG1 /
+      // GlobalMarket / TeamStrength) hatte diese Zweitprüfung bisher als
+      // einziger nicht in Dart (docs/engine-audit/03). Ein Snapshot, der
+      // nicht sicher vor dem Anpfiff liegt, fliegt hier raus.
+      final snap = _dateTime(row['snapshot_created_at']);
+      final kickoff = _dateTime(row['kickoff_utc']);
+      if (snap == null || kickoff == null || !snap.isBefore(kickoff)) continue;
       final availability = Map<String, Object?>.from(availabilityRaw);
       final homeTeamId = row['home_team_id']?.toString() ?? '';
       final awayTeamId = row['away_team_id']?.toString() ?? '';

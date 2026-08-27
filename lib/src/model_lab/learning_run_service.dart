@@ -199,6 +199,13 @@ class LearningRunService {
     );
     final registry = ModelRegistryService(database: database, config: config);
 
+    // M2 (AN2 §24-32): Learning Dataset Pipeline aktualisieren, BEVOR
+    // irgendetwas Samples liest - `buildSamples*` filtert anschließend über
+    // `phoenix_learning_dataset.data_class`.
+    await database.updateLearningRunStep(
+        id: runId, currentStep: 'classifying_dataset');
+    await datasetBuilder.classifyLiveDataset(write: true);
+
     // Schritt 1-4: neue gesettelte Matches finden, Whitelist/Eligibility/
     // Pre-Match-Integrity prüfen (Section 46, Punkte 1-4).
     await database.updateLearningRunStep(

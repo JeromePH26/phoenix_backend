@@ -17,6 +17,24 @@ class LearningDataClass {
   static const quarantine = 'quarantine';
 }
 
+/// Eine Zeile für `phoenix_learning_dataset`
+/// (`PhoenixDatabase.upsertLearningDatasetRows`).
+typedef LearningDatasetRow = ({
+  String fixtureId,
+  String market,
+  String source,
+  String dataClass,
+  double? featureCompleteness,
+  bool leakageChecked,
+  String? leakageResult,
+  String? snapshotRef,
+  int? dataQuality,
+  bool isCup,
+  String? excludedReason,
+  String? leagueId,
+  DateTime? kickoff,
+});
+
 class DatasetClassification {
   const DatasetClassification(
     this.dataClass, {

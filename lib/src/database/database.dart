@@ -7596,6 +7596,11 @@ class PhoenixDatabase {
     // Tagesbudget. Data-Quality- und Leakage-Filter (Snapshot vor Kickoff)
     // gelten unverändert - die sind Korrektheit, keine Konservativität.
     bool includeAllTiers = false,
+    // M2: zusätzlich über die Datenklasse aus `phoenix_learning_dataset`
+    // filtern (nur `production`/`learning`). Fällt automatisch auf das alte
+    // Verhalten zurück, solange die Tabelle noch keine LIVE-Zeilen hat
+    // (frisches Deploy, bevor der Klassifizierungs-Schritt lief).
+    bool useDatasetClassFilter = false,
   }) async {
     final db = await connection();
     final leagueFilter =
@@ -7603,6 +7608,20 @@ class PhoenixDatabase {
     final tierFilter = includeAllTiers
         ? ''
         : "AND fl.collection_tier IN ('focus', 'watchlist', 'data_pool')";
+    final datasetClassFilter = useDatasetClassFilter
+        ? '''
+          AND (
+            NOT EXISTS (
+              SELECT 1 FROM phoenix_learning_dataset lds
+              WHERE lds.source = 'live'
+            )
+            OR EXISTS (
+              SELECT 1 FROM phoenix_learning_dataset lds
+              WHERE lds.fixture_id = ei.fixture_id AND lds.source = 'live'
+                AND lds.data_class IN ('production', 'learning')
+            )
+          )'''
+        : '';
     final result = await db.execute(
       Sql.named('''
         SELECT DISTINCT ON (ei.fixture_id)
@@ -7634,6 +7653,7 @@ class PhoenixDatabase {
           AND ei.data_quality >= @min_data_quality
           $tierFilter
           $leagueFilter
+          $datasetClassFilter
         ORDER BY ei.fixture_id, ei.created_at DESC
       '''),
       parameters: {
@@ -7774,12 +7794,15 @@ class PhoenixDatabase {
         picked.availability,
         picked.home_team_id,
         picked.away_team_id,
+        picked.snapshot_created_at,
+        picked.kickoff_utc,
         ctx.avg_home_goals AS league_avg_home_goals,
         ctx.avg_away_goals AS league_avg_away_goals
       FROM (
         SELECT DISTINCT ON (m.id)
           m.id AS fixture_id,
           p.availability,
+          p.created_at AS snapshot_created_at,
           m.home_team_id,
           m.away_team_id,
           m.league_id,
