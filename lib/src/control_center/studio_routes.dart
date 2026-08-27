@@ -49,7 +49,10 @@ class StudioRoutes {
         ORDER BY s.sort_order, s.name
       ''');
       return jsonResponse({
-        'sections': result.map(_sectionSummary).toList(),
+        'sections': result
+            .map((row) =>
+                _sectionSummary(Map<String, Object?>.from(row.toColumnMap())))
+            .toList(),
       });
     } catch (error) {
       return _error(error);
