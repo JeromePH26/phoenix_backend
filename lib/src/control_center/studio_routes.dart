@@ -27,6 +27,8 @@ class StudioRoutes {
     router.get('/sections', _listSections);
     router.post('/sections', _createSection);
     router.get('/sections/<key>', _sectionDetail);
+    router.get('/sections/<key>/requests', _listRequests);
+    router.post('/sections/<key>/requests', _createRequest);
     router.patch('/sections/<key>', _updateSection);
     router.put('/sections/<key>/draft', _saveDraft);
     router.post('/sections/<key>/publish', _publish);
@@ -163,6 +165,64 @@ class StudioRoutes {
             'note': item['change_note'],
           };
         }).toList(),
+      });
+    } catch (error) {
+      return _error(error);
+    }
+  }
+
+  Future<Response> _listRequests(Request request, String key) async {
+    final actor = await _actor(request, permission: 'appControl.view');
+    if (actor is Response) return actor;
+    try {
+      await _ensureSchema();
+      final db = await database.connection();
+      final rows = await db.execute(Sql.named('''
+        SELECT id, request_text, status, created_at, created_by
+        FROM studio_requests WHERE section_key = @key ORDER BY created_at DESC LIMIT 30
+      '''), parameters: {'key': key});
+      return jsonResponse({
+        'requests': rows.map((row) {
+          final item = row.toColumnMap();
+          return {
+            'id': item['id'],
+            'text': item['request_text'],
+            'status': item['status'],
+            'createdAt': _timestamp(item['created_at']),
+            'createdBy': item['created_by'],
+          };
+        }).toList()
+      });
+    } catch (error) {
+      return _error(error);
+    }
+  }
+
+  Future<Response> _createRequest(Request request, String key) async {
+    final actor = await _actor(request, permission: 'appControl.manage');
+    if (actor is Response) return actor;
+    try {
+      await _ensureSchema();
+      if (await _section(key) == null) return _notFound();
+      final body = await _body(request);
+      final text = body?['text']?.toString().trim() ?? '';
+      if (text.length < 8 || text.length > 2000)
+        return _badRequest(
+            'Beschreibe den gewünschten Entwurf mit 8 bis 2.000 Zeichen.');
+      final db = await database.connection();
+      final result = await db.execute(Sql.named('''
+        INSERT INTO studio_requests (section_key, request_text, created_by)
+        VALUES (@key, @text, @by) RETURNING id, created_at
+      '''), parameters: {'key': key, 'text': text, 'by': actor.login});
+      await _audit(actor,
+          action: 'studio.preview_requested',
+          key: key,
+          next: {'request': text});
+      final row = result.first.toColumnMap();
+      return jsonResponse({
+        'id': row['id'],
+        'status': 'open',
+        'createdAt': _timestamp(row['created_at'])
       });
     } catch (error) {
       return _error(error);
@@ -389,8 +449,22 @@ class StudioRoutes {
       )
     ''');
       await db.execute('''
+      CREATE TABLE IF NOT EXISTS studio_requests (
+        id BIGSERIAL PRIMARY KEY,
+        section_key TEXT NOT NULL REFERENCES studio_sections(section_key) ON DELETE CASCADE,
+        request_text TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'in_progress', 'preview_ready', 'approved', 'declined')),
+        created_by TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    ''');
+      await db.execute('''
       CREATE INDEX IF NOT EXISTS idx_studio_versions_section_version
       ON studio_versions (section_key, version_number DESC)
+    ''');
+      await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_studio_requests_section_created
+      ON studio_requests (section_key, created_at DESC)
     ''');
       const sections = [
         (
