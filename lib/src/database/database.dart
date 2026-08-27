@@ -2601,6 +2601,89 @@ class PhoenixDatabase {
     return value is num ? value.toDouble() : null;
   }
 
+  /// Letzter bekannter Elo-Wert je Team STRIKT vor [asOf]. Der Batch-Pfad
+  /// vermeidet einen Datenbank-Roundtrip pro Team, wenn ein Teamstärke-Fit
+  /// seine Cold-Start-Priors für eine ganze Liga aufbaut. Dasselbe strikte
+  /// Zeitfenster wie [eloRatingAsOf] verhindert Outcome-Leakage.
+  Future<Map<String, double>> eloRatingsAsOf({
+    required Iterable<String> teamIds,
+    required DateTime asOf,
+  }) async {
+    final ids = teamIds.where((id) => id.isNotEmpty).toSet().toList();
+    if (ids.isEmpty) return const {};
+    final db = await connection();
+    final rows = await db.execute(
+      Sql.named('''
+        SELECT DISTINCT ON (matched_team_id) matched_team_id, elo
+        FROM historical_elo_ratings
+        WHERE matched_team_id = ANY(@team_ids)
+          AND rating_date < @as_of
+        ORDER BY matched_team_id, rating_date DESC
+      '''),
+      parameters: {'team_ids': ids, 'as_of': asOf.toUtc()},
+    );
+    return {
+      for (final row in rows)
+        if (row[0] != null && row[1] is num)
+          row[0].toString(): (row[1] as num).toDouble(),
+    };
+  }
+
+  /// M3b: der kombinierte Trainingskorpus für den Team-Stärke-Fit -
+  /// die an unsere Liga-/Team-Dimension gebundenen historischen Twin-Spiele
+  /// (echte Pre-Match-Elo auf der Zeile) PLUS die eigenen abgerechneten
+  /// `football_matches` (Elo per `eloRatingAsOf` nachzuschlagen). Je Zeile:
+  /// `league_id, home_team_id, away_team_id, home_goals, away_goals, kickoff,
+  /// home_elo, away_elo, source`. Chronologisch sortiert.
+  Future<List<Map<String, Object?>>> teamStrengthCorpus({
+    String? leagueId,
+  }) async {
+    final db = await connection();
+    final leagueFilterTwin =
+        leagueId == null ? '' : 'AND t.matched_league_id = @lid';
+    final leagueFilterLive =
+        leagueId == null ? '' : 'AND m.league_id = @lid';
+    final rows = await db.execute(
+      Sql.named('''
+        SELECT league_id, home_team_id, away_team_id, home_goals, away_goals,
+               kickoff, home_elo, away_elo, source
+        FROM (
+          SELECT t.matched_league_id AS league_id,
+                 t.matched_home_team_id AS home_team_id,
+                 t.matched_away_team_id AS away_team_id,
+                 t.home_goals, t.away_goals,
+                 t.match_date::timestamptz AS kickoff,
+                 t.home_elo, t.away_elo,
+                 'twin' AS source
+          FROM historical_twin_matches t
+          WHERE t.matched_league_id IS NOT NULL
+            AND t.matched_home_team_id IS NOT NULL
+            AND t.matched_away_team_id IS NOT NULL
+            AND t.home_goals IS NOT NULL AND t.away_goals IS NOT NULL
+            $leagueFilterTwin
+          UNION ALL
+          SELECT m.league_id, m.home_team_id, m.away_team_id,
+                 m.home_goals, m.away_goals, m.kickoff_utc AS kickoff,
+                 NULL::double precision, NULL::double precision,
+                 'live' AS source
+          FROM football_matches m
+          WHERE m.status = ANY(@finished)
+            AND m.home_goals IS NOT NULL AND m.away_goals IS NOT NULL
+            AND m.home_team_id <> '' AND m.away_team_id <> ''
+            $leagueFilterLive
+        ) x
+        ORDER BY kickoff ASC NULLS LAST
+      '''),
+      parameters: {
+        'finished': modelLabFinishedMatchStatuses,
+        if (leagueId != null) 'lid': leagueId,
+      },
+    );
+    return rows
+        .map((row) => Map<String, Object?>.from(row.toColumnMap()))
+        .toList();
+  }
+
   /// Upsert einer `football_teams`-Zeile plus Selbst-Alias (Quelle
   /// `football_matches`). Idempotent; hält `last_seen` aktuell.
   Future<void> upsertFootballTeam({

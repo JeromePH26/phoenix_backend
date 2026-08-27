@@ -2,6 +2,7 @@ import '../config/model_lab_config.dart';
 import '../database/database.dart';
 import 'challenger_generator.dart';
 import 'dixon_coles_engine.dart';
+import 'elo_prior.dart';
 import 'engine_replica.dart';
 import 'global_goals_v1_engine.dart';
 import 'global_market_engine.dart';
@@ -254,6 +255,9 @@ class LearningRunService {
     final teamStrengthTrainingDataByLeague =
         <String, ({List<MatchResult> matches, DateTime asOf})?>{};
     final teamStrengthFitsByLeagueAndHalfLife = <String, TeamStrengthFit?>{};
+    final teamStrengthGlobalEloPriorCache = <DateTime, EloPrior>{};
+    final teamStrengthLeaguePriorCache =
+        <String, Map<String, ({double attack, double defense})>>{};
     // Nutzerkorrektur (2026-08-27): analoge Caches für den gepoolten
     // GLOBALEN Team-Stärke-Fit (siehe _ensurePooledTeamStrengthChallenger) -
     // einmal pro Halbwertszeit für den GANZEN Lauf, nicht pro Liga.
@@ -724,6 +728,8 @@ class LearningRunService {
             halfLifeDays: halfLifeDays,
             trainingDataCache: teamStrengthTrainingDataByLeague,
             fitCache: teamStrengthFitsByLeagueAndHalfLife,
+            globalEloPriorCache: teamStrengthGlobalEloPriorCache,
+            leaguePriorCache: teamStrengthLeaguePriorCache,
           );
           // Nur mit konvergiertem Fit als Challenger anlegen - ein
           // nicht-konvergierter Fit ist nicht vertrauenswürdig (live
@@ -1420,12 +1426,14 @@ class LearningRunService {
     final leagueIds = leagues
         .map((l) => l['league_id']?.toString())
         .whereType<String>()
+        .toSet();
+    // Der globale Fallback erhält denselben M1-Historienkorpus wie der
+    // Liga-Fit; nur die aktiv berücksichtigten Ligen werden einbezogen.
+    final rawMatches = (await database.teamStrengthCorpus())
+        .where((row) => leagueIds.contains(row['league_id']?.toString()))
         .toList();
-    final rawMatches = await database.footballSettledMatchesForLeagues(
-      leagueIds: leagueIds,
-    );
     final trainingMatches = rawMatches.where((row) {
-      final kickoff = row['kickoff_utc'];
+      final kickoff = row['kickoff'];
       if (kickoff is! DateTime) return false;
       return kickoff.isBefore(boundary);
     }).toList();
@@ -1445,7 +1453,7 @@ class LearningRunService {
               awayTeamId: row['away_team_id']?.toString() ?? '',
               homeGoals: _parseGoals(row['home_goals']),
               awayGoals: _parseGoals(row['away_goals']),
-              kickoff: row['kickoff_utc'] as DateTime?,
+              kickoff: row['kickoff'] as DateTime?,
             ))
         .where((m) => m.homeTeamId.isNotEmpty && m.awayTeamId.isNotEmpty)
         .toList();
@@ -1513,11 +1521,13 @@ class LearningRunService {
     }
     final boundary = evaluatedSamples.first.kickoff;
 
-    final rawMatches = await database.footballSettledMatchesForLeague(
-      leagueId: leagueId,
-    );
+    // M3b: Nicht nur die kurze PHÖNIX-Live-Historie verwenden. Der M1-
+    // Korpus enthält zusätzlich sauber an unsere Teams/Liga gebundene,
+    // abgeschlossene historische Spiele. Das Zeitfenster unten bleibt dabei
+    // strikt vor Validation/Holdout und schützt den Backtest vor Leakage.
+    final rawMatches = await database.teamStrengthCorpus(leagueId: leagueId);
     final trainingMatches = rawMatches.where((row) {
-      final kickoff = row['kickoff_utc'];
+      final kickoff = row['kickoff'];
       if (kickoff is! DateTime) return false;
       return kickoff.isBefore(boundary);
     }).toList();
@@ -1538,7 +1548,7 @@ class LearningRunService {
               awayTeamId: row['away_team_id']?.toString() ?? '',
               homeGoals: _parseGoals(row['home_goals']),
               awayGoals: _parseGoals(row['away_goals']),
-              kickoff: row['kickoff_utc'] as DateTime?,
+              kickoff: row['kickoff'] as DateTime?,
             ))
         .where((m) => m.homeTeamId.isNotEmpty && m.awayTeamId.isNotEmpty)
         .toList();
@@ -1559,6 +1569,9 @@ class LearningRunService {
     required Map<String, ({List<MatchResult> matches, DateTime asOf})?>
         trainingDataCache,
     required Map<String, TeamStrengthFit?> fitCache,
+    required Map<DateTime, EloPrior> globalEloPriorCache,
+    required Map<String, Map<String, ({double attack, double defense})>>
+        leaguePriorCache,
   }) async {
     final cacheKey = '$leagueId|${halfLifeDays ?? "none"}';
     if (fitCache.containsKey(cacheKey)) return fitCache[cacheKey];
@@ -1573,13 +1586,124 @@ class LearningRunService {
       return null;
     }
 
+    final priors = await _eloPriorsForTraining(
+      leagueId: leagueId,
+      trainingData: trainingData,
+      globalEloPriorCache: globalEloPriorCache,
+      leaguePriorCache: leaguePriorCache,
+    );
     final fit = TeamStrengthEngine.fit(
       trainingData.matches,
       halfLifeDays: halfLifeDays,
       asOf: trainingData.asOf,
+      priors: priors,
     );
     fitCache[cacheKey] = fit;
     return fit;
+  }
+
+  /// M3b: leitet pro Liga Cold-Start-Priors aus ELO-Werten ab, die strikt
+  /// vor dem Beginn von Validation/Holdout bekannt waren. Der Koeffizient
+  /// wird über alle bis dahin verfügbaren, liga-normalisierten historischen
+  /// Beobachtungen gefittet; die Anwendung selbst bleibt liga-relativ.
+  Future<Map<String, ({double attack, double defense})>>
+      _eloPriorsForTraining({
+    required String leagueId,
+    required ({List<MatchResult> matches, DateTime asOf}) trainingData,
+    required Map<DateTime, EloPrior> globalEloPriorCache,
+    required Map<String, Map<String, ({double attack, double defense})>>
+        leaguePriorCache,
+  }) async {
+    final cacheKey = '$leagueId|${trainingData.asOf.toUtc().toIso8601String()}';
+    final existing = leaguePriorCache[cacheKey];
+    if (existing != null) return existing;
+
+    final globalPrior = await _globalEloPriorAsOf(
+      trainingData.asOf,
+      cache: globalEloPriorCache,
+    );
+    if (globalPrior.k == 0) {
+      leaguePriorCache[cacheKey] = const {};
+      return const {};
+    }
+    final ratings = await database.eloRatingsAsOf(
+      teamIds: [
+        for (final match in trainingData.matches) match.homeTeamId,
+        for (final match in trainingData.matches) match.awayTeamId,
+      ],
+      asOf: trainingData.asOf,
+    );
+    final priors = globalPrior.forLeague(ratings);
+    leaguePriorCache[cacheKey] = priors;
+    return priors;
+  }
+
+  Future<EloPrior> _globalEloPriorAsOf(
+    DateTime asOf, {
+    required Map<DateTime, EloPrior> cache,
+  }) async {
+    final key = asOf.toUtc();
+    final existing = cache[key];
+    if (existing != null) return existing;
+
+    final corpus = await database.teamStrengthCorpus();
+    final byLeague = <String, List<Map<String, Object?>>>{};
+    for (final row in corpus) {
+      final kickoff = row['kickoff'];
+      final leagueId = row['league_id']?.toString();
+      if (kickoff is! DateTime || leagueId == null || !kickoff.isBefore(key)) {
+        continue;
+      }
+      byLeague.putIfAbsent(leagueId, () => []).add(row);
+    }
+
+    final observations = <({double z, double supremacyLog})>[];
+    for (final rows in byLeague.values) {
+      final eloSum = <String, double>{};
+      final eloCount = <String, int>{};
+      final goalsFor = <String, double>{};
+      final goalsAgainst = <String, double>{};
+      for (final row in rows) {
+        final home = row['home_team_id']?.toString() ?? '';
+        final away = row['away_team_id']?.toString() ?? '';
+        final homeGoals = _parseGoals(row['home_goals']);
+        final awayGoals = _parseGoals(row['away_goals']);
+        if (home.isEmpty || away.isEmpty) continue;
+        goalsFor[home] = (goalsFor[home] ?? 0) + homeGoals;
+        goalsAgainst[home] = (goalsAgainst[home] ?? 0) + awayGoals;
+        goalsFor[away] = (goalsFor[away] ?? 0) + awayGoals;
+        goalsAgainst[away] = (goalsAgainst[away] ?? 0) + homeGoals;
+        final homeElo = row['home_elo'];
+        final awayElo = row['away_elo'];
+        if (homeElo is num) {
+          eloSum[home] = (eloSum[home] ?? 0) + homeElo.toDouble();
+          eloCount[home] = (eloCount[home] ?? 0) + 1;
+        }
+        if (awayElo is num) {
+          eloSum[away] = (eloSum[away] ?? 0) + awayElo.toDouble();
+          eloCount[away] = (eloCount[away] ?? 0) + 1;
+        }
+      }
+      final meanEloByTeam = <String, double>{
+        for (final entry in eloSum.entries)
+          if ((eloCount[entry.key] ?? 0) > 0)
+            entry.key: entry.value / eloCount[entry.key]!,
+      };
+      if (meanEloByTeam.length < 2) continue;
+      final leagueMean = meanEloByTeam.values.reduce((a, b) => a + b) /
+          meanEloByTeam.length;
+      observations.addAll(EloPrior.standardize([
+        for (final entry in meanEloByTeam.entries)
+          (
+            eloDiff: entry.value - leagueMean,
+            goalsFor: goalsFor[entry.key] ?? 0,
+            goalsAgainst: goalsAgainst[entry.key] ?? 0,
+          ),
+      ]));
+    }
+    final prior = EloPrior.fit(observations);
+    cache[key] = prior;
+    return prior;
   }
 
   int _parseGoals(Object? value) {

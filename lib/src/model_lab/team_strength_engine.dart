@@ -50,7 +50,13 @@ class TeamStrengthFit {
     required this.homeAdvantage,
     required this.iterations,
     required this.converged,
+    this.priors = const {},
   });
+
+  /// M3b: Angriff/Abwehr-PRIOR je Team (aus dem Elo, siehe `EloPrior`).
+  /// Wird als Shrinkage-Ziel im Fit genutzt UND als Fallback für Teams ohne
+  /// eigene Fit-Historie (Cold Start / Aufsteiger) - statt flach 1.0.
+  final Map<String, ({double attack, double defense})> priors;
 
   /// Angriffsstärke je Team, normiert um 1.0 (Liga-Durchschnitt). > 1.0 =
   /// überdurchschnittlicher Angriff.
@@ -75,8 +81,10 @@ class TeamStrengthFit {
   /// global`/den bestehenden Baseline-Fallbacks.
   static const double neutralStrength = 1.0;
 
-  double attackOf(String teamId) => attack[teamId] ?? neutralStrength;
-  double defenseOf(String teamId) => defense[teamId] ?? neutralStrength;
+  double attackOf(String teamId) =>
+      attack[teamId] ?? priors[teamId]?.attack ?? neutralStrength;
+  double defenseOf(String teamId) =>
+      defense[teamId] ?? priors[teamId]?.defense ?? neutralStrength;
 
   /// Deterministischer Hash über die tatsächlich gefitteten Werte -
   /// verhindert Duplikate über den bestehenden Unique-Index auf
@@ -93,6 +101,9 @@ class TeamStrengthFit {
     final sortedDefense = Map.fromEntries(
       defense.entries.toList()..sort((a, b) => a.key.compareTo(b.key)),
     );
+    final sortedPriors = Map.fromEntries(
+      priors.entries.toList()..sort((a, b) => a.key.compareTo(b.key)),
+    );
     final canonical = jsonEncode({
       'engineVersion': 'TEAM_STRENGTH_IPF_V1',
       'homeAdvantage': double.parse(homeAdvantage.toStringAsFixed(6)),
@@ -102,6 +113,13 @@ class TeamStrengthFit {
       'defense': sortedDefense.map(
         (k, v) => MapEntry(k, double.parse(v.toStringAsFixed(6))),
       ),
+      if (priors.isNotEmpty)
+        'priors': sortedPriors.map(
+          (k, v) => MapEntry(k, [
+            double.parse(v.attack.toStringAsFixed(6)),
+            double.parse(v.defense.toStringAsFixed(6)),
+          ]),
+        ),
     });
     return sha256.convert(utf8.encode(canonical)).toString();
   }
@@ -157,6 +175,11 @@ class TeamStrengthEngine {
     // "Durchschnittsteam" statt frei zu driften - stabilisiert sowohl die
     // Konvergenz als auch die Qualität der Schätzung für datenarme Teams.
     double regularizationK = 8,
+    // M3b: Angriff/Abwehr-Prior je Team (aus dem Elo). Shrinkage zieht dünn
+    // besetzte Teams hierauf statt auf flach 1.0; Teams ganz ohne Historie
+    // bekommen den Prior über `TeamStrengthFit.attackOf/defenseOf`. `null`
+    // oder leer = altes Verhalten (Shrinkage-Ziel 1.0) - Regressionsanker.
+    Map<String, ({double attack, double defense})>? priors,
     // Phase 3 (Plan "wild-cuddling-hoare", "passt natürlich zu Phase 2"):
     // exponentieller Zeitverfall statt jedes Trainingsspiel gleich zu
     // gewichten. `null` (Default) = kein Zeitverfall, identisch zum
@@ -234,11 +257,19 @@ class TeamStrengthEngine {
       totalHomeGoals += match.homeGoals * w;
     }
 
-    double shrinkTowardsNeutral(double rawTarget, String teamId) {
+    final priorMap = priors ?? const {};
+    double shrinkTowardsPrior(
+      double rawTarget,
+      String teamId, {
+      required bool isAttack,
+    }) {
       final n = effectiveMatchCount[teamId]!;
       final factor = n / (n + regularizationK);
-      return TeamStrengthFit.neutralStrength +
-          factor * (rawTarget - TeamStrengthFit.neutralStrength);
+      final prior = priorMap[teamId];
+      final target = prior == null
+          ? TeamStrengthFit.neutralStrength
+          : (isAttack ? prior.attack : prior.defense);
+      return target + factor * (rawTarget - target);
     }
 
     var iterations = 0;
@@ -265,7 +296,7 @@ class TeamStrengthEngine {
         final denominator = attackDenominator[id]!;
         if (denominator > 0) {
           final rawTarget = totalGoalsFor[id]! / denominator;
-          final target = shrinkTowardsNeutral(rawTarget, id);
+          final target = shrinkTowardsPrior(rawTarget, id, isAttack: true);
           attack[id] = attack[id]! + dampingFactor * (target - attack[id]!);
         }
       }
@@ -286,7 +317,7 @@ class TeamStrengthEngine {
         final denominator = defenseDenominator[id]!;
         if (denominator > 0) {
           final rawTarget = totalGoalsAgainst[id]! / denominator;
-          final target = shrinkTowardsNeutral(rawTarget, id);
+          final target = shrinkTowardsPrior(rawTarget, id, isAttack: false);
           defense[id] = defense[id]! + dampingFactor * (target - defense[id]!);
         }
       }
@@ -339,6 +370,7 @@ class TeamStrengthEngine {
       homeAdvantage: homeAdvantage,
       iterations: iterations,
       converged: converged,
+      priors: priorMap,
     );
   }
 
