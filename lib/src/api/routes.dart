@@ -16,6 +16,7 @@ import '../football_admin/football_admin_logic.dart';
 import '../http/json_response.dart';
 import 'app_account_routes.dart';
 import 'control_center_routes.dart';
+import '../control_center/studio_routes.dart';
 import 'model_lab_routes.dart';
 import '../services/football_phase_one_scan_service.dart';
 import '../services/football_phase_two_scan_service.dart';
@@ -74,6 +75,11 @@ class ApiRoutes {
     // session-basierte Auth (admin_employees/admin_sessions), komplett
     // getrennt vom statischen PHOENIX_ADMIN_TOKEN oben. Ebenfalls vor allen
     // anderen Routen eingehängt, aus demselben Grund wie ModelLabRoutes.
+    router.mount(
+      '/api/admin/control-center/studio/',
+      StudioRoutes(database: database).router.call,
+    );
+
     router.mount(
       '/api/admin/control-center/',
       ControlCenterRoutes(
