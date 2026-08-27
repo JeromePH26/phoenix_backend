@@ -26,6 +26,9 @@ class ModelLabConfig {
     required this.bootstrapResamples,
     required this.bootstrapConfidenceLevel,
     required this.calibrationMinBucketSample,
+    this.minPromotionCalibrationSample = 80,
+    this.maxPromotionCalibrationError = 0.08,
+    this.maxPromotionCalibrationRegression = 0.015,
     required this.redCardEarlyMinute,
     required this.redCardLateMinute,
     required this.learningRunWeekday,
@@ -95,6 +98,20 @@ class ModelLabConfig {
   /// Section 41/76: Minimale Anzahl Vorhersagen pro Calibration-Bucket,
   /// bevor er angezeigt wird.
   final int calibrationMinBucketSample;
+
+  /// Ein Modell darf nur Champion werden, wenn seine Kalibrierung auf einer
+  /// ausreichend großen, aktuellen Holdout-Menge sichtbar ist. Die Grenze
+  /// zählt nur Beobachtungen aus nicht unterdrückten Kalibrierungs-Buckets.
+  final int minPromotionCalibrationSample;
+
+  /// Obergrenze für den Expected Calibration Error (ECE) beim Challenger.
+  /// 0.08 bedeutet: die gemeldete Top-Wahrscheinlichkeit darf im gewichteten
+  /// Mittel höchstens acht Prozentpunkte von der echten Trefferquote liegen.
+  final double maxPromotionCalibrationError;
+
+  /// Ein Challenger darf gegenüber dem Champion nicht nennenswert schlechter
+  /// kalibriert sein, selbst wenn sein Brier-Score knapp besser aussieht.
+  final double maxPromotionCalibrationRegression;
 
   /// Section 26: Minutenschwellen für die distortion_score-Diagnose bei
   /// roten Karten (früh = hohe Verzerrung, spät = geringe Verzerrung).
@@ -203,6 +220,14 @@ class ModelLabConfig {
           readDouble('PHOENIX_MODEL_LAB_BOOTSTRAP_CONFIDENCE', 0.95),
       calibrationMinBucketSample:
           readInt('PHOENIX_MODEL_LAB_CALIBRATION_MIN_BUCKET', 20),
+      minPromotionCalibrationSample:
+          readInt('PHOENIX_MODEL_LAB_MIN_PROMOTION_CALIBRATION_SAMPLE', 80),
+      maxPromotionCalibrationError:
+          readDouble('PHOENIX_MODEL_LAB_MAX_PROMOTION_CALIBRATION_ECE', 0.08),
+      maxPromotionCalibrationRegression: readDouble(
+        'PHOENIX_MODEL_LAB_MAX_PROMOTION_CALIBRATION_REGRESSION',
+        0.015,
+      ),
       redCardEarlyMinute:
           readInt('PHOENIX_MODEL_LAB_RED_CARD_EARLY_MINUTE', 30),
       redCardLateMinute:

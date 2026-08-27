@@ -88,6 +88,38 @@ class Metrics {
     return buckets;
   }
 
+  /// Expected Calibration Error (ECE) über die sichtbaren, ausreichend groß
+  /// besetzten Buckets. Ein Wert von 0 bedeutet perfekt geeichte
+  /// Wahrscheinlichkeiten; 0.08 entspricht im Mittel acht Prozentpunkten
+  /// Abweichung zwischen angekündigter und eingetretener Trefferquote.
+  ///
+  /// `null` bedeutet nicht "perfekt", sondern: Es gibt noch keine belastbare
+  /// Kalibrierungsmessung. Dieser Zustand darf nie eine Promotion erlauben.
+  static double? expectedCalibrationError(
+    List<CalibrationBucket> buckets,
+  ) {
+    if (buckets.isEmpty) return null;
+    final sampleCount = buckets.fold<int>(
+      0,
+      (sum, bucket) => sum + bucket.sampleCount,
+    );
+    if (sampleCount == 0) return null;
+    final weightedError = buckets.fold<double>(
+      0,
+      (sum, bucket) =>
+          sum +
+          bucket.sampleCount *
+              (bucket.averagePredicted - bucket.actualRate).abs(),
+    );
+    return weightedError / sampleCount;
+  }
+
+  /// Wie viele Vorhersagen tatsächlich in den nicht unterdrückten
+  /// Kalibrierungs-Buckets liegen. Dient dem Promotion-Gate; kleine oder
+  /// zufällig gut aussehende Buckets werden damit nicht überbewertet.
+  static int calibrationSampleSize(List<CalibrationBucket> buckets) => buckets
+      .fold<int>(0, (sum, bucket) => sum + bucket.sampleCount);
+
   /// Section 43: Paired-Bootstrap über Match-Loss-Differenzen
   /// (challenger_loss - champion_loss). Negative Differenz = Challenger
   /// besser (niedrigerer Loss) für dieses Match.

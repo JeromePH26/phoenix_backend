@@ -191,6 +191,7 @@ class MonthlyReviewService {
         minSampleSize:
             1, // Sample-Gate erfolgt separat gegen minPromotionSample.
       );
+      final calibrationGate = _calibrationPromotionGate(holdoutComparison);
 
       perChallenger.add({
         'challengerModelId': challengerId,
@@ -201,6 +202,7 @@ class MonthlyReviewService {
         'holdoutChampionBrier': holdoutComparison?.championAll.meanBrier,
         'holdoutChallengerBrier': holdoutComparison?.challengerAll.meanBrier,
         'uncertainty': uncertainty.toJson(),
+        'calibrationGate': calibrationGate.toJson(),
       });
 
       if (bestMeanDifference == null ||
@@ -211,6 +213,7 @@ class MonthlyReviewService {
           'combinedSample': combinedDifferences.length,
           'uncertainty': uncertainty,
           'holdoutComparison': holdoutComparison,
+          'calibrationGate': calibrationGate,
         };
       }
     }
@@ -234,6 +237,7 @@ class MonthlyReviewService {
     final bestChallenger = best['challenger'] as Map<String, Object?>;
     final combinedSample = best['combinedSample'] as int;
     final uncertainty = best['uncertainty'] as PairedUncertaintyResult;
+    final calibrationGate = best['calibrationGate'] as _CalibrationPromotionGate;
 
     final String recommendation;
     final String reason;
@@ -241,6 +245,9 @@ class MonthlyReviewService {
       recommendation = 'NICHT_GENUG_DATEN';
       reason = 'Sample noch zu klein ($combinedSample von '
           '${config.minPromotionSample} benötigten Out-of-Sample-Matches).';
+    } else if (!calibrationGate.isEligible) {
+      recommendation = 'KALIBRIERUNG_UNZUREICHEND';
+      reason = calibrationGate.reason;
     } else {
       switch (uncertainty.status) {
         case ComparisonStatus.challengerClearlyBetter:
@@ -302,12 +309,83 @@ class MonthlyReviewService {
             uncertainty.lowerBound,
             uncertainty.upperBound
           ],
+          'calibration': calibrationGate.toJson(),
         },
       );
       return {...persisted, 'promotion': 'completed'};
     }
 
     return {...persisted, 'promotion': 'not_applied'};
+  }
+
+  /// Kalibrierung ist ein eigenständiges Promotion-Gate: Ein Modell mit
+  /// zufällig besserem Brier-Wert, aber übertriebenen Wahrscheinlichkeiten,
+  /// darf nie Champion werden. Gemessen wird ausschließlich auf dem
+  /// chronologisch reservierten Holdout, nie auf Trainings- oder
+  /// post-hoc-Shadow-Daten.
+  _CalibrationPromotionGate _calibrationPromotionGate(
+    ChampionChallengerComparison? comparison,
+  ) {
+    if (comparison == null) {
+      return const _CalibrationPromotionGate.unavailable(
+        'Kein chronologischer Holdout für eine Kalibrierungsprüfung.',
+      );
+    }
+    final championBuckets = comparison.championAll.calibration;
+    final challengerBuckets = comparison.challengerAll.calibration;
+    final championSamples = Metrics.calibrationSampleSize(championBuckets);
+    final challengerSamples = Metrics.calibrationSampleSize(challengerBuckets);
+    final championEce = Metrics.expectedCalibrationError(championBuckets);
+    final challengerEce = Metrics.expectedCalibrationError(challengerBuckets);
+    final minSamples = config.minPromotionCalibrationSample;
+
+    if (championEce == null || challengerEce == null) {
+      return _CalibrationPromotionGate.unavailable(
+        'Zu wenige ausreichend große Kalibrierungs-Buckets im Holdout.',
+        championEce: championEce,
+        challengerEce: challengerEce,
+        championSamples: championSamples,
+        challengerSamples: challengerSamples,
+      );
+    }
+    if (championSamples < minSamples || challengerSamples < minSamples) {
+      return _CalibrationPromotionGate.unavailable(
+        'Kalibrierungsmenge zu klein ($challengerSamples von mindestens '
+        '$minSamples benötigten Holdout-Vorhersagen).',
+        championEce: championEce,
+        challengerEce: challengerEce,
+        championSamples: championSamples,
+        challengerSamples: challengerSamples,
+      );
+    }
+    if (challengerEce > config.maxPromotionCalibrationError) {
+      return _CalibrationPromotionGate.rejected(
+        'Challenger-ECE ${challengerEce.toStringAsFixed(3)} liegt über der '
+        'Grenze ${config.maxPromotionCalibrationError.toStringAsFixed(3)}.',
+        championEce: championEce,
+        challengerEce: challengerEce,
+        championSamples: championSamples,
+        challengerSamples: challengerSamples,
+      );
+    }
+    if (challengerEce >
+        championEce + config.maxPromotionCalibrationRegression) {
+      return _CalibrationPromotionGate.rejected(
+        'Challenger ist schlechter kalibriert als der Champion '
+        '(ECE ${challengerEce.toStringAsFixed(3)} vs '
+        '${championEce.toStringAsFixed(3)}).',
+        championEce: championEce,
+        challengerEce: challengerEce,
+        championSamples: championSamples,
+        challengerSamples: challengerSamples,
+      );
+    }
+    return _CalibrationPromotionGate.eligible(
+      championEce: championEce,
+      challengerEce: challengerEce,
+      championSamples: championSamples,
+      challengerSamples: challengerSamples,
+    );
   }
 
   /// Section 51: gepaarte, tatsächlich beobachtete Shadow-Performance -
@@ -386,4 +464,75 @@ class MonthlyReviewService {
       'sameMatchSample': sameMatchSample,
     };
   }
+}
+
+class _CalibrationPromotionGate {
+  const _CalibrationPromotionGate._({
+    required this.isEligible,
+    required this.reason,
+    this.championEce,
+    this.challengerEce,
+    this.championSamples = 0,
+    this.challengerSamples = 0,
+  });
+
+  const _CalibrationPromotionGate.unavailable(
+    String reason, {
+    double? championEce,
+    double? challengerEce,
+    int championSamples = 0,
+    int challengerSamples = 0,
+  }) : this._(
+          isEligible: false,
+          reason: reason,
+          championEce: championEce,
+          challengerEce: challengerEce,
+          championSamples: championSamples,
+          challengerSamples: challengerSamples,
+        );
+
+  const _CalibrationPromotionGate.rejected(
+    String reason, {
+    required double championEce,
+    required double challengerEce,
+    required int championSamples,
+    required int challengerSamples,
+  }) : this._(
+          isEligible: false,
+          reason: reason,
+          championEce: championEce,
+          challengerEce: challengerEce,
+          championSamples: championSamples,
+          challengerSamples: challengerSamples,
+        );
+
+  const _CalibrationPromotionGate.eligible({
+    required double championEce,
+    required double challengerEce,
+    required int championSamples,
+    required int challengerSamples,
+  }) : this._(
+          isEligible: true,
+          reason: 'Kalibrierung ausreichend und nicht schlechter als Champion.',
+          championEce: championEce,
+          challengerEce: challengerEce,
+          championSamples: championSamples,
+          challengerSamples: challengerSamples,
+        );
+
+  final bool isEligible;
+  final String reason;
+  final double? championEce;
+  final double? challengerEce;
+  final int championSamples;
+  final int challengerSamples;
+
+  Map<String, Object?> toJson() => {
+        'eligible': isEligible,
+        'reason': reason,
+        'championEce': championEce,
+        'challengerEce': challengerEce,
+        'championSamples': championSamples,
+        'challengerSamples': challengerSamples,
+      };
 }

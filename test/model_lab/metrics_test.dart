@@ -127,6 +127,28 @@ void main() {
       expect(buckets.first.averagePredicted, closeTo(0.70, 1e-9));
       expect(buckets.first.actualRate, closeTo(0.70, 1e-9));
     });
+
+    test('computes weighted ECE and never treats absent buckets as perfect', () {
+      const buckets = [
+        CalibrationBucket(
+          lowerBound: 0.5,
+          upperBound: 0.6,
+          sampleCount: 20,
+          averagePredicted: 0.55,
+          actualRate: 0.50,
+        ),
+        CalibrationBucket(
+          lowerBound: 0.7,
+          upperBound: 0.8,
+          sampleCount: 80,
+          averagePredicted: 0.75,
+          actualRate: 0.70,
+        ),
+      ];
+      expect(Metrics.calibrationSampleSize(buckets), 100);
+      expect(Metrics.expectedCalibrationError(buckets), closeTo(0.05, 1e-9));
+      expect(Metrics.expectedCalibrationError(const []), isNull);
+    });
   });
 
   group('Metrics.pairedBootstrap', () {
