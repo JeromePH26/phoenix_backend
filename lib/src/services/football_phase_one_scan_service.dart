@@ -97,6 +97,20 @@ class FootballPhaseOneScanService {
           payload: match,
         );
 
+        // Persistente Team-Dimension mitpflegen (M1): billiger 1-Roundtrip-
+        // Upsert, hält football_teams für den Namens-Resolver aktuell.
+        await database.upsertFootballTeamsFromMatch(
+          homeTeamId: _string(match['homeTeamId']),
+          homeTeamName: _string(match['homeTeam']).isNotEmpty
+              ? _string(match['homeTeam'])
+              : _string(match['homeTeamName']),
+          awayTeamId: _string(match['awayTeamId']),
+          awayTeamName: _string(match['awayTeam']).isNotEmpty
+              ? _string(match['awayTeam'])
+              : _string(match['awayTeamName']),
+          country: _string(match['country']),
+        );
+
         // Nur Fokus-Ligen erhalten eine Phase-2-Freigabe. Dadurch bleiben
         // öffentliche Analysen stabil, während alle anderen Ligen trotzdem
         // langfristig vollständige historische Daten aufbauen.

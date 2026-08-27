@@ -1119,6 +1119,7 @@ class PhoenixDatabase {
     await _migrateFootballMatchControls(db);
     await _migrateUserAccounts(db);
     await _migrateFootballAssetsSchema(db);
+    await _migrateHistoricalLinkage(db);
 
     await db.execute('''
       INSERT INTO app_meta (key, value)
@@ -2496,6 +2497,207 @@ class PhoenixDatabase {
   /// Model Registry, Learning Runs, Evaluationen, Shadow Predictions,
   /// Monthly Reviews und Audit Log. Verändert oder löscht keine bestehenden
   /// PHÖNIX-Produktionsdaten (Section 87).
+  /// M1 (docs/PHASE1_ENGINE_AUDIT.md): verbindet die bisher isolierten
+  /// historischen Datensätze (`historical_twin_matches` 68k,
+  /// `historical_elo_ratings` 245k) mit `football_leagues` und einer echten
+  /// Team-Dimension, damit sie als Trainings-/Validierungskorpus nutzbar
+  /// werden (§15 Tor-Modell-Vergleich, §38 zeitliche Stabilität,
+  /// Kalibrierung auf einem Holdout - alles unmöglich auf den ~650 Live-
+  /// Zeilen). Rein additiv.
+  Future<void> _migrateHistoricalLinkage(Connection db) async {
+    // Persistente Team-Dimension. Es gab bisher keine `football_teams`-
+    // Tabelle - Team-Identität lag verstreut als `(id, name)`-Paare in
+    // `football_matches`. `team_id` ist weiterhin die vom Provider
+    // (API-Football) stammende ID als Text.
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS football_teams (
+        team_id TEXT PRIMARY KEY,
+        canonical_name TEXT NOT NULL,
+        country TEXT NOT NULL DEFAULT '',
+        first_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_football_teams_country
+      ON football_teams (country)
+    ''');
+
+    // Normalisierte Namensvarianten -> team_id. `source` unterscheidet, woher
+    // die Variante stammt (`football_matches` = Selbst-Alias, `twins`,
+    // `elo`, `manual`). Bewusst KEIN Foreign Key auf football_teams: ein
+    // Alias kann geschrieben werden, bevor der Team-Backfill lief.
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS football_team_aliases (
+        alias_norm TEXT NOT NULL,
+        team_id TEXT NOT NULL,
+        source TEXT NOT NULL DEFAULT 'manual',
+        confidence DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (alias_norm, source)
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_football_team_aliases_alias
+      ON football_team_aliases (alias_norm)
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_football_team_aliases_team
+      ON football_team_aliases (team_id)
+    ''');
+
+    // football-data.co.uk-Divisionscode -> unsere Liga-ID. Wird von
+    // `bin/phoenix_division_map_report.dart` aus `kDivisionHints`
+    // (lib/src/model_lab/division_map.dart) verifiziert befüllt; leer, bis
+    // dieses Skript mit `--write` lief.
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS football_division_map (
+        division TEXT PRIMARY KEY,
+        league_id TEXT REFERENCES football_leagues(league_id),
+        country TEXT NOT NULL DEFAULT '',
+        tier INTEGER,
+        name_keyword TEXT NOT NULL DEFAULT '',
+        source TEXT NOT NULL DEFAULT 'division_hints',
+        confidence DOUBLE PRECISION NOT NULL DEFAULT 0,
+        reviewed_at TIMESTAMPTZ
+      )
+    ''');
+
+    // Elo-Zeitreihe an die Team-Dimension anbinden (bisher völlig
+    // verwaist: nur `club`-Name + 3-Buchstaben-Land, kein Join-Pfad).
+    // Befüllt von `bin/phoenix_elo_match_teams.dart --write`.
+    await db.execute('''
+      ALTER TABLE historical_elo_ratings
+      ADD COLUMN IF NOT EXISTS matched_team_id TEXT,
+      ADD COLUMN IF NOT EXISTS match_confidence DOUBLE PRECISION
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_historical_elo_ratings_matched_team
+      ON historical_elo_ratings (matched_team_id, rating_date DESC)
+      WHERE matched_team_id IS NOT NULL
+    ''');
+  }
+
+  /// Frühester bekannter Elo-Wert eines Teams STRIKT vor [asOf] (leakage-
+  /// sicher für Pre-Match-Features). `null`, wenn das Team nicht an die
+  /// Elo-Reihe gebunden ist oder es vor dem Datum keinen Wert gibt.
+  Future<double?> eloRatingAsOf({
+    required String teamId,
+    required DateTime asOf,
+  }) async {
+    final db = await connection();
+    final rows = await db.execute(
+      Sql.named('''
+        SELECT elo FROM historical_elo_ratings
+        WHERE matched_team_id = @team AND rating_date < @as_of
+        ORDER BY rating_date DESC
+        LIMIT 1
+      '''),
+      parameters: {'team': teamId, 'as_of': asOf.toUtc()},
+    );
+    if (rows.isEmpty) return null;
+    final value = rows.first[0];
+    return value is num ? value.toDouble() : null;
+  }
+
+  /// Upsert einer `football_teams`-Zeile plus Selbst-Alias (Quelle
+  /// `football_matches`). Idempotent; hält `last_seen` aktuell.
+  Future<void> upsertFootballTeam({
+    required String teamId,
+    required String canonicalName,
+    String country = '',
+  }) async {
+    if (teamId.isEmpty || canonicalName.isEmpty) return;
+    final db = await connection();
+    await db.execute(
+      Sql.named('''
+        INSERT INTO football_teams (team_id, canonical_name, country, last_seen)
+        VALUES (@id, @name, @country, NOW())
+        ON CONFLICT (team_id) DO UPDATE
+        SET canonical_name = EXCLUDED.canonical_name,
+            country = CASE WHEN EXCLUDED.country <> '' THEN EXCLUDED.country
+                           ELSE football_teams.country END,
+            last_seen = NOW()
+      '''),
+      parameters: {'id': teamId, 'name': canonicalName, 'country': country},
+    );
+  }
+
+  /// Hält `football_teams` bei jedem Phase-1-Scan aktuell (beide Teams eines
+  /// Fixtures in einem Roundtrip). Leere Felder werden übersprungen.
+  Future<void> upsertFootballTeamsFromMatch({
+    required String homeTeamId,
+    required String homeTeamName,
+    required String awayTeamId,
+    required String awayTeamName,
+    String country = '',
+  }) async {
+    final pairs = <List<String>>[
+      if (homeTeamId.isNotEmpty && homeTeamName.isNotEmpty)
+        [homeTeamId, homeTeamName],
+      if (awayTeamId.isNotEmpty && awayTeamName.isNotEmpty)
+        [awayTeamId, awayTeamName],
+    ];
+    if (pairs.isEmpty) return;
+    final db = await connection();
+    final valueClauses = <String>[];
+    final params = <String, Object?>{'country': country};
+    for (var i = 0; i < pairs.length; i++) {
+      valueClauses.add('(@id$i::text, @name$i::text, @country::text)');
+      params['id$i'] = pairs[i][0];
+      params['name$i'] = pairs[i][1];
+    }
+    await db.execute(
+      Sql.named('''
+        INSERT INTO football_teams (team_id, canonical_name, country, last_seen)
+        SELECT v.id, v.name, v.country, NOW()
+        FROM (VALUES ${valueClauses.join(', ')}) AS v(id, name, country)
+        ON CONFLICT (team_id) DO UPDATE
+        SET canonical_name = EXCLUDED.canonical_name,
+            country = CASE WHEN EXCLUDED.country <> '' THEN EXCLUDED.country
+                           ELSE football_teams.country END,
+            last_seen = NOW()
+      '''),
+      parameters: params,
+    );
+  }
+
+  /// Batch-Upsert normalisierter Team-Aliase.
+  Future<int> upsertTeamAliases(
+    List<({String aliasNorm, String teamId, double confidence})> aliases, {
+    required String source,
+  }) async {
+    if (aliases.isEmpty) return 0;
+    final db = await connection();
+    var written = 0;
+    const batchSize = 500;
+    for (var start = 0; start < aliases.length; start += batchSize) {
+      final end =
+          start + batchSize < aliases.length ? start + batchSize : aliases.length;
+      final valueClauses = <String>[];
+      final params = <String, Object?>{'src': source};
+      for (var i = start; i < end; i++) {
+        final j = i - start;
+        valueClauses.add('(@a$j::text, @t$j::text, @c$j::double precision)');
+        params['a$j'] = aliases[i].aliasNorm;
+        params['t$j'] = aliases[i].teamId;
+        params['c$j'] = aliases[i].confidence;
+      }
+      await db.execute(
+        Sql.named('''
+          INSERT INTO football_team_aliases (alias_norm, team_id, source, confidence)
+          SELECT v.a, v.t, @src, v.c
+          FROM (VALUES ${valueClauses.join(', ')}) AS v(a, t, c)
+          ON CONFLICT (alias_norm, source) DO UPDATE
+          SET team_id = EXCLUDED.team_id, confidence = EXCLUDED.confidence
+        '''),
+        parameters: params,
+      );
+      written += end - start;
+    }
+    return written;
+  }
+
   Future<void> _migrateModelLab(Connection db) async {
     await db.execute('''
       CREATE TABLE IF NOT EXISTS phoenix_model_versions (
