@@ -22,6 +22,62 @@ class ModelRegistryService {
 
   static const String codeSchemaVersion = engineReplicaVersion;
 
+  /// Kein Wettmarkt, sondern die gemeinsame Ergebnisverteilung einer
+  /// Fußballpartie. Modelle unter diesem Schlüssel liefern ausschließlich
+  /// erwartete Heim-/Auswärtstore; sämtliche sichtbaren Märkte werden danach
+  /// gemeinsam aus genau dieser Verteilung abgeleitet.
+  static const String matchDistributionMarket = 'match_distribution';
+
+  /// Legt die eine globale PHÖNIX-Referenz an, gegen die Liga-Engines im
+  /// Schattenbetrieb verglichen werden. Die historischen marktweisen
+  /// Baselines bleiben für ihre Auswertung erhalten, dürfen aber nicht mehr
+  /// als Live-Entscheider dienen.
+  Future<int> ensureGlobalMatchDistributionBaseline() async {
+    final existing =
+        await database.globalBaselineModel(matchDistributionMarket);
+    if (existing != null) {
+      if (existing['status'] != 'champion') {
+        await _promoteIfNoChampionExists(
+          market: matchDistributionMarket,
+          leagueId: null,
+          modelVersionId: existing['id'] as int,
+        );
+      }
+      return existing['id'] as int;
+    }
+
+    const engine = ModelEngine.globalGoalsV1();
+    final id = await database.insertModelVersion(
+      readableVersion: 'PHOENIX-GLOBAL-V1',
+      generation: 1,
+      leagueId: null,
+      market: matchDistributionMarket,
+      modelType: 'global_baseline',
+      featureConfig: {
+        'engineFamily': 'PHOENIX_GLOBAL_ENGINE_V1',
+        'scope': 'all_markets_from_one_goal_distribution',
+        'note':
+            'Einziger globaler Referenzmotor. 1X2, Tore, BTTS, DNB und DC stammen aus derselben Monte-Carlo-Ergebnisverteilung.',
+      },
+      weights: engine.toJson(),
+      trainingCount: 0,
+      validationCount: 0,
+      holdoutCount: 0,
+      shadowCount: 0,
+      status: 'champion',
+      configHash: 'phoenix_global_engine_v1',
+      codeSchemaVersion: codeSchemaVersion,
+    );
+    await database.insertModelLabAuditLog(
+      action: 'global_match_engine_created',
+      actor: 'system',
+      modelVersionId: id,
+      market: matchDistributionMarket,
+      details: {'readableVersion': 'PHOENIX-GLOBAL-V1'},
+    );
+    return id;
+  }
+
   /// Stellt sicher, dass für einen Markt die Global-/Baseline-Engine als
   /// Model-Version existiert (attackWeight = 0.5, identisch zur produktiven
   /// Engine-Formel). Diese Zeile ist die Rückfallbasis für alle Ligen ohne
@@ -114,7 +170,8 @@ class ModelRegistryService {
     // `activateGlobalMarketChampion` kann das die längst archivierte
     // attackWeight-Formel sein). `currentChampion(leagueId: null, ...)`
     // respektiert den tatsächlichen `champion`-Status.
-    return leagueChampion ?? await currentChampion(leagueId: null, market: market);
+    return leagueChampion ??
+        await currentChampion(leagueId: null, market: market);
   }
 
   Future<List<Map<String, Object?>>> currentChallengers({
@@ -412,11 +469,10 @@ class ModelRegistryService {
         'features': 'globalMarketEngine',
         'family': family.version,
         'market': market.key,
-        'note':
-            'Globaler Basis-Champion (Claude AN2.txt) - echte, gewichtete '
-                'Features statt fester 50/50-Formel. xG/Rating/Motivation '
-                'aus der Vorlage entfernt (in PHÖNIX nicht real verfügbar), '
-                'verbleibende echte Kategorien proportional neu normiert.',
+        'note': 'Globaler Basis-Champion (Claude AN2.txt) - echte, gewichtete '
+            'Features statt fester 50/50-Formel. xG/Rating/Motivation '
+            'aus der Vorlage entfernt (in PHÖNIX nicht real verfügbar), '
+            'verbleibende echte Kategorien proportional neu normiert.',
       },
       weights: engine.toJson(),
       trainingCount: 0,
@@ -491,7 +547,8 @@ class ModelRegistryService {
         'hypothesis': hypothesis.key,
         'hypothesisLabel': hypothesis.label,
       },
-      weights: ModelEngine.globalMarket(family, hypothesis: hypothesis).toJson(),
+      weights:
+          ModelEngine.globalMarket(family, hypothesis: hypothesis).toJson(),
       trainingStart: trainingStart,
       trainingEnd: trainingEnd,
       trainingCount: trainingCount,
@@ -499,7 +556,8 @@ class ModelRegistryService {
       holdoutCount: holdoutCount,
       shadowCount: 0,
       status: 'challenger',
-      configHash: GlobalMarketEngine.configHash(family: family, hypothesis: hypothesis),
+      configHash:
+          GlobalMarketEngine.configHash(family: family, hypothesis: hypothesis),
       codeSchemaVersion: codeSchemaVersion,
     );
 
@@ -517,7 +575,10 @@ class ModelRegistryService {
       },
     );
 
-    return (id: id, engine: ModelEngine.globalMarket(family, hypothesis: hypothesis));
+    return (
+      id: id,
+      engine: ModelEngine.globalMarket(family, hypothesis: hypothesis)
+    );
   }
 
   /// Erzeugt (oder findet die bereits existierende) Dixon-Coles-Challenger-
@@ -657,6 +718,70 @@ class ModelRegistryService {
       },
     );
 
+    return (id: id, engine: engine);
+  }
+
+  /// Eine vollständige Liga-Engine statt eines getrennten Modells je Markt.
+  /// Sie darf erst nach einem Vergleich gegen [matchDistributionMarket] für
+  /// ihre eigene Liga befördert werden.
+  Future<({int id, ModelEngine engine})> createOrReuseLeagueEngineChallenger({
+    required String leagueId,
+    required TeamStrengthFit fit,
+    required double? halfLifeDays,
+    required int generation,
+    required int challengerIndex,
+    required int sampleSize,
+    required int parentModelId,
+    DateTime? trainingStart,
+    DateTime? trainingEnd,
+    required int trainingCount,
+    required int validationCount,
+    required int holdoutCount,
+  }) async {
+    final engine = ModelEngine.teamStrength(fit);
+    final readableVersion = 'L$leagueId-V$generation-C$challengerIndex-TS'
+        '${halfLifeDays == null ? '' : '-HL${halfLifeDays.toStringAsFixed(0)}'}';
+    final id = await database.insertModelVersion(
+      readableVersion: readableVersion,
+      parentModelId: parentModelId,
+      generation: generation,
+      leagueId: leagueId,
+      market: matchDistributionMarket,
+      modelType: 'weight_variant',
+      featureConfig: {
+        'engineFamily': TeamStrengthEngine.version,
+        'scope': 'complete_league_match_distribution',
+        'halfLifeDays': halfLifeDays,
+        'fitTeamCount': fit.attack.length,
+        'fitConverged': fit.converged,
+        'fitIterations': fit.iterations,
+        'note':
+            'Liga-Challenger gegen PHOENIX_GLOBAL_ENGINE_V1. Eine Torverteilung für alle Märkte, niemals marktweise überschrieben.',
+      },
+      weights: engine.toJson(),
+      trainingStart: trainingStart,
+      trainingEnd: trainingEnd,
+      trainingCount: trainingCount,
+      validationCount: validationCount,
+      holdoutCount: holdoutCount,
+      shadowCount: 0,
+      status: 'challenger',
+      configHash: 'league_distribution|${fit.configHash()}|$halfLifeDays',
+      codeSchemaVersion: codeSchemaVersion,
+    );
+    await database.insertModelLabAuditLog(
+      action: 'league_engine_challenger_created',
+      actor: 'system',
+      modelVersionId: id,
+      leagueId: leagueId,
+      market: matchDistributionMarket,
+      details: {
+        'readableVersion': readableVersion,
+        'engineVersion': TeamStrengthEngine.version,
+        'sampleSize': sampleSize,
+        'halfLifeDays': halfLifeDays,
+      },
+    );
     return (id: id, engine: engine);
   }
 }

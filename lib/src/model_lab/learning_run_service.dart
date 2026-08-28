@@ -51,18 +51,15 @@ class LearningRunService {
   static const int perLeagueEngineMinSample = 5;
 
   Future<Map<String, Object?>> run({required String triggerType}) async {
-    // Ein abgebrochener oder noch gesperrter Learning-Run darf die
-    // Initialisierung neuer, bereits produktiv verfügbarer Markt-Familien
-    // nicht blockieren. Die globale Baseline ist idempotent und verändert
-    // weder einen bestehenden Champion noch eine Produktionsanalyse.
-    // Sie wird deshalb bewusst VOR dem Run-Lock sichergestellt.
+    // Die eine globale Referenz wird vor dem Lock sichergestellt. Sie ist
+    // idempotent und verändert weder eine Produktionsanalyse noch historische
+    // marktweise Modelle; neue Runs erzeugen ausschließlich vollständige
+    // Liga-Engines gegen diese Referenz.
     final baselineRegistry = ModelRegistryService(
       database: database,
       config: config,
     );
-    for (final market in LearningMarket.values) {
-      await baselineRegistry.ensureGlobalBaseline(market.key);
-    }
+    await baselineRegistry.ensureGlobalMatchDistributionBaseline();
 
     var locked = await database.acquireModelLabLock(
       lockName,
@@ -193,7 +190,249 @@ class LearningRunService {
     );
   }
 
+  /// Der produktive Lernpfad: ein globales Referenzmodell, ein vollständiger
+  /// Challenger pro Liga. Alle Marktmetriken werden zwar einzeln gespeichert,
+  /// aber beide Seiten liefern immer dieselbe zugrunde liegende
+  /// Torverteilung.
   Future<_RunResult> _runSteps(int runId, _ResumeState? resumeState) async {
+    final datasetBuilder = LearningDatasetBuilder(
+      database: database,
+      config: config,
+    );
+    final registry = ModelRegistryService(database: database, config: config);
+
+    await database.updateLearningRunStep(
+      id: runId,
+      currentStep: 'classifying_dataset',
+    );
+    await datasetBuilder.classifyLiveDataset(write: true);
+
+    await database.updateLearningRunStep(
+      id: runId,
+      currentStep: 'auditing_eligibility',
+    );
+    final audit = await datasetBuilder.auditEligibility();
+    final leagues = await database.modelLabWhitelistedLeagues();
+    final samplesByLeague = await datasetBuilder.buildSamplesByLeague();
+
+    final globalModelId =
+        await registry.ensureGlobalMatchDistributionBaseline();
+    final globalModel = await database.modelVersion(globalModelId);
+    if (globalModel == null) {
+      throw StateError('Globale PHÖNIX-Engine konnte nicht geladen werden.');
+    }
+    final globalEngine = registry.modelEngine(globalModel);
+
+    final trainingDataByLeague =
+        <String, ({List<MatchResult> matches, DateTime asOf})?>{};
+    final fitByLeague = <String, TeamStrengthFit?>{};
+    final globalEloPriorCache = <DateTime, EloPrior>{};
+    final leaguePriorCache =
+        <String, Map<String, ({double attack, double defense})>>{};
+    final statuses = <Map<String, Object?>>[];
+    var challengersCreated = 0;
+    var processed = 0;
+
+    await database.updateLearningRunProgress(
+      id: runId,
+      currentStep: 'processing_league_engines',
+      leaguesProcessed: 0,
+      marketsProcessed: 0,
+      eligibleMatches: audit.eligible,
+      excludedMatches: audit.notEligible,
+      challengersCreated: 0,
+      summary: {
+        'phase': 'processing_league_engines',
+        'architecture': 'one_global_engine_vs_one_league_engine',
+        'leagueCount': leagues.length,
+        if (resumeState != null) 'restartedAfterRun': resumeState.marketKey,
+      },
+    );
+
+    for (final league in leagues) {
+      final leagueId = league['league_id']?.toString();
+      if (leagueId == null) continue;
+      final samples = samplesByLeague[leagueId] ?? const <LearningSample>[];
+
+      // Die Nachvollziehbarkeit bleibt je Markt erhalten, die Kandidaten-
+      // Engine selbst wird jedoch nur ein einziges Mal je Liga erzeugt.
+      for (final sample in samples) {
+        for (final market in LearningMarket.values) {
+          await database.upsertMatchLearningFlag(
+            fixtureId: sample.fixtureId,
+            leagueId: sample.leagueId,
+            market: market.key,
+            eligible: true,
+            dataQuality: sample.dataQuality,
+            snapshotTimestamp: sample.snapshotCreatedAt,
+            kickoff: sample.kickoff,
+          );
+        }
+      }
+
+      final split = ChronologicalSplit.split(samples, config);
+      final comparableValidation = split.validation
+          .where((sample) => sample.hasGlobalGoalsV1Data)
+          .toList(growable: false);
+      final comparableHoldout = split.holdout
+          .where((sample) => sample.hasGlobalGoalsV1Data)
+          .toList(growable: false);
+      final enoughEvidence =
+          comparableValidation.length >= perLeagueEngineMinSample ||
+              comparableHoldout.length >= perLeagueEngineMinSample;
+
+      if (!enoughEvidence) {
+        statuses.add({
+          'leagueId': leagueId,
+          'leagueName': league['league_name'],
+          'status': 'global_only',
+          'eligibleSampleSize': samples.length,
+          'reason': 'Noch zu wenige leakage-sichere Vorab-Snapshots.',
+        });
+      } else {
+        final fit = await _teamStrengthFitFor(
+          leagueId: leagueId,
+          split: split,
+          halfLifeDays: 30.0,
+          trainingDataCache: trainingDataByLeague,
+          fitCache: fitByLeague,
+          globalEloPriorCache: globalEloPriorCache,
+          leaguePriorCache: leaguePriorCache,
+        );
+        if (fit == null || !fit.converged) {
+          statuses.add({
+            'leagueId': leagueId,
+            'leagueName': league['league_name'],
+            'status': 'global_only',
+            'eligibleSampleSize': samples.length,
+            'reason':
+                'Liga-Teamstärke konnte noch nicht stabil gefittet werden.',
+          });
+        } else {
+          final generation = await registry.nextGeneration(
+            leagueId: leagueId,
+            market: ModelRegistryService.matchDistributionMarket,
+          );
+          final challengerIndex = await registry.nextChallengerIndex(
+            leagueId: leagueId,
+            market: ModelRegistryService.matchDistributionMarket,
+            generation: generation,
+          );
+          final challenger = await registry.createOrReuseLeagueEngineChallenger(
+            leagueId: leagueId,
+            fit: fit,
+            halfLifeDays: 30.0,
+            generation: generation,
+            challengerIndex: challengerIndex,
+            sampleSize: samples.length,
+            parentModelId: globalModelId,
+            trainingStart:
+                split.training.isEmpty ? null : split.training.first.kickoff,
+            trainingEnd:
+                split.training.isEmpty ? null : split.training.last.kickoff,
+            trainingCount: split.training.length,
+            validationCount: comparableValidation.length,
+            holdoutCount: comparableHoldout.length,
+          );
+          challengersCreated += 1;
+          await database.addLearningCandidate(
+            learningRunId: runId,
+            modelVersionId: challenger.id,
+            leagueId: leagueId,
+            market: ModelRegistryService.matchDistributionMarket,
+          );
+
+          // Ein und derselbe Challenger muss sich in ALLEN öffentlichen
+          // Märkten bewähren. Keine Einzelmarkt-Promotion ist mehr möglich.
+          for (final market in LearningMarket.values) {
+            if (comparableValidation.isNotEmpty) {
+              await _persistComparison(
+                comparison: ChampionChallengerComparison.compare(
+                  market: market,
+                  leagueId: leagueId,
+                  scopeSamples: comparableValidation,
+                  championEngine: globalEngine,
+                  challengerEngine: challenger.engine,
+                  config: config,
+                ),
+                evaluationType: 'walk_forward',
+                championModelId: globalModelId,
+                challengerModelId: challenger.id,
+              );
+            }
+            if (comparableHoldout.isNotEmpty) {
+              await _persistComparison(
+                comparison: ChampionChallengerComparison.compare(
+                  market: market,
+                  leagueId: leagueId,
+                  scopeSamples: comparableHoldout,
+                  championEngine: globalEngine,
+                  challengerEngine: challenger.engine,
+                  config: config,
+                ),
+                evaluationType: 'holdout',
+                championModelId: globalModelId,
+                challengerModelId: challenger.id,
+              );
+            }
+          }
+          statuses.add({
+            'leagueId': leagueId,
+            'leagueName': league['league_name'],
+            'status': 'challenger_shadow',
+            'eligibleSampleSize': samples.length,
+            'validationSampleSize': comparableValidation.length,
+            'holdoutSampleSize': comparableHoldout.length,
+            'challengerModelId': challenger.id,
+          });
+        }
+      }
+
+      processed += 1;
+      await database.updateLearningRunProgress(
+        id: runId,
+        currentStep: 'processing_league_engines',
+        leaguesProcessed: processed,
+        marketsProcessed: LearningMarket.values.length,
+        eligibleMatches: audit.eligible,
+        excludedMatches: audit.notEligible,
+        challengersCreated: challengersCreated,
+        summary: {
+          'phase': 'processing_league_engines',
+          'architecture': 'one_global_engine_vs_one_league_engine',
+          'currentLeagueId': leagueId,
+          'currentLeagueName': league['league_name'],
+          'leaguesProcessed': processed,
+          'leagueCount': leagues.length,
+        },
+      );
+    }
+
+    return _RunResult(
+      leaguesProcessed: processed,
+      marketsProcessed: LearningMarket.values.length,
+      eligibleMatches: audit.eligible,
+      excludedMatches: audit.notEligible,
+      exclusionsByReason: audit.exclusionsByReason,
+      challengersCreated: challengersCreated,
+      summary: {
+        'architecture': 'one_global_engine_vs_one_league_engine',
+        'globalModelId': globalModelId,
+        'eligibleMatches': audit.eligible,
+        'excludedMatches': audit.notEligible,
+        'challengersCreated': challengersCreated,
+        'leagueEngineStatuses': statuses,
+      },
+    );
+  }
+
+  /// Historischer Markt-für-Markt-Pfad. Er bleibt ausschließlich für
+  /// bestehende Auswertungen lesbar; neue Learning Runs benutzen
+  /// [_runSteps] und erzeugen komplette Liga-Engines.
+  Future<_RunResult> runLegacyMarketStepsForMigration(
+    int runId,
+    _ResumeState? resumeState,
+  ) async {
     final datasetBuilder = LearningDatasetBuilder(
       database: database,
       config: config,
@@ -376,197 +615,390 @@ class LearningRunService {
         }
 
         try {
+          // Schritt 5/6: Trainingsdatensatz + Liga x Markt-Samples
+          // aktualisieren.
+          final samples = samplesByLeague[leagueId] ?? const [];
 
-        // Schritt 5/6: Trainingsdatensatz + Liga x Markt-Samples
-        // aktualisieren.
-        final samples = samplesByLeague[leagueId] ?? const [];
-
-        // Section 21/89: Learning-Flags je Fixture x Markt aktualisieren,
-        // damit die Model-Lab-UI exakt nachvollziehen kann, welches Match
-        // warum (nicht) eligible war.
-        for (final sample in samples) {
-          await database.upsertMatchLearningFlag(
-            fixtureId: sample.fixtureId,
-            leagueId: sample.leagueId,
-            market: market.key,
-            eligible: true,
-            dataQuality: sample.dataQuality,
-            snapshotTimestamp: sample.snapshotCreatedAt,
-            kickoff: sample.kickoff,
-          );
-        }
-
-        final eligibleSampleSize = samples.length;
-
-        // Schritt 8: League Champion laden (falls vorhanden).
-        final leagueChampion = await registry.currentChampion(
-          leagueId: leagueId,
-          market: market.key,
-        );
-        final existingChallengers = await registry.currentChallengers(
-          leagueId: leagueId,
-          market: market.key,
-        );
-
-        final status = classifyLeagueMarketStatus(
-          eligibleSampleSize: eligibleSampleSize,
-          hasLeagueChampion: leagueChampion != null,
-          hasLeagueChallengers: existingChallengers.isNotEmpty,
-          hasShadowPredictions: false,
-          config: config,
-        );
-
-        leagueStatusSummary.add({
-          'leagueId': leagueId,
-          'market': market.key,
-          'eligibleSampleSize': eligibleSampleSize,
-          'status': status.label,
-        });
-
-        // Section 8/93: unter der Schwelle wird NICHT künstlich trainiert.
-        if (status == LeagueMarketStatus.notEnoughData ||
-            status == LeagueMarketStatus.globalOnly) {
-          continue;
-        }
-
-        final split = ChronologicalSplit.split(samples, config);
-        if (split.validation.length < config.minValidationSample &&
-            split.holdout.length < config.minHoldoutSample) {
-          // Genug Samples fürs Grundkriterium, aber die zeitliche Aufteilung
-          // liefert noch keine belastbare Validation/Holdout-Menge - lieber
-          // in diesem Lauf noch keinen Challenger erzeugen als eine
-          // Bewertung auf Mini-Stichproben vorzutäuschen.
-          continue;
-        }
-
-        // Schritt 9: neue immutable Challenger erzeugen (Schritt 10: Walk-
-        // Forward Evaluation, Schritt 11: Holdout aktualisieren).
-        final generation = await registry.nextGeneration(
-          leagueId: leagueId,
-          market: market.key,
-        );
-        final baselineModel =
-            leagueChampion ?? await database.championModel(leagueId: null, market: market.key) ??
-                await database.globalBaselineModel(market.key);
-        if (baselineModel == null) continue;
-        // Seit `activateGlobalMarketChampion` (Claude AN2.txt Section 59)
-        // ist der globale Champion nicht mehr zwingend attackWeight-basiert
-        // - `modelEngine()` erkennt die tatsächlich verwendete Formel.
-        final championEngine = registry.modelEngine(baselineModel);
-        final championId = baselineModel['id'] as int;
-
-        // Section GLOBAL_GOALS_V1: zusätzlich zum attackWeight-Gitter EIN
-        // deterministischer Challenger mit dem sechs-Feature-gewichteten
-        // GLOBAL_GOALS_V1-Modell (siehe `GlobalGoalsV1Engine`) - kein
-        // Suchraum nötig, da es keinen freien Parameter hat. Läuft VOR dem
-        // `remainingSlots`-Check unten, weil er ein eigenes, unabhängiges
-        // Budget hat (immer genau 1 pro Liga x Markt, nie mehr) und sonst
-        // nie erzeugt würde, sobald das attackWeight-Gitter bereits voll
-        // ist. Entsteht erst, sobald genug historische Fixtures dieser Liga
-        // einen Phase-2-Scan VOR ihrem Kickoff haben - das läuft erst seit
-        // Kurzem und nur budgetiert für Beobachtungsligen, ist also anfangs
-        // oft noch leer.
-        final ggv1Validation =
-            split.validation.where((s) => s.hasGlobalGoalsV1Data).toList();
-        final ggv1Holdout =
-            split.holdout.where((s) => s.hasGlobalGoalsV1Data).toList();
-        final hasGlobalGoalsV1Challenger = existingChallengers.any(
-          (c) =>
-              (c['weights'] as Map?)?['engineVersion'] ==
-              GlobalGoalsV1Engine.version,
-        );
-        if (!hasGlobalGoalsV1Challenger &&
-            (ggv1Validation.length >= config.minValidationSample ||
-                ggv1Holdout.length >= config.minHoldoutSample)) {
-          final ggv1ChallengerIndex = await registry.nextChallengerIndex(
-            leagueId: leagueId,
-            market: market.key,
-            generation: generation,
-          );
-          final ggv1Challenger =
-              await registry.createOrReuseGlobalGoalsV1Challenger(
-            leagueId: leagueId,
-            market: market.key,
-            generation: generation,
-            challengerIndex: ggv1ChallengerIndex,
-            sampleSize: eligibleSampleSize,
-            parentModelId: championId,
-            trainingStart:
-                split.training.isEmpty ? null : split.training.first.kickoff,
-            trainingEnd:
-                split.training.isEmpty ? null : split.training.last.kickoff,
-            trainingCount: split.training.length,
-            validationCount: ggv1Validation.length,
-            holdoutCount: ggv1Holdout.length,
-          );
-          challengersCreated += 1;
-
-          await database.addLearningCandidate(
-            learningRunId: runId,
-            modelVersionId: ggv1Challenger.id,
-            leagueId: leagueId,
-            market: market.key,
-          );
-
-          if (ggv1Validation.isNotEmpty) {
-            await _persistComparison(
-              comparison: ChampionChallengerComparison.compare(
-                market: market,
-                leagueId: leagueId,
-                scopeSamples: ggv1Validation,
-                championEngine: championEngine,
-                challengerEngine: ggv1Challenger.engine,
-                config: config,
-              ),
-              evaluationType: 'walk_forward',
-              championModelId: championId,
-              challengerModelId: ggv1Challenger.id,
+          // Section 21/89: Learning-Flags je Fixture x Markt aktualisieren,
+          // damit die Model-Lab-UI exakt nachvollziehen kann, welches Match
+          // warum (nicht) eligible war.
+          for (final sample in samples) {
+            await database.upsertMatchLearningFlag(
+              fixtureId: sample.fixtureId,
+              leagueId: sample.leagueId,
+              market: market.key,
+              eligible: true,
+              dataQuality: sample.dataQuality,
+              snapshotTimestamp: sample.snapshotCreatedAt,
+              kickoff: sample.kickoff,
             );
           }
-          if (ggv1Holdout.isNotEmpty) {
-            await _persistComparison(
-              comparison: ChampionChallengerComparison.compare(
-                market: market,
-                leagueId: leagueId,
-                scopeSamples: ggv1Holdout,
-                championEngine: championEngine,
-                challengerEngine: ggv1Challenger.engine,
-                config: config,
-              ),
-              evaluationType: 'holdout',
-              championModelId: championId,
-              challengerModelId: ggv1Challenger.id,
-            );
-          }
-        }
 
-        // Section 10-12 (Claude AN2.txt): mindestens 4 benannte,
-        // nachvollziehbare Challenger-Hypothesen je Marktfamilie statt
-        // eines blinden Zahlengitters (siehe `GlobalMarketHypothesis`).
-        // Gleiches Muster wie der GLOBAL_GOALS_V1-Block oben: eigenes,
-        // unabhängiges Budget (max. 4 pro Liga x Markt, eine je Hypothese),
-        // läuft unabhängig vom attackWeight-Gitter-Budget unten.
-        final globalMarketValidation =
-            split.validation.where((s) => s.hasGlobalMarketData).toList();
-        final globalMarketHoldout =
-            split.holdout.where((s) => s.hasGlobalMarketData).toList();
-        if (globalMarketValidation.length >= config.minValidationSample ||
-            globalMarketHoldout.length >= config.minHoldoutSample) {
-          final existingHypotheses = existingChallengers
-              .map((c) => (c['weights'] as Map?)?['hypothesis']?.toString())
-              .whereType<String>()
+          final eligibleSampleSize = samples.length;
+
+          // Schritt 8: League Champion laden (falls vorhanden).
+          final leagueChampion = await registry.currentChampion(
+            leagueId: leagueId,
+            market: market.key,
+          );
+          final existingChallengers = await registry.currentChallengers(
+            leagueId: leagueId,
+            market: market.key,
+          );
+
+          final status = classifyLeagueMarketStatus(
+            eligibleSampleSize: eligibleSampleSize,
+            hasLeagueChampion: leagueChampion != null,
+            hasLeagueChallengers: existingChallengers.isNotEmpty,
+            hasShadowPredictions: false,
+            config: config,
+          );
+
+          leagueStatusSummary.add({
+            'leagueId': leagueId,
+            'market': market.key,
+            'eligibleSampleSize': eligibleSampleSize,
+            'status': status.label,
+          });
+
+          // Section 8/93: unter der Schwelle wird NICHT künstlich trainiert.
+          if (status == LeagueMarketStatus.notEnoughData ||
+              status == LeagueMarketStatus.globalOnly) {
+            continue;
+          }
+
+          final split = ChronologicalSplit.split(samples, config);
+          if (split.validation.length < config.minValidationSample &&
+              split.holdout.length < config.minHoldoutSample) {
+            // Genug Samples fürs Grundkriterium, aber die zeitliche Aufteilung
+            // liefert noch keine belastbare Validation/Holdout-Menge - lieber
+            // in diesem Lauf noch keinen Challenger erzeugen als eine
+            // Bewertung auf Mini-Stichproben vorzutäuschen.
+            continue;
+          }
+
+          // Schritt 9: neue immutable Challenger erzeugen (Schritt 10: Walk-
+          // Forward Evaluation, Schritt 11: Holdout aktualisieren).
+          final generation = await registry.nextGeneration(
+            leagueId: leagueId,
+            market: market.key,
+          );
+          final baselineModel = leagueChampion ??
+              await database.championModel(
+                  leagueId: null, market: market.key) ??
+              await database.globalBaselineModel(market.key);
+          if (baselineModel == null) continue;
+          // Seit `activateGlobalMarketChampion` (Claude AN2.txt Section 59)
+          // ist der globale Champion nicht mehr zwingend attackWeight-basiert
+          // - `modelEngine()` erkennt die tatsächlich verwendete Formel.
+          final championEngine = registry.modelEngine(baselineModel);
+          final championId = baselineModel['id'] as int;
+
+          // Section GLOBAL_GOALS_V1: zusätzlich zum attackWeight-Gitter EIN
+          // deterministischer Challenger mit dem sechs-Feature-gewichteten
+          // GLOBAL_GOALS_V1-Modell (siehe `GlobalGoalsV1Engine`) - kein
+          // Suchraum nötig, da es keinen freien Parameter hat. Läuft VOR dem
+          // `remainingSlots`-Check unten, weil er ein eigenes, unabhängiges
+          // Budget hat (immer genau 1 pro Liga x Markt, nie mehr) und sonst
+          // nie erzeugt würde, sobald das attackWeight-Gitter bereits voll
+          // ist. Entsteht erst, sobald genug historische Fixtures dieser Liga
+          // einen Phase-2-Scan VOR ihrem Kickoff haben - das läuft erst seit
+          // Kurzem und nur budgetiert für Beobachtungsligen, ist also anfangs
+          // oft noch leer.
+          final ggv1Validation =
+              split.validation.where((s) => s.hasGlobalGoalsV1Data).toList();
+          final ggv1Holdout =
+              split.holdout.where((s) => s.hasGlobalGoalsV1Data).toList();
+          final hasGlobalGoalsV1Challenger = existingChallengers.any(
+            (c) =>
+                (c['weights'] as Map?)?['engineVersion'] ==
+                GlobalGoalsV1Engine.version,
+          );
+          if (!hasGlobalGoalsV1Challenger &&
+              (ggv1Validation.length >= config.minValidationSample ||
+                  ggv1Holdout.length >= config.minHoldoutSample)) {
+            final ggv1ChallengerIndex = await registry.nextChallengerIndex(
+              leagueId: leagueId,
+              market: market.key,
+              generation: generation,
+            );
+            final ggv1Challenger =
+                await registry.createOrReuseGlobalGoalsV1Challenger(
+              leagueId: leagueId,
+              market: market.key,
+              generation: generation,
+              challengerIndex: ggv1ChallengerIndex,
+              sampleSize: eligibleSampleSize,
+              parentModelId: championId,
+              trainingStart:
+                  split.training.isEmpty ? null : split.training.first.kickoff,
+              trainingEnd:
+                  split.training.isEmpty ? null : split.training.last.kickoff,
+              trainingCount: split.training.length,
+              validationCount: ggv1Validation.length,
+              holdoutCount: ggv1Holdout.length,
+            );
+            challengersCreated += 1;
+
+            await database.addLearningCandidate(
+              learningRunId: runId,
+              modelVersionId: ggv1Challenger.id,
+              leagueId: leagueId,
+              market: market.key,
+            );
+
+            if (ggv1Validation.isNotEmpty) {
+              await _persistComparison(
+                comparison: ChampionChallengerComparison.compare(
+                  market: market,
+                  leagueId: leagueId,
+                  scopeSamples: ggv1Validation,
+                  championEngine: championEngine,
+                  challengerEngine: ggv1Challenger.engine,
+                  config: config,
+                ),
+                evaluationType: 'walk_forward',
+                championModelId: championId,
+                challengerModelId: ggv1Challenger.id,
+              );
+            }
+            if (ggv1Holdout.isNotEmpty) {
+              await _persistComparison(
+                comparison: ChampionChallengerComparison.compare(
+                  market: market,
+                  leagueId: leagueId,
+                  scopeSamples: ggv1Holdout,
+                  championEngine: championEngine,
+                  challengerEngine: ggv1Challenger.engine,
+                  config: config,
+                ),
+                evaluationType: 'holdout',
+                championModelId: championId,
+                challengerModelId: ggv1Challenger.id,
+              );
+            }
+          }
+
+          // Section 10-12 (Claude AN2.txt): mindestens 4 benannte,
+          // nachvollziehbare Challenger-Hypothesen je Marktfamilie statt
+          // eines blinden Zahlengitters (siehe `GlobalMarketHypothesis`).
+          // Gleiches Muster wie der GLOBAL_GOALS_V1-Block oben: eigenes,
+          // unabhängiges Budget (max. 4 pro Liga x Markt, eine je Hypothese),
+          // läuft unabhängig vom attackWeight-Gitter-Budget unten.
+          final globalMarketValidation =
+              split.validation.where((s) => s.hasGlobalMarketData).toList();
+          final globalMarketHoldout =
+              split.holdout.where((s) => s.hasGlobalMarketData).toList();
+          if (globalMarketValidation.length >= config.minValidationSample ||
+              globalMarketHoldout.length >= config.minHoldoutSample) {
+            final existingHypotheses = existingChallengers
+                .map((c) => (c['weights'] as Map?)?['hypothesis']?.toString())
+                .whereType<String>()
+                .toSet();
+            for (final hypothesis in GlobalMarketHypothesis.values) {
+              if (existingHypotheses.contains(hypothesis.key)) continue;
+              final challengerIndex = await registry.nextChallengerIndex(
+                leagueId: leagueId,
+                market: market.key,
+                generation: generation,
+              );
+              final challenger =
+                  await registry.createOrReuseGlobalMarketChallenger(
+                leagueId: leagueId,
+                market: market,
+                hypothesis: hypothesis,
+                generation: generation,
+                challengerIndex: challengerIndex,
+                sampleSize: eligibleSampleSize,
+                parentModelId: championId,
+                trainingStart: split.training.isEmpty
+                    ? null
+                    : split.training.first.kickoff,
+                trainingEnd:
+                    split.training.isEmpty ? null : split.training.last.kickoff,
+                trainingCount: split.training.length,
+                validationCount: globalMarketValidation.length,
+                holdoutCount: globalMarketHoldout.length,
+              );
+              challengersCreated += 1;
+
+              await database.addLearningCandidate(
+                learningRunId: runId,
+                modelVersionId: challenger.id,
+                leagueId: leagueId,
+                market: market.key,
+              );
+
+              if (globalMarketValidation.isNotEmpty) {
+                await _persistComparison(
+                  comparison: ChampionChallengerComparison.compare(
+                    market: market,
+                    leagueId: leagueId,
+                    scopeSamples: globalMarketValidation,
+                    championEngine: championEngine,
+                    challengerEngine: challenger.engine,
+                    config: config,
+                  ),
+                  evaluationType: 'walk_forward',
+                  championModelId: championId,
+                  challengerModelId: challenger.id,
+                );
+              }
+              if (globalMarketHoldout.isNotEmpty) {
+                await _persistComparison(
+                  comparison: ChampionChallengerComparison.compare(
+                    market: market,
+                    leagueId: leagueId,
+                    scopeSamples: globalMarketHoldout,
+                    championEngine: championEngine,
+                    challengerEngine: challenger.engine,
+                    config: config,
+                  ),
+                  evaluationType: 'holdout',
+                  championModelId: championId,
+                  challengerModelId: challenger.id,
+                );
+              }
+            }
+          }
+
+          // PHÖNIX Engine-Umbau Phase 1 Spur A (Plan "wild-cuddling-hoare",
+          // 2026-08-26): Dixon-Coles-Korrelationsausgleich als eigene,
+          // benannte Challenger-Hypothesen (Section 4/10-12, Claude AN2.txt).
+          // Nutzt dieselben, immer verfügbaren attackWeightBlend-Features wie
+          // das attackWeight-Gitter unten - eigenes, unabhängiges Budget (max.
+          // `DixonColesEngine.rhoCandidates.length` pro Liga x Markt), läuft
+          // unabhängig vom attackWeight-Gitter-Budget unten. Bleibt reiner
+          // Model-Lab-Schatten-Betrieb (PHOENIX_MODEL_PROMOTION_ENABLED),
+          // portiert NICHT die produktive Simulation.
+          if (split.validation.length >= perLeagueEngineMinSample ||
+              split.holdout.length >= perLeagueEngineMinSample) {
+            final existingRhos = existingChallengers
+                .map((c) => (c['weights'] as Map?)?['rho'])
+                .whereType<num>()
+                .map((rho) => rho.toDouble())
+                .toSet();
+            for (final rho in DixonColesEngine.rhoCandidates) {
+              if (existingRhos.contains(rho)) continue;
+              final challengerIndex = await registry.nextChallengerIndex(
+                leagueId: leagueId,
+                market: market.key,
+                generation: generation,
+              );
+              final dixonColesChallenger =
+                  await registry.createOrReuseDixonColesChallenger(
+                leagueId: leagueId,
+                market: market,
+                rho: rho,
+                generation: generation,
+                challengerIndex: challengerIndex,
+                sampleSize: eligibleSampleSize,
+                parentModelId: championId,
+                trainingStart: split.training.isEmpty
+                    ? null
+                    : split.training.first.kickoff,
+                trainingEnd:
+                    split.training.isEmpty ? null : split.training.last.kickoff,
+                trainingCount: split.training.length,
+                validationCount: split.validation.length,
+                holdoutCount: split.holdout.length,
+              );
+              challengersCreated += 1;
+
+              await database.addLearningCandidate(
+                learningRunId: runId,
+                modelVersionId: dixonColesChallenger.id,
+                leagueId: leagueId,
+                market: market.key,
+              );
+
+              if (split.validation.isNotEmpty) {
+                await _persistComparison(
+                  comparison: ChampionChallengerComparison.compare(
+                    market: market,
+                    leagueId: leagueId,
+                    scopeSamples: split.validation,
+                    championEngine: championEngine,
+                    challengerEngine: dixonColesChallenger.engine,
+                    config: config,
+                  ),
+                  evaluationType: 'walk_forward',
+                  championModelId: championId,
+                  challengerModelId: dixonColesChallenger.id,
+                );
+              }
+              if (split.holdout.isNotEmpty) {
+                await _persistComparison(
+                  comparison: ChampionChallengerComparison.compare(
+                    market: market,
+                    leagueId: leagueId,
+                    scopeSamples: split.holdout,
+                    championEngine: championEngine,
+                    challengerEngine: dixonColesChallenger.engine,
+                    config: config,
+                  ),
+                  evaluationType: 'holdout',
+                  championModelId: championId,
+                  challengerModelId: dixonColesChallenger.id,
+                );
+              }
+            }
+          }
+
+          // PHÖNIX Engine-Umbau Phase 2/3 (Plan "wild-cuddling-hoare", Live-
+          // Backtests: Team-Stärke mit Shrinkage-Regularisierung 9 Ligen,
+          // Ø Brier -7,3% ggü. einfachem Durchschnitt; Zeitverfall-
+          // Halbwertszeit-Grid-Search auf denselben Daten zeigte einen
+          // kleinen, aber sauber monotonen Vorteil für kürzere Halbwertszeiten
+          // - zu klein für eine feste Entscheidung, deshalb hier als eigener,
+          // benannter Challenger neben dem Kontrollwert getestet statt
+          // übernommen). Eigenes, unabhängiges Budget (max.
+          // `teamStrengthHalfLifeCandidates.length` pro Liga x Markt), läuft
+          // unabhängig vom attackWeight-Gitter-Budget unten.
+          final existingTeamStrengthHalfLives = existingChallengers
+              .where((c) =>
+                  (c['weights'] as Map?)?['engineVersion'] ==
+                  TeamStrengthEngine.version)
+              .map((c) => (c['feature_config'] as Map?)?['halfLifeDays'])
               .toSet();
-          for (final hypothesis in GlobalMarketHypothesis.values) {
-            if (existingHypotheses.contains(hypothesis.key)) continue;
+          for (final halfLifeDays in teamStrengthHalfLifeCandidates) {
+            if (existingTeamStrengthHalfLives.contains(halfLifeDays)) continue;
+
+            final teamStrengthFit = await _teamStrengthFitFor(
+              leagueId: leagueId,
+              split: split,
+              halfLifeDays: halfLifeDays,
+              trainingDataCache: teamStrengthTrainingDataByLeague,
+              fitCache: teamStrengthFitsByLeagueAndHalfLife,
+              globalEloPriorCache: teamStrengthGlobalEloPriorCache,
+              leaguePriorCache: teamStrengthLeaguePriorCache,
+            );
+            // Nur mit konvergiertem Fit als Challenger anlegen - ein
+            // nicht-konvergierter Fit ist nicht vertrauenswürdig (live
+            // beobachtet: ohne Regularisierung 6 von 9 Ligen ohne Konvergenz,
+            // deutlich schlechter als der einfache Durchschnitt).
+            if (teamStrengthFit == null || !teamStrengthFit.converged) continue;
+
+            final teamStrengthValidation =
+                split.validation.where((s) => s.hasGlobalMarketData).toList();
+            final teamStrengthHoldout =
+                split.holdout.where((s) => s.hasGlobalMarketData).toList();
+            if (teamStrengthValidation.length < perLeagueEngineMinSample &&
+                teamStrengthHoldout.length < perLeagueEngineMinSample) {
+              continue;
+            }
+
             final challengerIndex = await registry.nextChallengerIndex(
               leagueId: leagueId,
               market: market.key,
               generation: generation,
             );
-            final challenger = await registry.createOrReuseGlobalMarketChallenger(
+            final teamStrengthChallenger =
+                await registry.createOrReuseTeamStrengthChallenger(
               leagueId: leagueId,
               market: market,
-              hypothesis: hypothesis,
+              fit: teamStrengthFit,
+              halfLifeDays: halfLifeDays,
               generation: generation,
               challengerIndex: challengerIndex,
               sampleSize: eligibleSampleSize,
@@ -576,81 +1008,71 @@ class LearningRunService {
               trainingEnd:
                   split.training.isEmpty ? null : split.training.last.kickoff,
               trainingCount: split.training.length,
-              validationCount: globalMarketValidation.length,
-              holdoutCount: globalMarketHoldout.length,
+              validationCount: teamStrengthValidation.length,
+              holdoutCount: teamStrengthHoldout.length,
             );
             challengersCreated += 1;
 
             await database.addLearningCandidate(
               learningRunId: runId,
-              modelVersionId: challenger.id,
+              modelVersionId: teamStrengthChallenger.id,
               leagueId: leagueId,
               market: market.key,
             );
 
-            if (globalMarketValidation.isNotEmpty) {
+            if (teamStrengthValidation.isNotEmpty) {
               await _persistComparison(
                 comparison: ChampionChallengerComparison.compare(
                   market: market,
                   leagueId: leagueId,
-                  scopeSamples: globalMarketValidation,
+                  scopeSamples: teamStrengthValidation,
                   championEngine: championEngine,
-                  challengerEngine: challenger.engine,
+                  challengerEngine: teamStrengthChallenger.engine,
                   config: config,
                 ),
                 evaluationType: 'walk_forward',
                 championModelId: championId,
-                challengerModelId: challenger.id,
+                challengerModelId: teamStrengthChallenger.id,
               );
             }
-            if (globalMarketHoldout.isNotEmpty) {
+            if (teamStrengthHoldout.isNotEmpty) {
               await _persistComparison(
                 comparison: ChampionChallengerComparison.compare(
                   market: market,
                   leagueId: leagueId,
-                  scopeSamples: globalMarketHoldout,
+                  scopeSamples: teamStrengthHoldout,
                   championEngine: championEngine,
-                  challengerEngine: challenger.engine,
+                  challengerEngine: teamStrengthChallenger.engine,
                   config: config,
                 ),
                 evaluationType: 'holdout',
                 championModelId: championId,
-                challengerModelId: challenger.id,
+                challengerModelId: teamStrengthChallenger.id,
               );
             }
           }
-        }
 
-        // PHÖNIX Engine-Umbau Phase 1 Spur A (Plan "wild-cuddling-hoare",
-        // 2026-08-26): Dixon-Coles-Korrelationsausgleich als eigene,
-        // benannte Challenger-Hypothesen (Section 4/10-12, Claude AN2.txt).
-        // Nutzt dieselben, immer verfügbaren attackWeightBlend-Features wie
-        // das attackWeight-Gitter unten - eigenes, unabhängiges Budget (max.
-        // `DixonColesEngine.rhoCandidates.length` pro Liga x Markt), läuft
-        // unabhängig vom attackWeight-Gitter-Budget unten. Bleibt reiner
-        // Model-Lab-Schatten-Betrieb (PHOENIX_MODEL_PROMOTION_ENABLED),
-        // portiert NICHT die produktive Simulation.
-        if (split.validation.length >= perLeagueEngineMinSample ||
-            split.holdout.length >= perLeagueEngineMinSample) {
-          final existingRhos = existingChallengers
-              .map((c) => (c['weights'] as Map?)?['rho'])
-              .whereType<num>()
-              .map((rho) => rho.toDouble())
-              .toSet();
-          for (final rho in DixonColesEngine.rhoCandidates) {
-            if (existingRhos.contains(rho)) continue;
+          final grid = ChallengerGenerator.candidateAttackWeights(config);
+          // Die Challenger-Obergrenze ist ein echter Sicherheitsmechanismus,
+          // keine reine Konfigurations-Dokumentation. Ohne sie erzeugte jeder
+          // neue Lauf dieselben Varianten erneut bzw. meldete sie fälschlich
+          // als neu erstellt.
+          final remainingSlots =
+              config.maxChallengersPerLeagueMarket - existingChallengers.length;
+          if (remainingSlots <= 0) continue;
+          final candidates = grid.take(remainingSlots).toList(growable: false);
+          for (var i = 0; i < candidates.length; i++) {
             final challengerIndex = await registry.nextChallengerIndex(
               leagueId: leagueId,
               market: market.key,
               generation: generation,
             );
-            final dixonColesChallenger =
-                await registry.createOrReuseDixonColesChallenger(
+            final created = await registry.createOrReuseChallenger(
               leagueId: leagueId,
-              market: market,
-              rho: rho,
+              market: market.key,
               generation: generation,
               challengerIndex: challengerIndex,
+              rawWeights: EngineWeightConfig(attackWeight: candidates[i]),
               sampleSize: eligibleSampleSize,
               parentModelId: championId,
               trainingStart:
@@ -665,11 +1087,13 @@ class LearningRunService {
 
             await database.addLearningCandidate(
               learningRunId: runId,
-              modelVersionId: dixonColesChallenger.id,
+              modelVersionId: created.id,
               leagueId: leagueId,
               market: market.key,
             );
 
+            // Schritt 10/11/12: Walk-Forward-Evaluation auf Validation UND
+            // Holdout, Metriken speichern (paired, Section 42/43).
             if (split.validation.isNotEmpty) {
               await _persistComparison(
                 comparison: ChampionChallengerComparison.compare(
@@ -677,12 +1101,13 @@ class LearningRunService {
                   leagueId: leagueId,
                   scopeSamples: split.validation,
                   championEngine: championEngine,
-                  challengerEngine: dixonColesChallenger.engine,
+                  challengerEngine:
+                      ModelEngine.attackWeightBlend(created.weights),
                   config: config,
                 ),
                 evaluationType: 'walk_forward',
                 championModelId: championId,
-                challengerModelId: dixonColesChallenger.id,
+                challengerModelId: created.id,
               );
             }
             if (split.holdout.isNotEmpty) {
@@ -692,197 +1117,16 @@ class LearningRunService {
                   leagueId: leagueId,
                   scopeSamples: split.holdout,
                   championEngine: championEngine,
-                  challengerEngine: dixonColesChallenger.engine,
+                  challengerEngine:
+                      ModelEngine.attackWeightBlend(created.weights),
                   config: config,
                 ),
                 evaluationType: 'holdout',
                 championModelId: championId,
-                challengerModelId: dixonColesChallenger.id,
+                challengerModelId: created.id,
               );
             }
           }
-        }
-
-        // PHÖNIX Engine-Umbau Phase 2/3 (Plan "wild-cuddling-hoare", Live-
-        // Backtests: Team-Stärke mit Shrinkage-Regularisierung 9 Ligen,
-        // Ø Brier -7,3% ggü. einfachem Durchschnitt; Zeitverfall-
-        // Halbwertszeit-Grid-Search auf denselben Daten zeigte einen
-        // kleinen, aber sauber monotonen Vorteil für kürzere Halbwertszeiten
-        // - zu klein für eine feste Entscheidung, deshalb hier als eigener,
-        // benannter Challenger neben dem Kontrollwert getestet statt
-        // übernommen). Eigenes, unabhängiges Budget (max.
-        // `teamStrengthHalfLifeCandidates.length` pro Liga x Markt), läuft
-        // unabhängig vom attackWeight-Gitter-Budget unten.
-        final existingTeamStrengthHalfLives = existingChallengers
-            .where((c) =>
-                (c['weights'] as Map?)?['engineVersion'] ==
-                TeamStrengthEngine.version)
-            .map((c) => (c['feature_config'] as Map?)?['halfLifeDays'])
-            .toSet();
-        for (final halfLifeDays in teamStrengthHalfLifeCandidates) {
-          if (existingTeamStrengthHalfLives.contains(halfLifeDays)) continue;
-
-          final teamStrengthFit = await _teamStrengthFitFor(
-            leagueId: leagueId,
-            split: split,
-            halfLifeDays: halfLifeDays,
-            trainingDataCache: teamStrengthTrainingDataByLeague,
-            fitCache: teamStrengthFitsByLeagueAndHalfLife,
-            globalEloPriorCache: teamStrengthGlobalEloPriorCache,
-            leaguePriorCache: teamStrengthLeaguePriorCache,
-          );
-          // Nur mit konvergiertem Fit als Challenger anlegen - ein
-          // nicht-konvergierter Fit ist nicht vertrauenswürdig (live
-          // beobachtet: ohne Regularisierung 6 von 9 Ligen ohne Konvergenz,
-          // deutlich schlechter als der einfache Durchschnitt).
-          if (teamStrengthFit == null || !teamStrengthFit.converged) continue;
-
-          final teamStrengthValidation =
-              split.validation.where((s) => s.hasGlobalMarketData).toList();
-          final teamStrengthHoldout =
-              split.holdout.where((s) => s.hasGlobalMarketData).toList();
-          if (teamStrengthValidation.length < perLeagueEngineMinSample &&
-              teamStrengthHoldout.length < perLeagueEngineMinSample) {
-            continue;
-          }
-
-          final challengerIndex = await registry.nextChallengerIndex(
-            leagueId: leagueId,
-            market: market.key,
-            generation: generation,
-          );
-          final teamStrengthChallenger =
-              await registry.createOrReuseTeamStrengthChallenger(
-            leagueId: leagueId,
-            market: market,
-            fit: teamStrengthFit,
-            halfLifeDays: halfLifeDays,
-            generation: generation,
-            challengerIndex: challengerIndex,
-            sampleSize: eligibleSampleSize,
-            parentModelId: championId,
-            trainingStart:
-                split.training.isEmpty ? null : split.training.first.kickoff,
-            trainingEnd:
-                split.training.isEmpty ? null : split.training.last.kickoff,
-            trainingCount: split.training.length,
-            validationCount: teamStrengthValidation.length,
-            holdoutCount: teamStrengthHoldout.length,
-          );
-          challengersCreated += 1;
-
-          await database.addLearningCandidate(
-            learningRunId: runId,
-            modelVersionId: teamStrengthChallenger.id,
-            leagueId: leagueId,
-            market: market.key,
-          );
-
-          if (teamStrengthValidation.isNotEmpty) {
-            await _persistComparison(
-              comparison: ChampionChallengerComparison.compare(
-                market: market,
-                leagueId: leagueId,
-                scopeSamples: teamStrengthValidation,
-                championEngine: championEngine,
-                challengerEngine: teamStrengthChallenger.engine,
-                config: config,
-              ),
-              evaluationType: 'walk_forward',
-              championModelId: championId,
-              challengerModelId: teamStrengthChallenger.id,
-            );
-          }
-          if (teamStrengthHoldout.isNotEmpty) {
-            await _persistComparison(
-              comparison: ChampionChallengerComparison.compare(
-                market: market,
-                leagueId: leagueId,
-                scopeSamples: teamStrengthHoldout,
-                championEngine: championEngine,
-                challengerEngine: teamStrengthChallenger.engine,
-                config: config,
-              ),
-              evaluationType: 'holdout',
-              championModelId: championId,
-              challengerModelId: teamStrengthChallenger.id,
-            );
-          }
-        }
-
-        final grid = ChallengerGenerator.candidateAttackWeights(config);
-        // Die Challenger-Obergrenze ist ein echter Sicherheitsmechanismus,
-        // keine reine Konfigurations-Dokumentation. Ohne sie erzeugte jeder
-        // neue Lauf dieselben Varianten erneut bzw. meldete sie fälschlich
-        // als neu erstellt.
-        final remainingSlots =
-            config.maxChallengersPerLeagueMarket - existingChallengers.length;
-        if (remainingSlots <= 0) continue;
-        final candidates = grid.take(remainingSlots).toList(growable: false);
-        for (var i = 0; i < candidates.length; i++) {
-          final challengerIndex = await registry.nextChallengerIndex(
-            leagueId: leagueId,
-            market: market.key,
-            generation: generation,
-          );
-          final created = await registry.createOrReuseChallenger(
-            leagueId: leagueId,
-            market: market.key,
-            generation: generation,
-            challengerIndex: challengerIndex,
-            rawWeights: EngineWeightConfig(attackWeight: candidates[i]),
-            sampleSize: eligibleSampleSize,
-            parentModelId: championId,
-            trainingStart:
-                split.training.isEmpty ? null : split.training.first.kickoff,
-            trainingEnd:
-                split.training.isEmpty ? null : split.training.last.kickoff,
-            trainingCount: split.training.length,
-            validationCount: split.validation.length,
-            holdoutCount: split.holdout.length,
-          );
-          challengersCreated += 1;
-
-          await database.addLearningCandidate(
-            learningRunId: runId,
-            modelVersionId: created.id,
-            leagueId: leagueId,
-            market: market.key,
-          );
-
-          // Schritt 10/11/12: Walk-Forward-Evaluation auf Validation UND
-          // Holdout, Metriken speichern (paired, Section 42/43).
-          if (split.validation.isNotEmpty) {
-            await _persistComparison(
-              comparison: ChampionChallengerComparison.compare(
-                market: market,
-                leagueId: leagueId,
-                scopeSamples: split.validation,
-                championEngine: championEngine,
-                challengerEngine: ModelEngine.attackWeightBlend(created.weights),
-                config: config,
-              ),
-              evaluationType: 'walk_forward',
-              championModelId: championId,
-              challengerModelId: created.id,
-            );
-          }
-          if (split.holdout.isNotEmpty) {
-            await _persistComparison(
-              comparison: ChampionChallengerComparison.compare(
-                market: market,
-                leagueId: leagueId,
-                scopeSamples: split.holdout,
-                championEngine: championEngine,
-                challengerEngine: ModelEngine.attackWeightBlend(created.weights),
-                config: config,
-              ),
-              evaluationType: 'holdout',
-              championModelId: championId,
-              challengerModelId: created.id,
-            );
-          }
-        }
         } finally {
           leagueMarketPairsProcessed += 1;
           processedLeagueIds.add(leagueId);
@@ -965,7 +1209,8 @@ class LearningRunService {
       return 0;
     }
 
-    final globalChampionModel = await database.championModel(leagueId: null, market: market.key);
+    final globalChampionModel =
+        await database.championModel(leagueId: null, market: market.key);
     if (globalChampionModel == null) return 0;
     final globalChampionId = globalChampionModel['id'] as int;
     final globalChampionEngine = registry.modelEngine(globalChampionModel);
@@ -986,7 +1231,8 @@ class LearningRunService {
       challengerIndex: challengerIndex,
       sampleSize: pooled.length,
       parentModelId: globalChampionId,
-      trainingStart: split.training.isEmpty ? null : split.training.first.kickoff,
+      trainingStart:
+          split.training.isEmpty ? null : split.training.first.kickoff,
       trainingEnd: split.training.isEmpty ? null : split.training.last.kickoff,
       trainingCount: split.training.length,
       validationCount: split.validation.length,
@@ -1072,12 +1318,14 @@ class LearningRunService {
       return 0;
     }
 
-    final globalChampionModel = await database.championModel(leagueId: null, market: market.key);
+    final globalChampionModel =
+        await database.championModel(leagueId: null, market: market.key);
     if (globalChampionModel == null) return 0;
     final globalChampionId = globalChampionModel['id'] as int;
     final globalChampionEngine = registry.modelEngine(globalChampionModel);
 
-    final generation = await registry.nextGeneration(leagueId: null, market: market.key);
+    final generation =
+        await registry.nextGeneration(leagueId: null, market: market.key);
     var created = 0;
     for (final hypothesis in remainingHypotheses) {
       final challengerIndex = await registry.nextChallengerIndex(
@@ -1093,8 +1341,10 @@ class LearningRunService {
         challengerIndex: challengerIndex,
         sampleSize: pooled.length,
         parentModelId: globalChampionId,
-        trainingStart: split.training.isEmpty ? null : split.training.first.kickoff,
-        trainingEnd: split.training.isEmpty ? null : split.training.last.kickoff,
+        trainingStart:
+            split.training.isEmpty ? null : split.training.first.kickoff,
+        trainingEnd:
+            split.training.isEmpty ? null : split.training.last.kickoff,
         trainingCount: split.training.length,
         validationCount: split.validation.length,
         holdoutCount: split.holdout.length,
@@ -1411,8 +1661,10 @@ class LearningRunService {
   }) async {
     const cacheKey = '__GLOBAL__';
     if (trainingDataCache.containsKey(cacheKey)) {
-      return trainingDataCache[cacheKey]
-          as ({List<MatchResult> matches, DateTime asOf})?;
+      return trainingDataCache[cacheKey] as ({
+        List<MatchResult> matches,
+        DateTime asOf
+      })?;
     }
 
     final evaluatedSamples =
@@ -1506,7 +1758,8 @@ class LearningRunService {
   /// Holdout) - einmal pro Liga, unabhängig von der Halbwertszeit, damit
   /// mehrere Halbwertszeit-Kandidaten (siehe [_teamStrengthFitFor]) sich
   /// dieselbe Datenbank-Abfrage teilen statt sie zu wiederholen.
-  Future<({List<MatchResult> matches, DateTime asOf})?> _teamStrengthTrainingDataFor({
+  Future<({List<MatchResult> matches, DateTime asOf})?>
+      _teamStrengthTrainingDataFor({
     required String leagueId,
     required ChronologicalSplit split,
     required Map<String, ({List<MatchResult> matches, DateTime asOf})?> cache,
@@ -1606,8 +1859,7 @@ class LearningRunService {
   /// vor dem Beginn von Validation/Holdout bekannt waren. Der Koeffizient
   /// wird über alle bis dahin verfügbaren, liga-normalisierten historischen
   /// Beobachtungen gefittet; die Anwendung selbst bleibt liga-relativ.
-  Future<Map<String, ({double attack, double defense})>>
-      _eloPriorsForTraining({
+  Future<Map<String, ({double attack, double defense})>> _eloPriorsForTraining({
     required String leagueId,
     required ({List<MatchResult> matches, DateTime asOf}) trainingData,
     required Map<DateTime, EloPrior> globalEloPriorCache,
@@ -1690,8 +1942,8 @@ class LearningRunService {
             entry.key: entry.value / eloCount[entry.key]!,
       };
       if (meanEloByTeam.length < 2) continue;
-      final leagueMean = meanEloByTeam.values.reduce((a, b) => a + b) /
-          meanEloByTeam.length;
+      final leagueMean =
+          meanEloByTeam.values.reduce((a, b) => a + b) / meanEloByTeam.length;
       observations.addAll(EloPrior.standardize([
         for (final entry in meanEloByTeam.entries)
           (
