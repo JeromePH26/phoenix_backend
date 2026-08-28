@@ -42,6 +42,7 @@ class ApiRoutes {
     required this.football,
     required this.tennis,
     required this.news,
+    this.isDatabaseInitializing,
     ModelLabConfig? modelLabConfig,
   }) : modelLabConfig = modelLabConfig ?? ModelLabConfig.fromEnvironment();
 
@@ -50,6 +51,7 @@ class ApiRoutes {
   final FootballService football;
   final TennisService tennis;
   final FootballNewsService news;
+  final bool Function()? isDatabaseInitializing;
   final ModelLabConfig modelLabConfig;
   bool _leagueCatalogSyncInProgress = false;
 
@@ -2047,6 +2049,12 @@ class ApiRoutes {
     router.post('/api/admin/football/daily-scan', (Request request) async {
       if (!_isAdmin(request)) {
         return jsonResponse({'error': 'Nicht autorisiert.'}, statusCode: 401);
+      }
+      if (isDatabaseInitializing?.call() == true) {
+        return jsonResponse({
+          'error':
+              'PHÖNIX startet noch. Bitte den Tagesscan in wenigen Sekunden erneut ausführen.',
+        }, statusCode: 503);
       }
 
       final dateText = request.url.queryParameters['date'];

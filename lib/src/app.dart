@@ -46,6 +46,13 @@ class PhoenixBackend {
   final FootballNewsService news;
   final PushScheduleService pushSchedule;
   final FootballOddsRecheckService oddsRecheck;
+  bool _databaseInitializing = false;
+
+  /// Der HTTP-Server darf für den Railway-Healthcheck schon erreichbar sein,
+  /// während idempotente Migrationen/Bootstraps laufen. Hintergrundjobs dürfen
+  /// in diesem schmalen Zeitfenster aber noch nicht angelegt werden: Die
+  /// Recovery-Routine markiert alte Jobs sonst kurz darauf als abgebrochen.
+  bool get isDatabaseInitializing => _databaseInitializing;
 
   static Future<PhoenixBackend> create() async {
     final config = AppConfig.fromEnvironment();
@@ -79,12 +86,14 @@ class PhoenixBackend {
       football: football,
     );
 
+    late final PhoenixBackend backend;
     final routes = ApiRoutes(
       config: config,
       database: database,
       football: football,
       tennis: tennis,
       news: news,
+      isDatabaseInitializing: () => backend.isDatabaseInitializing,
     );
 
     final apiGuard = PhoenixApiGuard(
@@ -120,7 +129,7 @@ class PhoenixBackend {
     if (database.isConfigured) news.start();
     if (database.isConfigured && football.isConfigured) oddsRecheck.start();
 
-    return PhoenixBackend._(
+    backend = PhoenixBackend._(
       config: config,
       database: database,
       handler: pipeline,
@@ -131,9 +140,22 @@ class PhoenixBackend {
       pushSchedule: pushSchedule,
       oddsRecheck: oddsRecheck,
     );
+    return backend;
   }
 
   Future<HttpServer> serve() async {
+    // Vor dem Öffnen des Servers setzen, damit ein sofort eintreffender
+    // Admin-Request keinen Pipeline-Job zwischen Serverstart und Recovery
+    // erzeugen kann. Die Initialisierung selbst bleibt asynchron und blockiert
+    // somit weder das Binden des Ports noch Railways Healthcheck.
+    if (database.isConfigured) {
+      _databaseInitializing = true;
+      unawaited(
+        _initializeDatabase().whenComplete(() {
+          _databaseInitializing = false;
+        }),
+      );
+    }
     final server = await shelf_io.serve(
       handler,
       InternetAddress.anyIPv4,
@@ -141,13 +163,6 @@ class PhoenixBackend {
       shared: true,
     );
 
-    // Datenbank-Migrationen, Control-Center- und Model-Lab-Bootstrap dürfen
-    // niemals den Healthcheck blockieren. In Produktion ist das Schema
-    // bereits vorhanden; deshalb kann der Webserver zuerst gesund werden und
-    // die idempotente Initialisierung danach kontrolliert nachziehen.
-    if (database.isConfigured) {
-      unawaited(_initializeDatabase());
-    }
     return server;
   }
 
