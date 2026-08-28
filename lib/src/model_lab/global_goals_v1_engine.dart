@@ -5,9 +5,10 @@ import 'feature_renormalization.dart';
 import 'fixture_form_filter.dart';
 
 /// Section "GLOBAL GOALS V1": ein neues, gewichtetes Torerwartungs-Modell -
-/// komplett getrennt von der laufenden Produktions-Engine
-/// (`FootballEngineInputService`, unverändert). Wird ausschließlich für
-/// Shadow-/Vergleichszwecke aufgerufen, niemals von der täglichen Pipeline.
+/// als Kernsignal der globalen Produktions-Engine. Die resultierende
+/// Torerwartung wird im [PhoenixGlobalEngine] konservativ geglättet und –
+/// wenn Pre-Match-Quoten vorhanden sind – gegen den entviggten Markt-Konsens
+/// plausibilisiert.
 ///
 /// Nutzt NUR Signale, die tatsächlich real gespeichert sind (siehe
 /// `football_phase_two_results.availability`, dort insbesondere die
@@ -25,8 +26,7 @@ class GlobalGoalsV1Engine {
   /// - der Hash ist deshalb für jede Model-Lab-Instanz konstant. Die
   /// Eindeutigkeit pro Liga x Markt kommt aus dem Unique-Index auf
   /// `(market, league_id, config_hash)`, nicht aus diesem Hash selbst.
-  static String configHash() =>
-      sha256.convert(utf8.encode(version)).toString();
+  static String configHash() => sha256.convert(utf8.encode(version)).toString();
 
   /// Bootstrap-Gewichte aus der Aufgabenstellung. `shots`/`motivation` bleiben
   /// dauerhaft 0 (nicht implementiert), analog zu `lineups`/`xG` im Original.
@@ -53,8 +53,10 @@ class GlobalGoalsV1Engine {
     final homeStanding = _findTeamStanding(standingsRows, homeTeamId);
     final awayStanding = _findTeamStanding(standingsRows, awayTeamId);
 
-    final homeRecent = _recentGoalsPerGame(availability['homeRecentData'], homeTeamId);
-    final awayRecent = _recentGoalsPerGame(availability['awayRecentData'], awayTeamId);
+    final homeRecent =
+        _recentGoalsPerGame(availability['homeRecentData'], homeTeamId);
+    final awayRecent =
+        _recentGoalsPerGame(availability['awayRecentData'], awayTeamId);
 
     final homeResult = combineWeightedFeatures([
       WeightedFeature(

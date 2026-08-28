@@ -252,6 +252,10 @@ class FootballEngineInputService {
           'usesGlobalFeatures': globalEngine.usesGlobalFeatures,
           'homeFeatureCoverage': globalEngine.homeFeatureCoverage,
           'awayFeatureCoverage': globalEngine.awayFeatureCoverage,
+          // Für jedes veröffentlichte Pre-Match-Modell nachvollziehbar:
+          // war der Buchmacher-Konsens vorhanden und wie stark hat er die
+          // gemeinsame Torverteilung plausibilisiert?
+          'marketCalibration': globalEngine.marketCalibration,
         },
       },
       'aiContext': context,

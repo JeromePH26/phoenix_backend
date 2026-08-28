@@ -348,7 +348,12 @@ class FootballService {
       'odds',
       '/odds',
       {'fixture': fixtureId},
-      retainRows: false,
+      // Die Quoten sind nicht nur ein Qualitäts-Flag: Die globale Engine
+      // nutzt den entviggten Marktkonsens als konservativen Plausibilitäts-
+      // anker. Der Abruf passiert ohnehin, deshalb werden die Rohzeilen für
+      // genau diesen Pre-Match-Snapshot mitgespeichert statt später einen
+      // zweiten Request auszulösen.
+      retainRows: true,
     );
 
     await checkList(

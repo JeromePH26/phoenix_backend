@@ -20,7 +20,7 @@ void main() {
       );
 
       expect(result.usesGlobalFeatures, isTrue);
-      expect(result.source, 'global_goals_v1');
+      expect(result.source, 'global_goals_v1_conservative');
       expect(result.expectedHome, greaterThan(0.2));
       expect(result.expectedAway, greaterThan(0.2));
     });
@@ -38,6 +38,55 @@ void main() {
       expect(result.source, 'global_safe_fallback');
       expect(result.expectedHome, 1.32);
       expect(result.expectedAway, 1.08);
+    });
+
+    test('anchors an overconfident model to the devigged 1X2 consensus', () {
+      final withoutOdds = PhoenixGlobalEngine.compute(
+        availability: const {
+          'homeGoalsForAverageHome': 1.8,
+          'awayGoalsAgainstAverageAway': 1.3,
+          'awayGoalsForAverageAway': 1.7,
+          'homeGoalsAgainstAverageHome': 1.4,
+        },
+        homeTeamId: 'home',
+        awayTeamId: 'away',
+        safeHomeFallback: 1.4,
+        safeAwayFallback: 1.2,
+      );
+      final withOdds = PhoenixGlobalEngine.compute(
+        availability: const {
+          'homeGoalsForAverageHome': 1.8,
+          'awayGoalsAgainstAverageAway': 1.3,
+          'awayGoalsForAverageAway': 1.7,
+          'homeGoalsAgainstAverageHome': 1.4,
+          'oddsData': [
+            {
+              'bookmakers': [
+                {
+                  'bets': [
+                    {
+                      'name': 'Match Winner',
+                      'values': [
+                        {'value': 'Home', 'odd': '1.35'},
+                        {'value': 'Draw', 'odd': '5.20'},
+                        {'value': 'Away', 'odd': '8.50'},
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+        homeTeamId: 'home',
+        awayTeamId: 'away',
+        safeHomeFallback: 1.4,
+        safeAwayFallback: 1.2,
+      );
+
+      expect(withOdds.marketCalibration['applied'], isTrue);
+      expect(withOdds.expectedHome, greaterThan(withoutOdds.expectedHome));
+      expect(withOdds.expectedAway, lessThan(withoutOdds.expectedAway));
     });
   });
 }
