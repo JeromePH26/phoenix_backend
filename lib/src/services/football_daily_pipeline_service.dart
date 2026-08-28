@@ -41,8 +41,16 @@ class FootballDailyPipelineService {
   // sampleSize 0-2) hatten unrealistisch hohe Wahrscheinlichkeiten. Aus
   // demselben Grund wie beim v10->v11-Schritt erneut hochgezählt, damit ein
   // Nachscan die korrigierten Werte tatsächlich veröffentlicht.
+  //
+  // v12 -> v13 (2026-08-28, Markt-Kalibrierung): GLOBAL_GOALS_V1 wird nicht
+  // mehr ungeglättet als komplette Torerwartung verwendet. Die globale
+  // Verteilung wird zuerst konservativ gegen die stabile Liga-Basis geführt
+  // und anschließend – falls vollständige 1X2-Quoten vorhanden sind – gegen
+  // den entviggten Buchmacher-Konsens plausibilisiert. Das ist ein echter
+  // Modellwechsel; deshalb darf ein Nachscan die alte v12-Momentaufnahme
+  // nicht als bereits veröffentlicht behandeln.
   static const publishedModelVersion =
-      'phoenix_daily_pipeline_v12_sample_size_shrinkage';
+      'phoenix_daily_pipeline_v13_market_calibrated';
 
   Future<void> run({
     required int jobId,
